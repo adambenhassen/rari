@@ -87,9 +87,6 @@ jobs:
         with:
           node-version: 22.14.0
 
-      - name: Setup pnpm
-        uses: pnpm/action-setup@v4
-
       - name: Download binaries
         uses: actions/download-artifact@v4
         with:
@@ -127,24 +124,6 @@ jobs:
 
           ls -la dist-tarballs
 
-      - name: Build rari JS tarball
-        run: |
-          set -euo pipefail
-          VERSION="${{ inputs.version }}"
-          pnpm install --frozen-lockfile
-          pnpm --filter "rari..." build
-          # Bump version and align optionalDependencies to the prerelease version.
-          node --input-type=module -e "
-            import { readFileSync, writeFileSync } from 'node:fs';
-            const f = 'packages/rari/package.json';
-            const p = JSON.parse(readFileSync(f, 'utf8'));
-            p.version = '${VERSION}';
-            for (const k of Object.keys(p.optionalDependencies ?? {})) p.optionalDependencies[k] = '${VERSION}';
-            writeFileSync(f, JSON.stringify(p, null, 2) + '\n');
-          "
-          (cd packages/rari && cp "${GITHUB_WORKSPACE}/LICENSE" LICENSE && pnpm pack --pack-destination "${GITHUB_WORKSPACE}/dist-tarballs")
-          ls -la dist-tarballs
-
       - name: Create prerelease
         env:
           GH_TOKEN: ${{ github.token }}
@@ -152,21 +131,36 @@ jobs:
           set -euo pipefail
           VERSION="${{ inputs.version }}"
           TAG="build-${VERSION}"
+          BASE="https://github.com/${GITHUB_REPOSITORY}/releases/download/${TAG}"
           NOTES_FILE="$(mktemp)"
           cat > "${NOTES_FILE}" <<EOF
           Patched rari build (Cache-Control on static/synchronous render paths) for hand-off.
 
-          Platforms: \`darwin-arm64\`, \`linux-x64\`. npm tarballs are version \`${VERSION}\`.
+          The fix is in the Rust binary only; the \`rari\` JS package is unchanged from
+          \`0.14.12\`. So use the official JS package and override just the patched binary.
+
+          Platforms: \`darwin-arm64\`, \`linux-x64\`. Patched binary tarballs are version \`${VERSION}\`.
 
           ## Install (in the consuming project)
 
-          Install the JS package and the matching platform binary package from the asset URLs below, e.g. on Apple Silicon:
+          Install the official JS wrapper, then force the patched platform binary via npm \`overrides\`.
+          Apple Silicon:
 
-          \`\`\`sh
-          npm install <rari-${VERSION}.tgz URL> <rari-darwin-arm64-${VERSION}.tgz URL>
+          \`\`\`jsonc
+          // package.json
+          "overrides": {
+            "rari-darwin-arm64": "${BASE}/rari-darwin-arm64-${VERSION}.tgz"
+          }
           \`\`\`
 
-          On Linux x64 use the \`rari-linux-x64-${VERSION}.tgz\` asset instead. Raw binaries are also attached.
+          \`\`\`sh
+          npm install rari@0.14.12 && npm install
+          \`\`\`
+
+          Linux x64: use \`"rari-linux-x64": "${BASE}/rari-linux-x64-${VERSION}.tgz"\` instead.
+
+          Raw binaries (\`rari-darwin-arm64\`, \`rari-linux-x64\`) are also attached if you prefer to
+          drop one into \`node_modules/rari-<platform>/bin/rari\` directly.
           EOF
 
           gh release create "${TAG}" \
