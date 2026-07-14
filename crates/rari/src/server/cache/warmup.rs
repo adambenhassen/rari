@@ -187,7 +187,7 @@ async fn warm_route(
             if matches!(enc, CompressionEncoding::Brotli) { Some(compressed) } else { None }
         };
 
-        state.static_fast_cache.insert(
+        state.static_fast_cache.lock().put(
             path.to_string(),
             Arc::new(response::PrebuiltResponse {
                 identity: body_bytes.clone(),

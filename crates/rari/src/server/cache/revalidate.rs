@@ -80,7 +80,7 @@ pub(crate) async fn invalidate_route_caches(
     state.response_cache.invalidate(path).await;
     state.response_cache.invalidate_by_tag(path).await;
     response::invalidate_static_fast_cache_for_path(&state.static_fast_cache, path);
-    state.html_cache.remove(path);
+    state.html_cache.lock().pop(path);
 
     if let Err(e) = invalidate_use_cache_entries(&state.renderer, None, Some(path)).await {
         tracing::warn!(error = %e, path = %path, "use cache invalidate failed during route cache invalidation");

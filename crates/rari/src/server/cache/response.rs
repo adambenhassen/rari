@@ -9,7 +9,7 @@ use std::{
 
 use axum::http::HeaderMap;
 use bytes::Bytes;
-use dashmap::DashMap;
+use lru::LruCache;
 use parking_lot::Mutex;
 
 use crate::{
@@ -93,22 +93,20 @@ impl CachedResponse {
 }
 
 pub fn invalidate_static_fast_cache_for_path(
-    cache: &DashMap<String, Arc<PrebuiltResponse>>,
+    cache: &Mutex<LruCache<String, Arc<PrebuiltResponse>>>,
     path: &str,
 ) {
-    cache.remove(path);
+    let mut cache = cache.lock();
+    cache.pop(path);
     let query_prefix = format!("{path}?");
     let hash_prefix = format!("{path}#");
     let keys: Vec<String> = cache
         .iter()
-        .filter(|entry| {
-            let key = entry.key();
-            key.starts_with(&query_prefix) || key.starts_with(&hash_prefix)
-        })
-        .map(|entry| entry.key().clone())
+        .filter(|(key, _)| key.starts_with(&query_prefix) || key.starts_with(&hash_prefix))
+        .map(|(key, _)| key.clone())
         .collect();
     for key in keys {
-        cache.remove(&key);
+        cache.pop(&key);
     }
 }
 
@@ -1104,7 +1102,8 @@ mod tests {
 
     #[test]
     fn test_invalidate_static_fast_cache_for_path() {
-        let cache: DashMap<String, Arc<PrebuiltResponse>> = DashMap::new();
+        let cache: Mutex<LruCache<String, Arc<PrebuiltResponse>>> =
+            Mutex::new(LruCache::unbounded());
         let body = Bytes::from("html");
         let make_entry = || {
             Arc::new(PrebuiltResponse {
@@ -1119,16 +1118,16 @@ mod tests {
             })
         };
 
-        cache.insert("/about".to_string(), make_entry());
-        cache.insert("/about?tab=1".to_string(), make_entry());
-        cache.insert("/about#cookie:abc123".to_string(), make_entry());
-        cache.insert("/other".to_string(), make_entry());
+        cache.lock().put("/about".to_string(), make_entry());
+        cache.lock().put("/about?tab=1".to_string(), make_entry());
+        cache.lock().put("/about#cookie:abc123".to_string(), make_entry());
+        cache.lock().put("/other".to_string(), make_entry());
 
         invalidate_static_fast_cache_for_path(&cache, "/about");
 
-        assert!(!cache.contains_key("/about"));
-        assert!(!cache.contains_key("/about?tab=1"));
-        assert!(!cache.contains_key("/about#cookie:abc123"));
-        assert!(cache.contains_key("/other"));
+        assert!(!cache.lock().contains("/about"));
+        assert!(!cache.lock().contains("/about?tab=1"));
+        assert!(!cache.lock().contains("/about#cookie:abc123"));
+        assert!(cache.lock().contains("/other"));
     }
 }

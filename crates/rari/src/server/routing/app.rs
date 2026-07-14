@@ -870,7 +870,7 @@ pub async fn render_fallback_html(
 
     if fs::try_exists(&index_path).await.unwrap_or(false) {
         if state.config.is_production()
-            && let Some(cached_html) = state.html_cache.get(path)
+            && let Some(cached_html) = state.html_cache.lock().get(path).cloned()
         {
             let html = cached_html.clone();
             #[expect(
@@ -897,7 +897,7 @@ pub async fn render_fallback_html(
             }
 
             if state.config.is_production() {
-                state.html_cache.insert(path.to_string(), final_html.clone());
+                state.html_cache.lock().put(path.to_string(), final_html.clone());
             }
 
             let status_code = if is_not_found { StatusCode::NOT_FOUND } else { StatusCode::OK };
@@ -1076,8 +1076,8 @@ pub async fn handle_app_route(
         let fast_key =
             response::ResponseCache::generate_static_fast_cache_key(path, query_params_ref, None);
 
-        if let Some(prebuilt) = state.static_fast_cache.get(&fast_key) {
-            let prebuilt = Arc::clone(prebuilt.value());
+        let prebuilt = state.static_fast_cache.lock().get(&fast_key).map(Arc::clone);
+        if let Some(prebuilt) = prebuilt {
 
             if let Some(client_etag) = headers.get("if-none-match").and_then(|v| v.to_str().ok())
                 && client_etag == prebuilt.etag
@@ -1636,7 +1636,7 @@ pub async fn handle_app_route(
                         query_params_ref,
                         None,
                     );
-                    state.static_fast_cache.insert(
+                    state.static_fast_cache.lock().put(
                         fast_key,
                         Arc::new(response::PrebuiltResponse {
                             identity: body_bytes.clone(),
