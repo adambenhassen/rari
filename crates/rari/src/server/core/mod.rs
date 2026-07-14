@@ -5,10 +5,18 @@ use std::{
     env,
     future::{self, Future},
     net::SocketAddr,
+    num::NonZeroUsize,
     path::PathBuf,
     sync::{Arc, atomic::AtomicU64},
     time::Instant,
 };
+
+// Entry caps for the two in-memory response caches on ServerState. Both were unbounded
+// DashMaps; static_fast_cache is the heavier one (4 compressed body copies per entry).
+const HTML_FALLBACK_CACHE_CAP: NonZeroUsize =
+    NonZeroUsize::new(1024).expect("HTML_FALLBACK_CACHE_CAP is non-zero");
+const STATIC_FAST_CACHE_CAP: NonZeroUsize =
+    NonZeroUsize::new(1024).expect("STATIC_FAST_CACHE_CAP is non-zero");
 
 use axum::{
     Router,
@@ -18,7 +26,6 @@ use axum::{
     routing,
 };
 use colored::Colorize;
-use dashmap::DashMap;
 use rari_error::RariError;
 use rustc_hash::FxHashMap;
 use tokio::{
@@ -216,13 +223,17 @@ impl Server {
             page_cache_configs: Arc::new(RwLock::new(FxHashMap::default())),
             app_router,
             api_route_handler,
-            html_cache: Arc::new(DashMap::new()),
+            html_cache: Arc::new(parking_lot::Mutex::new(lru::LruCache::new(
+                HTML_FALLBACK_CACHE_CAP,
+            ))),
             layout_html_cache: LayoutRenderer::create_shared_cache_from_config(
                 &layout_layer,
                 &cache_registry,
             ),
             response_cache,
-            static_fast_cache: Arc::new(DashMap::new()),
+            static_fast_cache: Arc::new(parking_lot::Mutex::new(lru::LruCache::new(
+                STATIC_FAST_CACHE_CAP,
+            ))),
             og_generator,
             project_root,
             image_optimizer: None,

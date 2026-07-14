@@ -4,7 +4,6 @@ use std::{
     time::Instant,
 };
 
-use dashmap::DashMap;
 use rustc_hash::FxHashMap;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -40,10 +39,15 @@ pub struct ServerState {
     pub page_cache_configs: Arc<RwLock<FxHashMap<String, FxHashMap<String, String>>>>,
     pub app_router: Option<Arc<AppRouter>>,
     pub api_route_handler: Option<Arc<ApiRouteHandler>>,
-    pub html_cache: Arc<DashMap<String, String>>,
+    // Entry-capped LRU (was an unbounded DashMap): SPA/fallback shell keyed by request
+    // path, so 404/dynamic-route/crawler paths can't grow it without bound.
+    pub html_cache: Arc<parking_lot::Mutex<lru::LruCache<String, String>>>,
     pub layout_html_cache: Arc<LayoutHtmlCache>,
     pub response_cache: Arc<ResponseCache>,
-    pub static_fast_cache: Arc<DashMap<String, Arc<PrebuiltResponse>>>,
+    // Entry-capped LRU (was an unbounded DashMap): keyed by path+query string and stores
+    // 4 compressed body copies per entry, so an unbounded key space here was the worst
+    // leaker. Capped so query-string / crawler traffic can't grow it without bound.
+    pub static_fast_cache: Arc<parking_lot::Mutex<lru::LruCache<String, Arc<PrebuiltResponse>>>>,
     pub og_generator: Option<Arc<OgImageGenerator>>,
     pub project_root: PathBuf,
     pub image_optimizer: Option<Arc<ImageOptimizer>>,
