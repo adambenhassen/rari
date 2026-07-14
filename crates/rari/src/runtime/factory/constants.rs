@@ -98,6 +98,24 @@ pub const PROMISE_EXTRACT_SCRIPT: &str = r#"
 })()
 "#;
 
+// Runs when promise resolution errors or times out and the extract path is skipped.
+// The extract path only *reads* these slots (they're otherwise overwritten by the next
+// render's setup), so on the error path nothing releases the global roots that pin this
+// render's promise + resolved value — this drops them explicitly. The pending promise
+// itself can't be cancelled from Rust, and a late settle can still write back through
+// its own callbacks (a pre-existing single-slot race, unchanged here); dropping the
+// roots lets V8 reclaim the graph once the promise becomes unreachable.
+pub const PROMISE_CLEANUP_SCRIPT: &str = r#"
+(function() {
+    if (globalThis['~promises']) {
+        globalThis['~promises'].currentObject = null;
+        globalThis['~promises'].resolvedValue = null;
+        globalThis['~promises'].resolutionComplete = false;
+    }
+    delete globalThis['__temp_promise_ref__'];
+})()
+"#;
+
 pub fn is_critical_error(error: &RariError) -> bool {
     let error_str = error.to_string();
     error_str.contains("assertion") || error_str.contains("panicked")

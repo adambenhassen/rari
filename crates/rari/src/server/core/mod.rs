@@ -178,7 +178,9 @@ impl Server {
             app_router,
             api_route_handler,
             module_reload_manager,
-            html_cache: Arc::new(dashmap::DashMap::new()),
+            html_cache: Arc::new(parking_lot::Mutex::new(lru::LruCache::new(
+                crate::server::types::FALLBACK_HTML_CACHE_CAPACITY,
+            ))),
             layout_html_cache: crate::rsc::rendering::layout::LayoutRenderer::create_shared_cache(),
             response_cache,
             og_generator,

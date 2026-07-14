@@ -5,16 +5,27 @@ use crate::server::config::Config;
 use crate::server::routing::app_router::AppRouteMatch;
 use crate::utils::path_url::path_to_file_url;
 use cow_utils::CowUtils;
-use dashmap::DashMap;
+use lru::LruCache;
+use parking_lot::Mutex;
 use serde_json::Value;
+use std::num::NonZeroUsize;
 use std::sync::Arc;
 use tokio::sync::mpsc;
 use tracing::error;
 
 use super::{constants::*, error_messages, types::*, utils};
 
+// Entry-capped LRU: at most this many rendered documents, so memory can't grow with
+// traffic. Each entry is a full HTML document, so the footprint is roughly cap *
+// average-doc-size — this caps entry count, not bytes, so a route that renders to a
+// multi-MB document would still be held (add byte-weighting if that appears). Query-
+// string requests bypass the cache (see render_route_with_streaming), so crawler query
+// noise can't churn it. Bump if hit-rate suffers on very large sites.
+const LAYOUT_HTML_CACHE_CAPACITY: NonZeroUsize =
+    NonZeroUsize::new(256).expect("LAYOUT_HTML_CACHE_CAPACITY must be non-zero");
+
 pub struct LayoutHtmlCache {
-    cache: DashMap<u64, String>,
+    cache: Mutex<LruCache<u64, String>>,
 }
 
 impl Default for LayoutHtmlCache {
@@ -25,19 +36,19 @@ impl Default for LayoutHtmlCache {
 
 impl LayoutHtmlCache {
     pub fn new() -> Self {
-        Self { cache: DashMap::new() }
+        Self { cache: Mutex::new(LruCache::new(LAYOUT_HTML_CACHE_CAPACITY)) }
     }
 
     fn get(&self, key: u64) -> Option<String> {
-        self.cache.get(&key).map(|v| v.clone())
+        self.cache.lock().get(&key).cloned()
     }
 
     fn insert(&self, key: u64, html: String) {
-        self.cache.insert(key, html);
+        self.cache.lock().put(key, html);
     }
 
     pub fn clear(&self) {
-        self.cache.clear();
+        self.cache.lock().clear();
     }
 }
 
@@ -339,7 +350,15 @@ impl LayoutRenderer {
     ) -> Result<RenderResult, RariError> {
         let cache_key = utils::generate_cache_key(route_match, context);
 
-        if !return_rsc_on_fallback && let Some(cached_html) = self.html_cache.get(cache_key) {
+        // Only cache route+params responses. Query-string requests (?utm=…, ?page=…,
+        // crawler noise) have an unbounded key space, so caching them would churn the
+        // fixed-size LRU and evict useful canonical-page entries.
+        let cacheable = context.search_params.is_empty();
+
+        if cacheable
+            && !return_rsc_on_fallback
+            && let Some(cached_html) = self.html_cache.get(cache_key)
+        {
             return Ok(RenderResult::Static(cached_html));
         }
 
@@ -406,7 +425,7 @@ if (typeof window !== 'undefined') {
                 format!("{}{}\n{}", html, payload_script, completion_script)
             };
 
-            if route_match.not_found.is_none() {
+            if cacheable && route_match.not_found.is_none() {
                 self.html_cache.insert(cache_key, html.clone());
             }
 
@@ -427,7 +446,7 @@ if (typeof window !== 'undefined') {
             false,
         )?;
 
-        let can_use_html_cache = true;
+        let can_use_html_cache = cacheable;
 
         if let Some(ctx) = request_context {
             let renderer_guard = self.renderer.lock().await;
@@ -1112,5 +1131,23 @@ if (typeof window !== 'undefined') {
         component_code: &str,
     ) -> Result<(), RariError> {
         self.renderer.lock().await.register_component(component_id, component_code).await
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn layout_html_cache_is_bounded_and_evicts_lru() {
+        let capacity = LAYOUT_HTML_CACHE_CAPACITY.get();
+        let cache = LayoutHtmlCache::new();
+        // Insert one more than capacity; the oldest key must be evicted.
+        for key in 0..=(capacity as u64) {
+            cache.insert(key, format!("<html>{key}</html>"));
+        }
+        assert_eq!(cache.cache.lock().len(), capacity);
+        assert!(cache.get(0).is_none(), "oldest entry should be evicted");
+        assert!(cache.get(capacity as u64).is_some(), "newest entry retained");
     }
 }

@@ -333,7 +333,7 @@ pub async fn handle_server_action(
                 };
 
                 state.response_cache.invalidate_by_tag(&redirect_path).await;
-                state.html_cache.remove(&redirect_path);
+                state.html_cache.lock().pop(&redirect_path);
                 state.layout_html_cache.clear();
             }
 
@@ -445,7 +445,7 @@ pub async fn handle_form_action(
                 };
 
                 state.response_cache.invalidate_by_tag(&redirect_path).await;
-                state.html_cache.remove(&redirect_path);
+                state.html_cache.lock().pop(&redirect_path);
                 state.layout_html_cache.clear();
 
                 let mut redirect_response = Response::builder()
@@ -526,7 +526,7 @@ pub async fn handle_form_action(
 
             if let Some(redirect_path) = redirect_path_opt {
                 state.response_cache.invalidate_by_tag(&redirect_path).await;
-                state.html_cache.remove(&redirect_path);
+                state.html_cache.lock().pop(&redirect_path);
                 state.layout_html_cache.clear();
             }
 

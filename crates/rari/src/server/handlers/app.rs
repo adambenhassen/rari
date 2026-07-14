@@ -756,7 +756,7 @@ pub async fn render_fallback_html(
 
     if index_path.exists() {
         if state.config.is_production()
-            && let Some(cached_html) = state.html_cache.get(path)
+            && let Some(cached_html) = state.html_cache.lock().get(path).cloned()
         {
             let html = cached_html.clone();
             return Ok(Response::builder()
@@ -775,7 +775,7 @@ pub async fn render_fallback_html(
             };
 
             if state.config.is_production() {
-                state.html_cache.insert(path.to_string(), final_html.clone());
+                state.html_cache.lock().put(path.to_string(), final_html.clone());
             }
 
             let status_code = if is_not_found { StatusCode::NOT_FOUND } else { StatusCode::OK };

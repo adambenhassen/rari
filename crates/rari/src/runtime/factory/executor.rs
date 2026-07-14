@@ -201,7 +201,23 @@ async fn handle_promise_result(
                 .and_then(|s| s.parse().ok())
                 .unwrap_or(5000);
 
-            run_event_loop_with_promise_timeout(runtime, script_name, promise_timeout_ms).await?;
+            if let Err(loop_err) =
+                run_event_loop_with_promise_timeout(runtime, script_name, promise_timeout_ms).await
+            {
+                // The extract script below (which only reads these slots) is skipped on
+                // this error path, so release the promise's global roots here to avoid
+                // pinning the stale render graph until the next render overwrites them.
+                if let Err(cleanup_err) = runtime.execute_script(
+                    format!("{script_name}_promise_cleanup"),
+                    PROMISE_CLEANUP_SCRIPT.to_string(),
+                ) {
+                    error!(
+                        "Failed to release promise roots after render error for '{}': {}",
+                        script_name, cleanup_err
+                    );
+                }
+                return Err(loop_err);
+            }
 
             let extract_script = PROMISE_EXTRACT_SCRIPT;
 
