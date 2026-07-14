@@ -197,10 +197,15 @@ impl RouteComposer {
             .unwrap_or_else(|| "\"\"".to_string());
 
         let rsc_render = if defer_rsc {
+            // Return the element directly so each render captures it in a
+            // per-invocation local, instead of relying on the process-global
+            // `~rari.capturedElement` (concurrent renders on the shared isolate
+            // would clobber it across awaits). The global is still written for
+            // the action-refresh path, which consumes it from a separate script.
             r"
                 if (!globalThis['~rari']) globalThis['~rari'] = {};
                 globalThis['~rari'].capturedElement = elementToRender;
-                return;
+                return elementToRender;
             "
         } else {
             r"
@@ -415,6 +420,7 @@ mod tests {
         let conversion = RouteComposer::generate_rsc_conversion("finalElement", None, "{}", true);
 
         assert!(conversion.contains("capturedElement = elementToRender"));
+        assert!(conversion.contains("return elementToRender"));
         assert!(!conversion.contains("renderToRsc(elementToRender"));
     }
 

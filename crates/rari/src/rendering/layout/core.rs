@@ -387,12 +387,20 @@ impl LayoutRenderer {
             true,
         )?;
 
+        // The composition now returns its React element (so inlined render
+        // callers can bind it to a local instead of reading the global). Here
+        // it runs standalone, so discard that element return — it must not cross
+        // into Rust's JSON conversion. The global write it performs is what the
+        // action-refresh flight encoder consumes.
+        let action_refresh_script =
+            format!("(async () => {{ await ({composition_script}); return null; }})()");
+
         let renderer = Arc::clone(&self.renderer);
         run_with_renderer_result(renderer, move |renderer| async move {
             let compose_operation = async {
                 renderer
                     .runtime
-                    .execute_script("action_refresh_compose".to_string(), composition_script)
+                    .execute_script("action_refresh_compose".to_string(), action_refresh_script)
                     .await?;
                 Ok(())
             };
@@ -464,11 +472,11 @@ impl LayoutRenderer {
                     r"(async function() {{
                         {FIZZ_CHUNK_PUMP_HELPER}
                         try {{
-                        try {{ {composition_script} }} catch(e) {{
+                        let capturedElement;
+                        try {{ capturedElement = await ({composition_script}); }} catch(e) {{
                             console.error('[rari] Composition error in RSC streaming nav:', e);
                         }}
 
-                        const capturedElement = globalThis['~rari']?.capturedElement;
                         if (!capturedElement) {{
                             return;
                         }}
@@ -589,11 +597,11 @@ impl LayoutRenderer {
                         let caughtErrors = [];
                         {FIZZ_STREAM_ERROR_HELPER}
                         try {{
-                        try {{ await ({composition_script}); }} catch(e) {{
+                        let capturedElement;
+                        try {{ capturedElement = await ({composition_script}); }} catch(e) {{
                             console.error('[rari] Composition error in streaming:', e);
                         }}
 
-                        const capturedElement = globalThis['~rari']?.capturedElement;
                         if (!capturedElement) {{
                             Deno.core.ops.op_fizz_done();
                             return;
@@ -698,11 +706,11 @@ impl LayoutRenderer {
                         r"(async function() {{
                         let caughtErrors = [];
                         try {{
-                            try {{ await ({composition_script}); }} catch(e) {{
+                            let capturedElement;
+                            try {{ capturedElement = await ({composition_script}); }} catch(e) {{
                                 console.error('[rari] Composition error in static:', e);
                             }}
 
-                            const capturedElement = globalThis['~rari']?.capturedElement;
                             if (!capturedElement) {{
                                 return {{ ok: false, error: 'No captured element' }};
                             }}
