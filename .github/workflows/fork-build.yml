@@ -11,7 +11,7 @@ on:
       version:
         description: 'Prerelease version for the packed npm tarballs (semver)'
         required: true
-        default: '0.14.13-cachefix.0'
+        default: '0.14.13-cachefix.1'
 
 permissions:
   contents: write
@@ -60,7 +60,7 @@ jobs:
           echo 'pub static RESIDUAL_LAZY_ESM_SOURCES: &[(&str, &str)] = &[];' > crates/rari/snapshots/residual_lazy_sources.rs
           echo 'pub static RESIDUAL_LAZY_JS_SOURCES: &[(&str, &str)] = &[];' >> crates/rari/snapshots/residual_lazy_sources.rs
           cargo run --release --manifest-path tools/snapshot/Cargo.toml -- crates/rari/snapshots
-          cargo build --release --target ${{ matrix.target }} --bin rari
+          cargo build --release --target ${{ matrix.target }} --bin rari --features jemalloc
 
       - name: Prepare binary
         run: |
