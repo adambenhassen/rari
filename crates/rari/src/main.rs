@@ -15,6 +15,12 @@ use rustls::crypto::{CryptoProvider, aws_lc_rs};
 use tokio::fs;
 use tracing_subscriber::{EnvFilter, fmt, layer::SubscriberExt, util::SubscriberInitExt};
 
+// Production memory profiling (feature `jemalloc`): jemalloc as the global
+// allocator, powering /_rari/metrics and /_rari/debug/heap. See server::profiling.
+#[cfg(feature = "jemalloc")]
+#[global_allocator]
+static GLOBAL: tikv_jemallocator::Jemalloc = tikv_jemallocator::Jemalloc;
+
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn error::Error + Send + Sync>> {
     let matches = cli().get_matches();

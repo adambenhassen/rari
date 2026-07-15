@@ -24,6 +24,9 @@ ext-full = [
   "dep:deno_cron",
   "dep:deno_node_sqlite",
 ]
+# jemalloc global allocator + memory profiling (prod builds): --features jemalloc.
+# Enables /_rari/metrics (Prometheus allocator stats) and /_rari/debug/heap.
+jemalloc = ["dep:tikv-jemallocator", "dep:tikv-jemalloc-ctl", "dep:jemalloc_pprof"]
 
 [dependencies]
 # === Core Runtime Dependencies ===
@@ -161,6 +164,16 @@ hyper-util = { version = "0.1.20", features = [
   "tokio"
 ] }
 libc = "0.2.186"
+# Optional jemalloc allocator + profiling (enabled by the `jemalloc` feature).
+# Not built on msvc; prod (Linux) is the target. Heap dumps need MALLOC_CONF=prof:true.
+tikv-jemallocator = { version = "0.7", optional = true, features = [
+  "profiling",
+  "unprefixed_malloc_on_supported_platforms",
+] }
+tikv-jemalloc-ctl = { version = "0.7", optional = true, features = [ "stats" ] }
+# Converts jemalloc's heap profile straight to pprof protobuf (feeds Pyroscope /
+# `go tool pprof`), symbolized in-process — no jeprof/perl step.
+jemalloc_pprof = { version = "0.9", optional = true, features = [ "symbolize" ] }
 nix = { workspace = true, features = [ "term" ] }
 rustyline = { workspace = true }
 sys_traits = { workspace = true }
