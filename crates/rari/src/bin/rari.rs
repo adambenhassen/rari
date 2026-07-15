@@ -10,6 +10,12 @@ use rustls::crypto::CryptoProvider;
 use tracing::error;
 use tracing_subscriber::{EnvFilter, fmt, layer::SubscriberExt, util::SubscriberInitExt};
 
+// Production memory profiling (feature `jemalloc`): jemalloc as the global
+// allocator, powering /_rari/metrics and /_rari/debug/heap. See server::profiling.
+#[cfg(feature = "jemalloc")]
+#[global_allocator]
+static GLOBAL: tikv_jemallocator::Jemalloc = tikv_jemallocator::Jemalloc;
+
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let matches = Command::new("rari")

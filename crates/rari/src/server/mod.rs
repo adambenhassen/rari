@@ -8,6 +8,8 @@ pub mod image;
 pub mod loaders;
 pub mod middleware;
 pub mod og;
+#[cfg(feature = "jemalloc")]
+pub mod profiling;
 pub mod rendering;
 pub mod routing;
 pub mod types;

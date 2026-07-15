@@ -252,6 +252,18 @@ impl Server {
             .layer(medium_body_limit)
             .merge(revalidation_router);
 
+        // jemalloc memory profiling endpoints (feature `jemalloc`): continuous
+        // Prometheus stats + on-demand (token-guarded) heap dumps.
+        #[cfg(feature = "jemalloc")]
+        {
+            router = router
+                .route("/_rari/metrics", get(crate::server::profiling::metrics_handler))
+                .route(
+                    "/_rari/debug/heap",
+                    get(crate::server::profiling::heap_dump_handler),
+                );
+        }
+
         let image_router = Router::new()
             .route("/_rari/image", get(crate::server::image::handle_image_request))
             .with_state(image_state);
