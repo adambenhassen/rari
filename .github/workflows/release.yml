@@ -135,22 +135,25 @@ jobs:
           PKG_CONFIG_PATH: C:\vcpkg\installed\${{ matrix.vcpkg_triplet }}\lib\pkgconfig
           VCPKG_ROOT: C:\vcpkg
 
+      # ext-full: required so the binary's extension set matches the V8 snapshot
+      # (the snapshot tool builds with rari/ext-full — see justfile). jemalloc:
+      # memory profiling (metrics + pprof heap). jemalloc is not built on msvc.
       - name: Build binary (Linux)
         if: runner.os == 'Linux'
-        run: cargo build --release --target ${{ matrix.target }} --bin rari
+        run: cargo build --release --target ${{ matrix.target }} --bin rari --features "ext-full jemalloc"
         env:
           RUSTFLAGS: -C link-arg=-fuse-ld=mold
 
       - name: Build binary (macOS)
         if: runner.os == 'macOS'
-        run: cargo build --release --target ${{ matrix.target }} --bin rari
+        run: cargo build --release --target ${{ matrix.target }} --bin rari --features "ext-full jemalloc"
         env:
           RUSTFLAGS: '' # Override .cargo/config.toml to use default linker
 
       - name: Build binary (Windows)
         if: runner.os == 'Windows'
         shell: bash
-        run: cargo build --release --target ${{ matrix.target }} --bin rari
+        run: cargo build --release --target ${{ matrix.target }} --bin rari --features "ext-full"
         env:
           AWS_LC_SYS_PREBUILT_NASM: 1
           PKG_CONFIG_PATH: C:\vcpkg\installed\${{ matrix.vcpkg_triplet }}\lib\pkgconfig
