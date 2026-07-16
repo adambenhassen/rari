@@ -5,6 +5,7 @@ use lru::LruCache;
 use parking_lot::Mutex;
 use std::num::NonZeroUsize;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Instant;
 
 #[derive(Clone, Debug)]
@@ -31,6 +32,16 @@ impl CachedResponse {
         elapsed < self.metadata.ttl
     }
 
+    /// Approximate heap footprint of this entry: body plus any compressed
+    /// variants. Header/metadata overhead is ignored (small and roughly
+    /// constant per entry).
+    pub fn size_bytes(&self) -> usize {
+        self.body.len()
+            + self.compressed_zstd.as_ref().map_or(0, Bytes::len)
+            + self.compressed_br.as_ref().map_or(0, Bytes::len)
+            + self.compressed_gzip.as_ref().map_or(0, Bytes::len)
+    }
+
     pub fn get_compressed(
         &self,
         encoding: &crate::server::compression::CompressionEncoding,
@@ -47,6 +58,10 @@ impl CachedResponse {
 #[derive(Clone, Debug)]
 pub struct CacheConfig {
     pub max_entries: usize,
+    /// Cap on total cached bytes (bodies + compressed variants). Entries alone
+    /// don't bound memory: one entry can hold a body plus three compressed
+    /// copies, so a large-page cache capped only by count OOMs the pod.
+    pub max_bytes: usize,
     pub default_ttl: u64,
     pub enabled: bool,
 }
@@ -62,6 +77,10 @@ impl CacheConfig {
                 .ok()
                 .and_then(|v| v.parse().ok())
                 .unwrap_or(1000),
+            max_bytes: std::env::var("RARI_CACHE_MAX_BYTES")
+                .ok()
+                .and_then(|v| v.parse().ok())
+                .unwrap_or(64 * 1024 * 1024),
             default_ttl: std::env::var("RARI_CACHE_DEFAULT_TTL")
                 .ok()
                 .and_then(|v| v.parse().ok())
@@ -117,7 +136,7 @@ impl RouteCachePolicy {
 
 impl Default for CacheConfig {
     fn default() -> Self {
-        Self { max_entries: 1000, default_ttl: 60, enabled: true }
+        Self { max_entries: 1000, max_bytes: 64 * 1024 * 1024, default_ttl: 60, enabled: true }
     }
 }
 
@@ -137,6 +156,8 @@ pub struct ResponseCache {
     pub config: CacheConfig,
     metrics: Arc<Mutex<CacheMetrics>>,
     tag_index: Arc<DashMap<String, Vec<String>>>,
+    /// Total bytes held by cached entries (see `CachedResponse::size_bytes`).
+    bytes: Arc<AtomicUsize>,
 }
 
 impl ResponseCache {
@@ -150,6 +171,7 @@ impl ResponseCache {
             config,
             metrics: Arc::new(Mutex::new(CacheMetrics::default())),
             tag_index: Arc::new(DashMap::new()),
+            bytes: Arc::new(AtomicUsize::new(0)),
         }
     }
 
@@ -237,19 +259,34 @@ impl ResponseCache {
             return;
         }
 
-        let should_evict = {
-            let lru = self.lru.lock();
-            lru.len() >= self.config.max_entries && !self.cache.contains_key(&key)
-        };
+        // Replace any existing entry up front so byte accounting and the tag
+        // index have a single source of truth for this key.
+        if let Some((_, old)) = self.cache.remove(&key) {
+            self.bytes.fetch_sub(old.size_bytes(), Ordering::Relaxed);
+            let mut lru = self.lru.lock();
+            lru.pop(&key);
+        }
 
-        if should_evict {
-            self.evict_lru().await;
+        // Evict until both the entry cap and the byte cap hold. The new entry
+        // itself is always admitted, even if it alone exceeds max_bytes.
+        let new_size = response.size_bytes();
+        loop {
+            let over_entries = { self.lru.lock().len() >= self.config.max_entries };
+            let over_bytes = !self.cache.is_empty()
+                && self.bytes.load(Ordering::Relaxed) + new_size > self.config.max_bytes;
+            if !(over_entries || over_bytes) || !self.evict_lru().await {
+                break;
+            }
         }
 
         for tag in &response.metadata.tags {
-            self.tag_index.entry(tag.clone()).or_insert_with(Vec::new).push(key.clone());
+            let mut keys = self.tag_index.entry(tag.clone()).or_default();
+            if !keys.contains(&key) {
+                keys.push(key.clone());
+            }
         }
 
+        self.bytes.fetch_add(new_size, Ordering::Relaxed);
         self.cache.insert(key.clone(), response);
 
         {
@@ -262,12 +299,18 @@ impl ResponseCache {
 
     pub async fn update_in_place(&self, key: &str, response: CachedResponse) {
         if self.cache.contains_key(key) {
-            self.cache.insert(key.to_string(), response);
+            let new_size = response.size_bytes();
+            if let Some(old) = self.cache.insert(key.to_string(), response) {
+                self.bytes.fetch_sub(old.size_bytes(), Ordering::Relaxed);
+            }
+            self.bytes.fetch_add(new_size, Ordering::Relaxed);
+            self.update_entry_count();
         }
     }
 
     pub async fn invalidate(&self, key: &str) {
         if let Some((_, response)) = self.cache.remove(key) {
+            self.bytes.fetch_sub(response.size_bytes(), Ordering::Relaxed);
             for tag in &response.metadata.tags {
                 if let Some(mut keys) = self.tag_index.get_mut(tag) {
                     keys.retain(|k| k != key);
@@ -303,6 +346,7 @@ impl ResponseCache {
             lru.clear();
         }
         self.tag_index.clear();
+        self.bytes.store(0, Ordering::Relaxed);
 
         let mut metrics = self.metrics.lock();
         metrics.total_entries = 0;
@@ -316,17 +360,7 @@ impl ResponseCache {
         let entries_to_remove = (current_size as f64 * percentage).ceil() as usize;
 
         for _ in 0..entries_to_remove {
-            let key_to_evict = {
-                let mut lru = self.lru.lock();
-                lru.pop_lru().map(|(k, _)| k)
-            };
-
-            if let Some(key) = key_to_evict {
-                self.cache.remove(&key);
-
-                let mut metrics = self.metrics.lock();
-                metrics.evictions += 1;
-            } else {
+            if !self.evict_lru().await {
                 break;
             }
         }
@@ -341,18 +375,31 @@ impl ResponseCache {
         current_size >= threshold
     }
 
-    async fn evict_lru(&self) {
+    /// Evict the least-recently-used entry. Returns false when the LRU is
+    /// empty. Also reclaims byte accounting and the entry's tag-index slots —
+    /// eviction that skips the tag index leaks one key string per tag, forever.
+    async fn evict_lru(&self) -> bool {
         let key_to_evict = {
             let mut lru = self.lru.lock();
             lru.pop_lru().map(|(k, _)| k)
         };
 
-        if let Some(key) = key_to_evict {
-            self.cache.remove(&key);
+        let Some(key) = key_to_evict else {
+            return false;
+        };
 
-            let mut metrics = self.metrics.lock();
-            metrics.evictions += 1;
+        if let Some((_, evicted)) = self.cache.remove(&key) {
+            self.bytes.fetch_sub(evicted.size_bytes(), Ordering::Relaxed);
+            for tag in &evicted.metadata.tags {
+                if let Some(mut keys) = self.tag_index.get_mut(tag) {
+                    keys.retain(|k| k != &key);
+                }
+            }
         }
+
+        let mut metrics = self.metrics.lock();
+        metrics.evictions += 1;
+        true
     }
 
     pub fn get_metrics(&self) -> CacheMetrics {
@@ -386,8 +433,7 @@ impl ResponseCache {
     fn update_entry_count(&self) {
         let mut metrics = self.metrics.lock();
         metrics.total_entries = self.cache.len();
-
-        metrics.memory_usage_bytes = metrics.total_entries * 10_000;
+        metrics.memory_usage_bytes = self.bytes.load(Ordering::Relaxed);
     }
 }
 
@@ -463,7 +509,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_cache_basic_operations() {
-        let config = CacheConfig { max_entries: 10, default_ttl: 60, enabled: true };
+        let config = CacheConfig { max_entries: 10, max_bytes: usize::MAX, default_ttl: 60, enabled: true };
         let cache = ResponseCache::new(config);
 
         assert!(cache.get("test-key").await.is_none());
@@ -483,7 +529,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_cache_expiration() {
-        let config = CacheConfig { max_entries: 10, default_ttl: 60, enabled: true };
+        let config = CacheConfig { max_entries: 10, max_bytes: usize::MAX, default_ttl: 60, enabled: true };
         let cache = ResponseCache::new(config);
 
         let response = create_test_response("test body", 0);
@@ -496,7 +542,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_cache_invalidation() {
-        let config = CacheConfig { max_entries: 10, default_ttl: 60, enabled: true };
+        let config = CacheConfig { max_entries: 10, max_bytes: usize::MAX, default_ttl: 60, enabled: true };
         let cache = ResponseCache::new(config);
 
         let response = create_test_response("test body", 60);
@@ -511,7 +557,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_cache_tag_invalidation() {
-        let config = CacheConfig { max_entries: 10, default_ttl: 60, enabled: true };
+        let config = CacheConfig { max_entries: 10, max_bytes: usize::MAX, default_ttl: 60, enabled: true };
         let cache = ResponseCache::new(config);
 
         let mut response1 = create_test_response("body1", 60);
@@ -534,7 +580,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_cache_lru_eviction() {
-        let config = CacheConfig { max_entries: 2, default_ttl: 60, enabled: true };
+        let config = CacheConfig { max_entries: 2, max_bytes: usize::MAX, default_ttl: 60, enabled: true };
         let cache = ResponseCache::new(config);
 
         cache.set("key1".to_string(), create_test_response("body1", 60)).await;
@@ -552,7 +598,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_cache_disabled() {
-        let config = CacheConfig { max_entries: 10, default_ttl: 60, enabled: false };
+        let config = CacheConfig { max_entries: 10, max_bytes: usize::MAX, default_ttl: 60, enabled: false };
         let cache = ResponseCache::new(config);
 
         let response = create_test_response("test body", 60);
@@ -563,7 +609,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_cache_clear() {
-        let config = CacheConfig { max_entries: 10, default_ttl: 60, enabled: true };
+        let config = CacheConfig { max_entries: 10, max_bytes: usize::MAX, default_ttl: 60, enabled: true };
         let cache = ResponseCache::new(config);
 
         cache.set("key1".to_string(), create_test_response("body1", 60)).await;
@@ -580,7 +626,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_clear_percentage() {
-        let config = CacheConfig { max_entries: 10, default_ttl: 60, enabled: true };
+        let config = CacheConfig { max_entries: 10, max_bytes: usize::MAX, default_ttl: 60, enabled: true };
         let cache = ResponseCache::new(config);
 
         for i in 0..10 {
@@ -598,7 +644,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_memory_pressure_detection() {
-        let config = CacheConfig { max_entries: 10, default_ttl: 60, enabled: true };
+        let config = CacheConfig { max_entries: 10, max_bytes: usize::MAX, default_ttl: 60, enabled: true };
         let cache = ResponseCache::new(config);
 
         for i in 0..8 {
@@ -610,6 +656,76 @@ mod tests {
         cache.set("key8".to_string(), create_test_response("body8", 60)).await;
 
         assert!(cache.should_clear_on_memory_pressure());
+    }
+
+    #[tokio::test]
+    async fn test_cache_byte_cap_eviction() {
+        // 3 x 100-byte bodies under a 250-byte cap: inserting the third must
+        // evict the least-recently-used first entry.
+        let config =
+            CacheConfig { max_entries: 10, max_bytes: 250, default_ttl: 60, enabled: true };
+        let cache = ResponseCache::new(config);
+
+        let body100 = "x".repeat(100);
+        cache.set("key1".to_string(), create_test_response(&body100, 60)).await;
+        cache.set("key2".to_string(), create_test_response(&body100, 60)).await;
+        cache.set("key3".to_string(), create_test_response(&body100, 60)).await;
+
+        assert!(cache.get("key1").await.is_none());
+        assert!(cache.get("key2").await.is_some());
+        assert!(cache.get("key3").await.is_some());
+        assert!(cache.get_metrics().memory_usage_bytes <= 250);
+    }
+
+    #[tokio::test]
+    async fn test_cache_byte_accounting() {
+        let config =
+            CacheConfig { max_entries: 10, max_bytes: usize::MAX, default_ttl: 60, enabled: true };
+        let cache = ResponseCache::new(config);
+
+        cache.set("key1".to_string(), create_test_response(&"a".repeat(70), 60)).await;
+        assert_eq!(cache.get_metrics().memory_usage_bytes, 70);
+
+        // Replacing the same key must not double-count.
+        cache.set("key1".to_string(), create_test_response(&"b".repeat(30), 60)).await;
+        assert_eq!(cache.get_metrics().memory_usage_bytes, 30);
+
+        cache.invalidate("key1").await;
+        assert_eq!(cache.get_metrics().memory_usage_bytes, 0);
+    }
+
+    #[tokio::test]
+    async fn test_update_in_place_byte_accounting() {
+        let config =
+            CacheConfig { max_entries: 10, max_bytes: usize::MAX, default_ttl: 60, enabled: true };
+        let cache = ResponseCache::new(config);
+
+        cache.set("key1".to_string(), create_test_response(&"a".repeat(50), 60)).await;
+
+        let mut updated = create_test_response(&"a".repeat(50), 60);
+        updated.compressed_gzip = Some(Bytes::from("g".repeat(20)));
+        cache.update_in_place("key1", updated).await;
+
+        assert_eq!(cache.get_metrics().memory_usage_bytes, 70);
+    }
+
+    #[tokio::test]
+    async fn test_tag_index_cleaned_on_eviction() {
+        // Evicted entries must vanish from the tag index: after key1 is
+        // LRU-evicted and re-inserted, invalidating its tag must remove it,
+        // and repeated set() calls for one key must not duplicate tag slots.
+        let config =
+            CacheConfig { max_entries: 1, max_bytes: usize::MAX, default_ttl: 60, enabled: true };
+        let cache = ResponseCache::new(config);
+
+        cache.set("key1".to_string(), create_test_response("body1", 60)).await;
+        cache.set("key2".to_string(), create_test_response("body2", 60)).await; // evicts key1
+        assert!(cache.get("key1").await.is_none());
+
+        cache.set("key1".to_string(), create_test_response("body1", 60)).await; // evicts key2
+        cache.invalidate_by_tag("test-tag").await;
+        assert!(cache.get("key1").await.is_none());
+        assert_eq!(cache.get_metrics().memory_usage_bytes, 0);
     }
 
     #[test]
