@@ -304,7 +304,21 @@ impl ResponseCache {
                 self.bytes.fetch_sub(old.size_bytes(), Ordering::Relaxed);
             }
             self.bytes.fetch_add(new_size, Ordering::Relaxed);
+            // In-place updates grow entries after admission (lazy compression
+            // adds variants on cache hits), so the byte cap must be re-enforced
+            // here or entries bloat to ~3x the cap. The updated key was just
+            // promoted by get(), so it is MRU and evicted last.
+            self.evict_until_under_byte_cap().await;
             self.update_entry_count();
+        }
+    }
+
+    /// Evict LRU entries until the byte cap holds (or one entry remains).
+    async fn evict_until_under_byte_cap(&self) {
+        while self.bytes.load(Ordering::Relaxed) > self.config.max_bytes && self.cache.len() > 1 {
+            if !self.evict_lru().await {
+                break;
+            }
         }
     }
 
@@ -707,6 +721,26 @@ mod tests {
         cache.update_in_place("key1", updated).await;
 
         assert_eq!(cache.get_metrics().memory_usage_bytes, 70);
+    }
+
+    #[tokio::test]
+    async fn test_update_in_place_enforces_byte_cap() {
+        // Entries admitted under the cap, then grown via update_in_place
+        // (lazy compression), must trigger eviction: total stays capped.
+        let config =
+            CacheConfig { max_entries: 10, max_bytes: 250, default_ttl: 60, enabled: true };
+        let cache = ResponseCache::new(config);
+
+        cache.set("key1".to_string(), create_test_response(&"a".repeat(100), 60)).await;
+        cache.set("key2".to_string(), create_test_response(&"b".repeat(100), 60)).await;
+
+        let mut grown = create_test_response(&"b".repeat(100), 60);
+        grown.compressed_gzip = Some(Bytes::from("g".repeat(100)));
+        cache.update_in_place("key2", grown).await;
+
+        assert!(cache.get_metrics().memory_usage_bytes <= 250);
+        assert!(cache.get("key1").await.is_none()); // LRU evicted
+        assert!(cache.get("key2").await.is_some()); // grown entry kept
     }
 
     #[tokio::test]
