@@ -92,7 +92,9 @@ codegen-units = 1
 debug = false
 lto = "fat"
 opt-level = 3
-strip = "symbols"
+# Keep the symbol table (drop only DWARF) so jemalloc pprof heap dumps
+# (/_rari/debug/heap) can resolve allocation sites to function names.
+strip = "debuginfo"
 
 [profile.release-debug]
 debug = true
