@@ -60,6 +60,14 @@ impl LayoutHtmlCache {
         self.cache.clear();
         self.bytes.store(0, std::sync::atomic::Ordering::Relaxed);
     }
+
+    pub fn bytes(&self) -> usize {
+        self.bytes.load(std::sync::atomic::Ordering::Relaxed)
+    }
+
+    pub fn entries(&self) -> usize {
+        self.cache.len()
+    }
 }
 
 pub struct LayoutRenderer {

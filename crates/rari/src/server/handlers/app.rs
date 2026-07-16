@@ -928,6 +928,10 @@ pub async fn handle_app_route(
         },
     };
 
+    // Per-route SSR latency histogram; records on drop so every exit path
+    // (cache hit, render, early error) is counted. Labelled by route pattern.
+    let _request_timer = crate::server::metrics_http::RequestTimer::start(&route_match.route.path);
+
     let request_context = std::sync::Arc::new(
         crate::server::middleware::request_context::RequestContext::new(path.to_string()),
     );

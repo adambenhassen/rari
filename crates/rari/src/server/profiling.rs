@@ -228,8 +228,11 @@ async fn dump_heap_pprof() -> Result<Vec<u8>, String> {
     ctl.dump_pprof().map_err(|e| e.to_string())
 }
 
-/// `GET /_rari/metrics` — jemalloc allocator stats as Prometheus gauges (bytes).
-pub async fn metrics_handler() -> impl IntoResponse {
+/// `GET /_rari/metrics` — jemalloc allocator stats, cache gauges, and the
+/// per-route SSR latency histogram in Prometheus text format.
+pub async fn metrics_handler(
+    axum::extract::State(state): axum::extract::State<crate::server::types::ServerState>,
+) -> impl IntoResponse {
     // Stats are cached per epoch; advance it so the read reflects current usage.
     if let Err(e) = epoch::advance() {
         return (
@@ -239,23 +242,49 @@ pub async fn metrics_handler() -> impl IntoResponse {
             .into_response();
     }
 
-    let mut body = String::with_capacity(512);
-    let mut gauge = |name: &str, read: Result<usize, tikv_jemalloc_ctl::Error>| {
-        if let Ok(v) = read {
-            body.push_str(&format!(
-                "# TYPE rari_jemalloc_{name}_bytes gauge\nrari_jemalloc_{name}_bytes {v}\n"
-            ));
-        }
-    };
-    // allocated: bytes in live allocations. active: bytes in active pages.
-    // resident: physical RSS jemalloc controls. retained: virtual, unmapped, reusable.
-    // mapped/metadata: total mapping + jemalloc bookkeeping.
-    gauge("allocated", stats::allocated::read());
-    gauge("active", stats::active::read());
-    gauge("resident", stats::resident::read());
-    gauge("retained", stats::retained::read());
-    gauge("mapped", stats::mapped::read());
-    gauge("metadata", stats::metadata::read());
+    let mut body = String::with_capacity(2048);
+    {
+        let mut gauge = |name: &str, read: Result<usize, tikv_jemalloc_ctl::Error>| {
+            if let Ok(v) = read {
+                body.push_str(&format!(
+                    "# TYPE rari_jemalloc_{name}_bytes gauge\nrari_jemalloc_{name}_bytes {v}\n"
+                ));
+            }
+        };
+        // allocated: bytes in live allocations. active: bytes in active pages.
+        // resident: physical RSS jemalloc controls. retained: virtual, unmapped, reusable.
+        // mapped/metadata: total mapping + jemalloc bookkeeping.
+        gauge("allocated", stats::allocated::read());
+        gauge("active", stats::active::read());
+        gauge("resident", stats::resident::read());
+        gauge("retained", stats::retained::read());
+        gauge("mapped", stats::mapped::read());
+        gauge("metadata", stats::metadata::read());
+    }
+
+    // Response cache (bodies + compressed variants; byte-capped since
+    // cachefix.4). These would have made the unbounded-cache OOM visible in
+    // one Grafana panel.
+    let rc = state.response_cache.get_metrics();
+    body.push_str(&format!(
+        "# TYPE rari_response_cache_bytes gauge\nrari_response_cache_bytes {}\n\
+         # TYPE rari_response_cache_entries gauge\nrari_response_cache_entries {}\n\
+         # TYPE rari_response_cache_hits_total counter\nrari_response_cache_hits_total {}\n\
+         # TYPE rari_response_cache_misses_total counter\nrari_response_cache_misses_total {}\n\
+         # TYPE rari_response_cache_evictions_total counter\nrari_response_cache_evictions_total {}\n",
+        rc.memory_usage_bytes, rc.total_entries, rc.cache_hits, rc.cache_misses, rc.evictions,
+    ));
+
+    // Layout HTML cache (rendered pages keyed by route+params; byte-capped
+    // since cachefix.6).
+    body.push_str(&format!(
+        "# TYPE rari_layout_cache_bytes gauge\nrari_layout_cache_bytes {}\n\
+         # TYPE rari_layout_cache_entries gauge\nrari_layout_cache_entries {}\n",
+        state.layout_html_cache.bytes(),
+        state.layout_html_cache.entries(),
+    ));
+
+    crate::server::metrics_http::render_prometheus(&mut body);
 
     (StatusCode::OK, [(header::CONTENT_TYPE, "text/plain; version=0.0.4")], body).into_response()
 }

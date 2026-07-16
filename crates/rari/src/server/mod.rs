@@ -6,6 +6,7 @@ pub mod handlers;
 pub mod http_client;
 pub mod image;
 pub mod loaders;
+pub mod metrics_http;
 pub mod middleware;
 pub mod og;
 #[cfg(feature = "jemalloc")]
