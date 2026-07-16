@@ -204,7 +204,8 @@ impl RequestContext {
             let mut cloned_result = result.clone()?;
             cloned_result.tags = Self::merge_and_sort_tags(cloned_result.tags, tags);
 
-            {
+            // Same 5xx exclusion as the fetch path below.
+            if cloned_result.status < 500 {
                 let mut cache = self.fetch_cache.lock();
                 cache.put(cache_key.clone(), cloned_result.clone());
             }
@@ -238,7 +239,13 @@ impl RequestContext {
 
         *guard = Some(fetch_result.clone());
 
-        if let Ok(ref cached_result) = fetch_result {
+        // Cache completed responses except 5xx: a transient backend error
+        // cached here is replayed to every render for the TTL (default 60s),
+        // turning a blip into a minute of failures. 4xx stays cacheable —
+        // a missing article is stable data worth deduplicating.
+        if let Ok(ref cached_result) = fetch_result
+            && cached_result.status < 500
+        {
             let mut cache = self.fetch_cache.lock();
             cache.put(cache_key.clone(), cached_result.clone());
         }
