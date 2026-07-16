@@ -930,7 +930,11 @@ pub async fn handle_app_route(
 
     // Per-route SSR latency histogram; records on drop so every exit path
     // (cache hit, render, early error) is counted. Labelled by route pattern.
-    let _request_timer = crate::server::metrics_http::RequestTimer::start(&route_match.route.path);
+    // Not-found matches carry the RAW request path, which crawler garbage
+    // would turn into unbounded label cardinality — collapse them to one label.
+    let timer_route =
+        if route_match.not_found.is_some() { "__not_found__" } else { &route_match.route.path };
+    let _request_timer = crate::server::metrics_http::RequestTimer::start(timer_route);
 
     let request_context = std::sync::Arc::new(
         crate::server::middleware::request_context::RequestContext::new(path.to_string()),
