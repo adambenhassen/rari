@@ -744,7 +744,7 @@ pub async fn render_streaming_with_layout(
 
 pub async fn render_fallback_html(
     state: &ServerState,
-    path: &str,
+    _path: &str,
     is_not_found: bool,
 ) -> Result<Response, StatusCode> {
     let index_path = if state.config.is_development() {
@@ -755,8 +755,11 @@ pub async fn render_fallback_html(
     };
 
     if index_path.exists() {
+        // The cached fallback HTML is the same index.html for every path, so
+        // cache under one fixed key — per-path keys grew one copy per unique
+        // URL, unbounded.
         if state.config.is_production()
-            && let Some(cached_html) = state.html_cache.get(path)
+            && let Some(cached_html) = state.html_cache.get("__fallback_index__")
         {
             let html = cached_html.clone();
             return Ok(Response::builder()
@@ -775,7 +778,7 @@ pub async fn render_fallback_html(
             };
 
             if state.config.is_production() {
-                state.html_cache.insert(path.to_string(), final_html.clone());
+                state.html_cache.insert("__fallback_index__".to_string(), final_html.clone());
             }
 
             let status_code = if is_not_found { StatusCode::NOT_FOUND } else { StatusCode::OK };

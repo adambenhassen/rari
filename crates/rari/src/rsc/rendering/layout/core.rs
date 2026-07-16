@@ -15,6 +15,12 @@ use super::{constants::*, error_messages, types::*, utils};
 
 pub struct LayoutHtmlCache {
     cache: DashMap<u64, String>,
+    /// Total bytes of cached HTML. The cache key hashes route params AND
+    /// search params, so unique query strings (crawlers, cache busters) mint
+    /// unbounded entries of full rendered pages — without a byte budget this
+    /// map OOMs the process.
+    bytes: std::sync::atomic::AtomicUsize,
+    max_bytes: usize,
 }
 
 impl Default for LayoutHtmlCache {
@@ -25,7 +31,11 @@ impl Default for LayoutHtmlCache {
 
 impl LayoutHtmlCache {
     pub fn new() -> Self {
-        Self { cache: DashMap::new() }
+        let max_bytes = std::env::var("RARI_LAYOUT_CACHE_MAX_BYTES")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(32 * 1024 * 1024);
+        Self { cache: DashMap::new(), bytes: std::sync::atomic::AtomicUsize::new(0), max_bytes }
     }
 
     fn get(&self, key: u64) -> Option<String> {
@@ -33,11 +43,22 @@ impl LayoutHtmlCache {
     }
 
     fn insert(&self, key: u64, html: String) {
-        self.cache.insert(key, html);
+        use std::sync::atomic::Ordering;
+        // Over budget: drop everything. DashMap has no eviction order, and hot
+        // pages re-render in one request each, so a full clear is the cheapest
+        // bound that keeps the process alive.
+        if self.bytes.load(Ordering::Relaxed) + html.len() > self.max_bytes {
+            self.clear();
+        }
+        self.bytes.fetch_add(html.len(), Ordering::Relaxed);
+        if let Some(old) = self.cache.insert(key, html) {
+            self.bytes.fetch_sub(old.len(), Ordering::Relaxed);
+        }
     }
 
     pub fn clear(&self) {
         self.cache.clear();
+        self.bytes.store(0, std::sync::atomic::Ordering::Relaxed);
     }
 }
 
