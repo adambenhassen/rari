@@ -15,6 +15,9 @@ use crate::server::routing;
 #[derive(Clone)]
 pub struct ServerState {
     pub renderer: Arc<tokio::sync::Mutex<crate::rsc::RscRenderer>>,
+    /// Direct runtime handle for the liveness probe: lets /_rari/health/runtime
+    /// exercise the JS event loop without contending on the renderer mutex.
+    pub js_runtime: Arc<crate::runtime::JsExecutionRuntime>,
     pub ssr_renderer: Arc<crate::rsc::RscHtmlRenderer>,
     pub config: Arc<config::Config>,
     pub request_count: Arc<std::sync::atomic::AtomicU64>,

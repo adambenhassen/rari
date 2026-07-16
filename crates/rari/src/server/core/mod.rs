@@ -169,6 +169,7 @@ impl Server {
 
         let state = ServerState {
             renderer: renderer_arc,
+            js_runtime: js_runtime.clone(),
             ssr_renderer,
             config: Arc::new(config.clone()),
             request_count: Arc::new(std::sync::atomic::AtomicU64::new(0)),
@@ -242,6 +243,7 @@ impl Server {
 
         let mut router = Router::new()
             .route("/_rari/health", get(health_check))
+            .route("/_rari/health/runtime", get(crate::server::handlers::rsc::runtime_health_check))
             .route("/_rari/stream", post(stream_component))
             .route("/_rari/stream", axum::routing::options(cors_preflight_ok))
             .layer(medium_body_limit)
