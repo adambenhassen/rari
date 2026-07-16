@@ -255,7 +255,9 @@ impl Server {
             .merge(revalidation_router);
 
         // jemalloc memory profiling endpoints (feature `jemalloc`): continuous
-        // Prometheus stats + on-demand (token-guarded) heap dumps.
+        // Prometheus stats + on-demand (token-guarded) heap dumps, plus a
+        // background pusher that ships heap profiles to Pyroscope when
+        // PYROSCOPE_URL is set (same push model as the Go/Node services).
         #[cfg(feature = "jemalloc")]
         {
             router = router
@@ -264,6 +266,8 @@ impl Server {
                     "/_rari/debug/heap",
                     get(crate::server::profiling::heap_dump_handler),
                 );
+            crate::server::profiling::spawn_pyroscope_pusher();
+            crate::server::profiling::spawn_pprof_gateway_client();
         }
 
         let image_router = Router::new()

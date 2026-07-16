@@ -15,6 +15,219 @@ use axum::{
 };
 use tikv_jemalloc_ctl::{epoch, stats};
 
+/// Continuously push jemalloc heap profiles to Pyroscope, mirroring what the
+/// Go services do with pyroscope-go. Active only when `PYROSCOPE_URL` is set
+/// AND the process runs with `MALLOC_CONF=prof:true,prof_active:true`.
+/// Profiles land as `<PYROSCOPE_APP_NAME|frontend>` with the profile type
+/// derived from the pprof sample types (inuse_space).
+pub fn spawn_pyroscope_pusher() {
+    let Ok(server) = std::env::var("PYROSCOPE_URL") else {
+        return;
+    };
+    if server.is_empty() {
+        return;
+    }
+    let app = std::env::var("PYROSCOPE_APP_NAME").unwrap_or_else(|_| "frontend".to_string());
+    let pod = std::env::var("POD_NAME")
+        .or_else(|_| std::env::var("HOSTNAME"))
+        .unwrap_or_else(|_| "unknown".to_string());
+    let node = std::env::var("NODE_NAME").unwrap_or_else(|_| "unknown".to_string());
+    // Matches pyroscope-go's UploadRate in the backend.
+    const INTERVAL: std::time::Duration = std::time::Duration::from_secs(60);
+
+    tokio::spawn(async move {
+        let name = format!("{app}{{pod={pod},node={node}}}");
+        let client = reqwest::Client::new();
+        let mut last_logged_err = false;
+        loop {
+            tokio::time::sleep(INTERVAL).await;
+
+            let Some(prof_ctl) = jemalloc_pprof::PROF_CTL.as_ref() else {
+                continue;
+            };
+            let pprof = {
+                let mut ctl = prof_ctl.lock().await;
+                if !ctl.activated() {
+                    continue;
+                }
+                match ctl.dump_pprof() {
+                    Ok(p) => p,
+                    Err(e) => {
+                        tracing::warn!("pyroscope pusher: dump_pprof failed: {e}");
+                        continue;
+                    }
+                }
+            };
+
+            let until = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_secs())
+                .unwrap_or(0);
+            let from = until.saturating_sub(INTERVAL.as_secs());
+
+            let Ok(mut url) = url::Url::parse(&format!("{server}/ingest")) else {
+                tracing::warn!("pyroscope pusher: invalid PYROSCOPE_URL: {server}");
+                return;
+            };
+            url.query_pairs_mut()
+                .append_pair("name", &name)
+                .append_pair("from", &from.to_string())
+                .append_pair("until", &until.to_string())
+                .append_pair("format", "pprof");
+
+            let res = client.post(url).body(pprof).send().await;
+
+            match res {
+                Ok(r) if r.status().is_success() => {
+                    last_logged_err = false;
+                }
+                Ok(r) => {
+                    if !last_logged_err {
+                        tracing::warn!("pyroscope pusher: ingest returned {}", r.status());
+                        last_logged_err = true;
+                    }
+                }
+                Err(e) => {
+                    // Log once per outage, not every minute.
+                    if !last_logged_err {
+                        tracing::warn!("pyroscope pusher: ingest failed: {e}");
+                        last_logged_err = true;
+                    }
+                }
+            }
+        }
+    });
+}
+
+/// Reverse-connect to the pprof-gateway (same protocol as the Go services'
+/// pkg/client): websocket to `$PPROF_GATEWAY_URL/connect`, register with
+/// `{service, hostname}`, then answer `{id, url}` profile requests. rari can
+/// serve `/debug/pprof/heap` (jemalloc pprof); other profile types get a 404
+/// response so the gateway UI degrades gracefully.
+pub fn spawn_pprof_gateway_client() {
+    let Ok(gateway) = std::env::var("PPROF_GATEWAY_URL") else {
+        return;
+    };
+    if gateway.is_empty() {
+        return;
+    }
+
+    let mut hostname = std::env::var("HOSTNAME").unwrap_or_else(|_| "rari-unknown".to_string());
+    if let Ok(node) = std::env::var("NODE_NAME") {
+        hostname = format!("{hostname}@{node}");
+    }
+
+    tokio::spawn(async move {
+        // http(s) -> ws(s)
+        let ws_url = if let Some(rest) = gateway.strip_prefix("https://") {
+            format!("wss://{rest}/connect")
+        } else if let Some(rest) = gateway.strip_prefix("http://") {
+            format!("ws://{rest}/connect")
+        } else {
+            format!("{gateway}/connect")
+        };
+
+        loop {
+            match run_gateway_session(&ws_url, &hostname).await {
+                Ok(()) => tracing::info!("pprof-gateway session closed; reconnecting"),
+                Err(e) => tracing::warn!("pprof-gateway connect failed: {e}; retrying in 30s"),
+            }
+            tokio::time::sleep(std::time::Duration::from_secs(30)).await;
+        }
+    });
+}
+
+async fn run_gateway_session(
+    ws_url: &str,
+    hostname: &str,
+) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    use base64::Engine;
+    use futures::{SinkExt, StreamExt};
+    use tokio_tungstenite::tungstenite::Message;
+
+    let (mut ws, _) = tokio_tungstenite::connect_async(ws_url).await?;
+
+    // Register; gateway replies with our connection id.
+    ws.send(Message::Text(
+        serde_json::json!({"service": "frontend", "hostname": hostname}).to_string().into(),
+    ))
+    .await?;
+    let Some(Ok(Message::Text(reply))) = ws.next().await else {
+        return Err("no registration reply".into());
+    };
+    let conn_id = serde_json::from_str::<serde_json::Value>(&reply)?
+        .get("id")
+        .and_then(|v| v.as_str())
+        .unwrap_or("?")
+        .to_string();
+    tracing::info!("connected to pprof gateway as {hostname} (id={conn_id})");
+
+    while let Some(msg) = ws.next().await {
+        let Message::Text(text) = msg? else { continue };
+        let Ok(req) = serde_json::from_str::<serde_json::Value>(&text) else { continue };
+
+        // Statsviz relay is Go-specific: report unsupported instead of hanging.
+        if let Some(t) = req.get("type").and_then(|v| v.as_str())
+            && t == "statsviz_start"
+        {
+            let id = req.get("id").and_then(|v| v.as_str()).unwrap_or_default();
+            ws.send(Message::Text(
+                serde_json::json!({
+                    "type": "statsviz_error", "id": id,
+                    "error": "statsviz not supported by rari",
+                })
+                .to_string()
+                .into(),
+            ))
+            .await?;
+            continue;
+        }
+
+        let (Some(id), Some(url)) = (
+            req.get("id").and_then(|v| v.as_str()),
+            req.get("url").and_then(|v| v.as_str()),
+        ) else {
+            continue;
+        };
+
+        let response = match url.split('?').next().unwrap_or(url) {
+            "/debug/pprof/heap" => match dump_heap_pprof().await {
+                Ok(pprof) => serde_json::json!({
+                    "id": id, "status_code": 200,
+                    "headers": {},
+                    "body": base64::engine::general_purpose::STANDARD.encode(&pprof),
+                    "content_type": "application/octet-stream",
+                    "error": "",
+                }),
+                Err(e) => serde_json::json!({
+                    "id": id, "status_code": 500, "headers": {}, "body": "",
+                    "content_type": "", "error": e,
+                }),
+            },
+            other => serde_json::json!({
+                "id": id, "status_code": 404, "headers": {}, "body": "",
+                "content_type": "",
+                "error": format!("profile {other} not supported by rari (heap only)"),
+            }),
+        };
+
+        ws.send(Message::Text(response.to_string().into())).await?;
+    }
+    Ok(())
+}
+
+async fn dump_heap_pprof() -> Result<Vec<u8>, String> {
+    let Some(prof_ctl) = jemalloc_pprof::PROF_CTL.as_ref() else {
+        return Err("jemalloc profiling unavailable".to_string());
+    };
+    let mut ctl = prof_ctl.lock().await;
+    if !ctl.activated() {
+        return Err("heap profiling not active; run with MALLOC_CONF=prof:true,prof_active:true"
+            .to_string());
+    }
+    ctl.dump_pprof().map_err(|e| e.to_string())
+}
+
 /// `GET /_rari/metrics` — jemalloc allocator stats as Prometheus gauges (bytes).
 pub async fn metrics_handler() -> impl IntoResponse {
     // Stats are cached per epoch; advance it so the read reflects current usage.
