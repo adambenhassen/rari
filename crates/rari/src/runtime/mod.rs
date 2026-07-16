@@ -54,7 +54,14 @@ impl JsExecutionRuntime {
             factory::create_lazy_runtime()
         };
 
-        Self { runtime: Arc::new(runtime), timeout_ms: 30000 }
+        // Startup runs the whole server bundle through this timeout; under
+        // rollout CPU contention 30s is not enough and the process fatally
+        // exits ("Failed to create server: Script execution timed out").
+        let timeout_ms = std::env::var("RARI_SCRIPT_TIMEOUT_MS")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(30000);
+        Self { runtime: Arc::new(runtime), timeout_ms }
     }
 
     pub fn with_timeout(mut self, timeout_ms: u64) -> Self {
