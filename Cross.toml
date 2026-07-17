@@ -1,0 +1,14 @@
+[build.env]
+# Forward release-profile overrides into the cross container. Set LTO and debug
+# symbols at invocation time:
+#   CARGO_PROFILE_RELEASE_LTO=fat CARGO_PROFILE_RELEASE_DEBUG=true
+# fat LTO needs the cross VM to have enough RAM (raise Docker memory if the
+# final link OOM-kills). DEBUG=true keeps symbols for Pyroscope profiling.
+passthrough = ["CARGO_PROFILE_RELEASE_LTO", "CARGO_PROFILE_RELEASE_DEBUG"]
+
+[target.x86_64-unknown-linux-gnu]
+# Match the CI runner's "Install dependencies (Linux)" step so native-lib
+# crates (yeslogic-fontconfig-sys) resolve fontconfig inside the cross image.
+pre-build = [
+    "apt-get update && apt-get install -y pkg-config libfontconfig1-dev",
+]
