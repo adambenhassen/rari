@@ -428,7 +428,7 @@ impl RscHtmlRenderer {
         html_content: &str,
         template: &str,
     ) -> Result<String, RariError> {
-        use regex::Regex;
+        use regex::{NoExpand, Regex};
 
         let root_div_regex =
             Regex::new(r#"<div\s+id=["']root["'](?:\s+[^>]*)?\s*(?:/>|>\s*</div>)"#)
@@ -442,7 +442,11 @@ impl RscHtmlRenderer {
 
         let replacement = format!(r#"<div id="root">{}</div>"#, html_content);
 
-        let result = root_div_regex.replace(template, replacement.as_str());
+        // NoExpand: the rendered app HTML is a literal replacement, not a
+        // pattern. Without it, `$0`/`$1`/`$&` in page content (e.g. a "$0.20"
+        // headline) would be interpreted as capture-group references and expand
+        // to the matched root div, corrupting the output.
+        let result = root_div_regex.replace(template, NoExpand(replacement.as_str()));
 
         Ok(result.to_string())
     }
@@ -2402,6 +2406,26 @@ mod tests {
         assert!(html.contains(r#"<div id="root"><h1>Hello World</h1></div>"#));
         assert!(html.contains("<html>"));
         assert!(html.contains("<body>"));
+    }
+
+    #[test]
+    fn test_inject_into_template_preserves_dollar_sequences() {
+        // Regression: `$0`/`$1`/`$&` in page content must not be expanded as
+        // regex capture references during root-div injection.
+        let runtime = Arc::new(JsExecutionRuntime::new(None));
+        let renderer = RscHtmlRenderer::new(runtime);
+
+        let template = r#"<html><body><div id="root"></div></body></html>"#;
+        let content = r#"<h1>XLM eyes $0.20 breakout</h1><p>$1 &amp; $&amp;</p>"#;
+
+        let html = renderer
+            .inject_into_template(content, template)
+            .expect("inject should succeed");
+
+        assert!(
+            html.contains(r#"<div id="root"><h1>XLM eyes $0.20 breakout</h1><p>$1 &amp; $&amp;</p></div>"#),
+            "dollar sequences must survive verbatim, got: {html}"
+        );
     }
 
     #[test]
