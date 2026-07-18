@@ -28,10 +28,12 @@ jobs:
             os: ubuntu-latest
             target: x86_64-unknown-linux-gnu
             name: rari-linux-x64
-          - platform: darwin-arm64
-            os: macos-14
-            target: aarch64-apple-darwin
-            name: rari-darwin-arm64
+          # darwin-arm64 disabled — local dev stays on cachefix.0; uncomment to build
+          # (also uncomment the darwin lines in the release job below):
+          # - platform: darwin-arm64
+          #   os: macos-14
+          #   target: aarch64-apple-darwin
+          #   name: rari-darwin-arm64
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -40,6 +42,12 @@ jobs:
         uses: dtolnay/rust-toolchain@nightly
         with:
           targets: ${{ matrix.target }}
+
+      - name: Rust cache
+        uses: Swatinem/rust-cache@v2
+        with:
+          key: ${{ matrix.target }}
+          cache-on-failure: true
 
       - name: Install dependencies (Linux)
         if: runner.os == 'Linux'
@@ -60,7 +68,15 @@ jobs:
           echo 'pub static RESIDUAL_LAZY_ESM_SOURCES: &[(&str, &str)] = &[];' > crates/rari/snapshots/residual_lazy_sources.rs
           echo 'pub static RESIDUAL_LAZY_JS_SOURCES: &[(&str, &str)] = &[];' >> crates/rari/snapshots/residual_lazy_sources.rs
           cargo run --release --manifest-path tools/snapshot/Cargo.toml -- crates/rari/snapshots
-          cargo build --release --target ${{ matrix.target }} --bin rari --features jemalloc
+          # Fat LTO from the profile, plus profiling niceties: line tables give
+          # Pyroscope file:line at ~10% of full DWARF's link cost (DEBUG=true
+          # needs ~20GB and OOMs the runner — never use it), strip=none keeps
+          # them (profile default strip=debuginfo would delete them), frame
+          # pointers keep jemalloc stack unwinding fast and complete.
+          CARGO_PROFILE_RELEASE_DEBUG=line-tables-only \
+          CARGO_PROFILE_RELEASE_STRIP=none \
+          RUSTFLAGS="-Cforce-frame-pointers=yes" \
+            cargo build --release --target ${{ matrix.target }} --bin rari --features jemalloc
 
       - name: Prepare binary
         run: |
@@ -120,7 +136,7 @@ jobs:
           }
 
           build_platform linux-x64  linux  x64   "Linux x64 binary"   '"linux", "x64",'
-          build_platform darwin-arm64 darwin arm64 "macOS ARM64 binary" '"darwin", "arm64", "macos", "apple-silicon",'
+          # build_platform darwin-arm64 darwin arm64 "macOS ARM64 binary" '"darwin", "arm64", "macos", "apple-silicon",'
 
           ls -la dist-tarballs
 
@@ -165,10 +181,10 @@ jobs:
 
           gh release create "${TAG}" \
             --repo "${GITHUB_REPOSITORY}" \
-            --title "rari ${VERSION} (cache-control fix)" \
+            --title "rari ${VERSION}" \
             --notes-file "${NOTES_FILE}" \
             --prerelease \
             --target "${GITHUB_SHA}" \
             dist-tarballs/*.tgz \
-            artifacts/rari-linux-x64/rari-linux-x64 \
-            artifacts/rari-darwin-arm64/rari-darwin-arm64
+            artifacts/rari-linux-x64/rari-linux-x64
+          # darwin: add artifacts/rari-darwin-arm64/rari-darwin-arm64 when re-enabled
