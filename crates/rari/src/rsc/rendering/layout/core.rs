@@ -14,7 +14,7 @@ use tracing::error;
 use super::{constants::*, error_messages, types::*, utils};
 
 pub struct LayoutHtmlCache {
-    cache: DashMap<u64, String>,
+    cache: DashMap<u64, (String, std::time::Instant)>,
     /// Total bytes of cached HTML. The cache key hashes route params AND
     /// search params, so unique query strings (crawlers, cache busters) mint
     /// unbounded entries of full rendered pages — without a byte budget this
@@ -38,8 +38,20 @@ impl LayoutHtmlCache {
         Self { cache: DashMap::new(), bytes: std::sync::atomic::AtomicUsize::new(0), max_bytes }
     }
 
-    fn get(&self, key: u64) -> Option<String> {
-        self.cache.get(&key).map(|v| v.clone())
+    fn get(&self, key: u64, ttl: std::time::Duration) -> Option<String> {
+        let expired_at = {
+            let entry = self.cache.get(&key)?;
+            if entry.value().1.elapsed() < ttl {
+                return Some(entry.value().0.clone());
+            }
+            entry.value().1
+        };
+        // Entry ref dropped above; safe to remove without deadlocking the shard.
+        // Condition on the timestamp so a concurrent re-insert isn't evicted.
+        if let Some((_, (old, _))) = self.cache.remove_if(&key, |_, (_, at)| *at == expired_at) {
+            self.bytes.fetch_sub(old.len(), std::sync::atomic::Ordering::Relaxed);
+        }
+        None
     }
 
     fn insert(&self, key: u64, html: String) {
@@ -51,7 +63,7 @@ impl LayoutHtmlCache {
             self.clear();
         }
         self.bytes.fetch_add(html.len(), Ordering::Relaxed);
-        if let Some(old) = self.cache.insert(key, html) {
+        if let Some((old, _)) = self.cache.insert(key, (html, std::time::Instant::now())) {
             self.bytes.fetch_sub(old.len(), Ordering::Relaxed);
         }
     }
@@ -68,6 +80,25 @@ impl LayoutHtmlCache {
     pub fn entries(&self) -> usize {
         self.cache.len()
     }
+}
+
+/// TTL for cached layout HTML, derived from the route's `Cache-Control`
+/// `max-age` (the same policy the response cache uses). Without this the
+/// layout cache serves startup-era HTML forever: the response cache expires
+/// after `max-age`, re-renders, hits this cache, and re-stamps stale HTML
+/// with a fresh response TTL.
+fn layout_cache_ttl(path: &str) -> std::time::Duration {
+    const DEFAULT_TTL_SECS: u64 = 60;
+    let secs = Config::get()
+        .map(|config| {
+            let policy = crate::server::cache::response::RouteCachePolicy::from_cache_control(
+                config.get_cache_control_for_route(path),
+                path,
+            );
+            if policy.enabled { policy.ttl } else { 0 }
+        })
+        .unwrap_or(DEFAULT_TTL_SECS);
+    std::time::Duration::from_secs(secs)
 }
 
 pub struct LayoutRenderer {
@@ -368,7 +399,10 @@ impl LayoutRenderer {
     ) -> Result<RenderResult, RariError> {
         let cache_key = utils::generate_cache_key(route_match, context);
 
-        if !return_rsc_on_fallback && let Some(cached_html) = self.html_cache.get(cache_key) {
+        if !return_rsc_on_fallback
+            && let Some(cached_html) =
+                self.html_cache.get(cache_key, layout_cache_ttl(&route_match.pathname))
+        {
             return Ok(RenderResult::Static(cached_html));
         }
 
@@ -1141,5 +1175,28 @@ if (typeof window !== 'undefined') {
         component_code: &str,
     ) -> Result<(), RariError> {
         self.renderer.lock().await.register_component(component_id, component_code).await
+    }
+}
+
+#[cfg(test)]
+mod layout_html_cache_tests {
+    use super::LayoutHtmlCache;
+    use std::time::Duration;
+
+    #[test]
+    fn serves_within_ttl_and_expires_after() {
+        let cache = LayoutHtmlCache::new();
+        cache.insert(1, "<html>hi</html>".to_string());
+
+        assert_eq!(cache.get(1, Duration::from_secs(60)).as_deref(), Some("<html>hi</html>"));
+
+        // Zero TTL: every entry is already expired and must be evicted.
+        assert_eq!(cache.get(1, Duration::ZERO), None);
+        assert_eq!(cache.entries(), 0);
+        assert_eq!(cache.bytes(), 0);
+
+        // Re-insert restores byte accounting.
+        cache.insert(1, "<html>hi</html>".to_string());
+        assert_eq!(cache.bytes(), "<html>hi</html>".len());
     }
 }
