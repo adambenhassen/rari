@@ -111,13 +111,48 @@ const SVG_ATTR_MAP = {
   vectorEffect: 'vector-effect',
 }
 
+// True boolean HTML attributes render bare when true (mirrors the Rust
+// serializer's is_boolean_html_attribute). Everything else passed a boolean
+// (draggable, contentEditable, spellCheck, ...) is enumerated and needs the
+// literal "true"/"false" value.
+const BOOLEAN_HTML_ATTRIBUTES = new Set([
+  'allowfullscreen', 'async', 'autofocus', 'autoplay', 'checked', 'controls',
+  'default', 'defer', 'disabled', 'formnovalidate', 'hidden', 'inert', 'ismap',
+  'itemscope', 'loop', 'multiple', 'muted', 'nomodule', 'novalidate', 'open',
+  'playsinline', 'readonly', 'required', 'reversed', 'selected',
+])
+
+// React-internal props that must never reach the markup.
+const SKIPPED_PROPS = new Set([
+  'key', 'ref', '__self', '__source',
+  'suppressHydrationWarning', 'suppressContentEditableWarning',
+])
+
 async function renderHtmlElement(tagName, props, depth) {
-  const { children, dangerouslySetInnerHTML, ...attributes } = props
+  let { children, dangerouslySetInnerHTML, ...attributes } = props
+
+  // React SSR semantics: defaultValue/defaultChecked render as value/checked
+  // (unless the controlled prop is also set), and a textarea's value renders
+  // as its child text, never as an attribute.
+  if ('defaultValue' in attributes) {
+    if (!('value' in attributes))
+      attributes.value = attributes.defaultValue
+    delete attributes.defaultValue
+  }
+  if ('defaultChecked' in attributes) {
+    if (!('checked' in attributes))
+      attributes.checked = attributes.defaultChecked
+    delete attributes.defaultChecked
+  }
+  if (tagName === 'textarea' && 'value' in attributes) {
+    children = attributes.value
+    delete attributes.value
+  }
 
   let html = `<${tagName}`
 
   for (const [key, value] of Object.entries(attributes)) {
-    if (key === 'key' || key === 'ref' || key === '__self' || key === '__source')
+    if (SKIPPED_PROPS.has(key))
       continue
 
     if (key === 'className') {
@@ -143,8 +178,13 @@ async function renderHtmlElement(tagName, props, depth) {
     }
 
     if (typeof value === 'boolean') {
-      if (value)
-        html += ` ${key}`
+      if (BOOLEAN_HTML_ATTRIBUTES.has(key.toLowerCase())) {
+        if (value)
+          html += ` ${key}`
+      }
+      else {
+        html += ` ${key}="${value}"`
+      }
       continue
     }
 

@@ -1007,9 +1007,31 @@ impl RscHtmlRenderer {
                         continue;
                     }
 
+                    // textarea value renders as child text (React SSR
+                    // semantics), never as an attribute.
+                    if tag == "textarea" && matches!(key.as_str(), "value" | "defaultValue") {
+                        continue;
+                    }
+
                     let attr_name = match key.as_str() {
                         "className" => "class",
                         "htmlFor" => "for",
+                        // React-internal props never reach the markup.
+                        "suppressHydrationWarning" | "suppressContentEditableWarning" => continue,
+                        // Uncontrolled form defaults render as the live
+                        // attribute unless the controlled prop is also set.
+                        "defaultValue" => {
+                            if props_obj.contains_key("value") {
+                                continue;
+                            }
+                            "value"
+                        }
+                        "defaultChecked" => {
+                            if props_obj.contains_key("checked") {
+                                continue;
+                            }
+                            "checked"
+                        }
                         // Camel-cased SVG presentation attributes: React DOM
                         // serializes these kebab-cased; emitting them verbatim
                         // makes browsers ignore them (SVG attrs are
@@ -1081,7 +1103,15 @@ impl RscHtmlRenderer {
 
             html.push('>');
 
-            if let Some(props_obj) = props.as_object()
+            let textarea_value = (tag == "textarea")
+                .then(|| props.as_object())
+                .flatten()
+                .and_then(|p| p.get("value").or_else(|| p.get("defaultValue")))
+                .and_then(|v| v.as_str());
+
+            if let Some(value) = textarea_value {
+                html.push_str(&escape_html(value));
+            } else if let Some(props_obj) = props.as_object()
                 && let Some(children) = props_obj.get("children")
             {
                 let children_html = self.render_json_to_html(children, row_map, row_cache).await?;
