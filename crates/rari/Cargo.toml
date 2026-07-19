@@ -39,7 +39,7 @@ path = "src/bin/rari.rs"
 default = []
 # jemalloc global allocator + memory profiling (prod builds): --features jemalloc.
 # Enables /_rari/metrics (Prometheus allocator stats) and /_rari/debug/heap.
-jemalloc = ["dep:tikv-jemallocator", "dep:tikv-jemalloc-ctl", "dep:jemalloc_pprof"]
+jemalloc = ["dep:tikv-jemallocator", "dep:tikv-jemalloc-ctl", "dep:jemalloc_pprof", "dep:backtrace"]
 
 [dependencies]
 # === Core Runtime Dependencies ===
@@ -183,6 +183,9 @@ tikv-jemalloc-ctl = { version = "0.7", optional = true, features = [ "stats" ] }
 # Converts jemalloc's heap profile straight to pprof protobuf (feeds Pyroscope /
 # `go tool pprof`), symbolized in-process — no jeprof/perl step.
 jemalloc_pprof = { version = "0.9", optional = true, features = [ "symbolize" ] }
+# Same crate jemalloc_pprof symbolizes through; gives us clear_symbol_cache()
+# to free its retained DWARF context between profile pushes.
+backtrace = { version = "0.3", optional = true }
 nix = { version = "=0.30.1", features = [ "term" ] }
 sys_traits = "=0.1.28"
 

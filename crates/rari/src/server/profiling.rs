@@ -58,6 +58,11 @@ pub fn spawn_pyroscope_pusher() {
                     }
                 }
             };
+            // In-process symbolization (pprof_util's `symbolize`) parses the
+            // binary's DWARF into the backtrace crate's global cache and would
+            // keep tens of MB resident between pushes; re-parsing once a
+            // minute is cheaper than holding it.
+            backtrace::clear_symbol_cache();
 
             let until = std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
@@ -225,7 +230,10 @@ async fn dump_heap_pprof() -> Result<Vec<u8>, String> {
         return Err("heap profiling not active; run with MALLOC_CONF=prof:true,prof_active:true"
             .to_string());
     }
-    ctl.dump_pprof().map_err(|e| e.to_string())
+    let pprof = ctl.dump_pprof().map_err(|e| e.to_string());
+    // See the pusher: don't leave the symbolization DWARF cache resident.
+    backtrace::clear_symbol_cache();
+    pprof
 }
 
 /// `GET /_rari/metrics` — jemalloc allocator stats, cache gauges, and the
