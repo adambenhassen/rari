@@ -1402,7 +1402,9 @@ pub async fn handle_app_route(
                     );
 
                     let mut rsc_stream = stream;
-                    let mut buffered_html = String::new();
+                    // Rendered pages are typically tens of KB; pre-sizing skips
+                    // the doubling reallocs that showed up in heap profiles.
+                    let mut buffered_html = String::with_capacity(64 * 1024);
 
                     while let Some(chunk) = rsc_stream.next_chunk().await {
                         match converter.convert_chunk(chunk).await {
@@ -1454,9 +1456,11 @@ pub async fn handle_app_route(
             let cache_policy =
                 response::RouteCachePolicy::from_cache_control(cache_control_value, path);
 
+            let body_bytes = bytes::Bytes::from(final_html);
+
             if cache_policy.enabled {
                 let cached_response = response::CachedResponse {
-                    body: bytes::Bytes::from(final_html.clone()),
+                    body: body_bytes.clone(),
                     headers: response_headers,
                     metadata: response::CacheMetadata {
                         cached_at: std::time::Instant::now(),
@@ -1472,7 +1476,7 @@ pub async fn handle_app_route(
                 state.response_cache.set(cache_key, cached_response).await;
             }
 
-            Ok(response_builder.body(Body::from(final_html)).expect("Valid HTML response"))
+            Ok(response_builder.body(Body::from(body_bytes)).expect("Valid HTML response"))
         }
     }
 }

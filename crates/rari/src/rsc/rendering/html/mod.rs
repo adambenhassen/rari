@@ -719,7 +719,7 @@ impl RscHtmlRenderer {
                     String::new()
                 };
 
-                let mut final_html = html_content.clone();
+                let mut final_html = html_content;
 
                 if !script_tags.is_empty()
                     && let Some(body_end) = final_html.rfind("</body>")
