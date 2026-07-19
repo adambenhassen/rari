@@ -20,6 +20,16 @@ jobs:
   build:
     name: Build ${{ matrix.platform }}
     runs-on: ${{ matrix.os }}
+    # Job-level so rust-cache's environment hash covers these: a profile
+    # change then mints a new cache key instead of poisoning the old one.
+    # Fat LTO comes from the profile; line tables give Pyroscope file:line
+    # at ~10% of full DWARF's link cost (DEBUG=true needs ~20GB and OOMs
+    # the runner — never use it), strip=none keeps them, frame pointers
+    # keep jemalloc stack unwinding fast and complete.
+    env:
+      CARGO_PROFILE_RELEASE_DEBUG: line-tables-only
+      CARGO_PROFILE_RELEASE_STRIP: none
+      RUSTFLAGS: -Cforce-frame-pointers=yes
     strategy:
       fail-fast: false
       matrix:
@@ -39,13 +49,20 @@ jobs:
         uses: actions/checkout@v7
 
       - name: Install Rust
-        uses: dtolnay/rust-toolchain@nightly
+        uses: dtolnay/rust-toolchain@master
         with:
+          # Keep in sync with rust-toolchain.toml — a floating `nightly`
+          # invalidates every cached artifact on each nightly rollover.
+          toolchain: nightly-2026-07-17
           targets: ${{ matrix.target }}
 
       - name: Rust cache
         uses: Swatinem/rust-cache@v2
         with:
+          # v1: old v0 caches were built with different profile env
+          # (DEBUG=true era) — key still hit but every fingerprint missed,
+          # so runs recompiled everything and never re-saved good artifacts.
+          prefix-key: v1-rust
           key: ${{ matrix.target }}
           cache-on-failure: true
 
@@ -68,15 +85,7 @@ jobs:
           echo 'pub static RESIDUAL_LAZY_ESM_SOURCES: &[(&str, &str)] = &[];' > crates/rari/snapshots/residual_lazy_sources.rs
           echo 'pub static RESIDUAL_LAZY_JS_SOURCES: &[(&str, &str)] = &[];' >> crates/rari/snapshots/residual_lazy_sources.rs
           cargo run --release --manifest-path tools/snapshot/Cargo.toml -- crates/rari/snapshots
-          # Fat LTO from the profile, plus profiling niceties: line tables give
-          # Pyroscope file:line at ~10% of full DWARF's link cost (DEBUG=true
-          # needs ~20GB and OOMs the runner — never use it), strip=none keeps
-          # them (profile default strip=debuginfo would delete them), frame
-          # pointers keep jemalloc stack unwinding fast and complete.
-          CARGO_PROFILE_RELEASE_DEBUG=line-tables-only \
-          CARGO_PROFILE_RELEASE_STRIP=none \
-          RUSTFLAGS="-Cforce-frame-pointers=yes" \
-            cargo build --release --target ${{ matrix.target }} --bin rari --features jemalloc
+          cargo build --release --target ${{ matrix.target }} --bin rari --features jemalloc
 
       - name: Prepare binary
         run: |
@@ -107,6 +116,20 @@ jobs:
         uses: actions/download-artifact@v8
         with:
           path: artifacts
+
+      - name: Normalize artifact layout
+        # download-artifact@v8 flattens a single-file artifact to
+        # artifacts/<name>; later steps expect artifacts/<name>/<name>.
+        run: |
+          set -euo pipefail
+          for f in artifacts/*; do
+            if [ -f "$f" ]; then
+              mv "$f" "$f.tmp"
+              mkdir "$f"
+              mv "$f.tmp" "$f/$(basename "$f")"
+            fi
+          done
+          find artifacts -type f
 
       - name: Build platform npm tarballs
         run: |
