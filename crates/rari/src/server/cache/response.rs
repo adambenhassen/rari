@@ -115,6 +115,13 @@ impl RouteCachePolicy {
         let mut policy = Self::default();
         policy.tags.push(route_path.to_string());
 
+        // The server-side caches driven by this policy are shared caches, so
+        // `s-maxage` takes precedence over `max-age` (RFC 9111 §5.2.2.10).
+        // Reading only `max-age` breaks the common CDN pattern
+        // `max-age=0, s-maxage=3600`: the route asks shared caches to hold
+        // content for an hour, but ttl would come out 0.
+        let mut max_age = None;
+        let mut s_maxage = None;
         for directive in cache_control.split(',') {
             let directive = directive.trim();
 
@@ -123,11 +130,19 @@ impl RouteCachePolicy {
                 return policy;
             }
 
-            if let Some(max_age_str) = directive.strip_prefix("max-age=")
-                && let Ok(max_age) = max_age_str.trim().parse::<u64>()
+            if let Some(value) = directive.strip_prefix("s-maxage=")
+                && let Ok(secs) = value.trim().parse::<u64>()
             {
-                policy.ttl = max_age;
+                s_maxage = Some(secs);
+            } else if let Some(value) = directive.strip_prefix("max-age=")
+                && let Ok(secs) = value.trim().parse::<u64>()
+            {
+                max_age = Some(secs);
             }
+        }
+
+        if let Some(ttl) = s_maxage.or(max_age) {
+            policy.ttl = ttl;
         }
 
         policy
@@ -523,7 +538,8 @@ mod tests {
 
     #[tokio::test]
     async fn test_cache_basic_operations() {
-        let config = CacheConfig { max_entries: 10, max_bytes: usize::MAX, default_ttl: 60, enabled: true };
+        let config =
+            CacheConfig { max_entries: 10, max_bytes: usize::MAX, default_ttl: 60, enabled: true };
         let cache = ResponseCache::new(config);
 
         assert!(cache.get("test-key").await.is_none());
@@ -543,7 +559,8 @@ mod tests {
 
     #[tokio::test]
     async fn test_cache_expiration() {
-        let config = CacheConfig { max_entries: 10, max_bytes: usize::MAX, default_ttl: 60, enabled: true };
+        let config =
+            CacheConfig { max_entries: 10, max_bytes: usize::MAX, default_ttl: 60, enabled: true };
         let cache = ResponseCache::new(config);
 
         let response = create_test_response("test body", 0);
@@ -556,7 +573,8 @@ mod tests {
 
     #[tokio::test]
     async fn test_cache_invalidation() {
-        let config = CacheConfig { max_entries: 10, max_bytes: usize::MAX, default_ttl: 60, enabled: true };
+        let config =
+            CacheConfig { max_entries: 10, max_bytes: usize::MAX, default_ttl: 60, enabled: true };
         let cache = ResponseCache::new(config);
 
         let response = create_test_response("test body", 60);
@@ -571,7 +589,8 @@ mod tests {
 
     #[tokio::test]
     async fn test_cache_tag_invalidation() {
-        let config = CacheConfig { max_entries: 10, max_bytes: usize::MAX, default_ttl: 60, enabled: true };
+        let config =
+            CacheConfig { max_entries: 10, max_bytes: usize::MAX, default_ttl: 60, enabled: true };
         let cache = ResponseCache::new(config);
 
         let mut response1 = create_test_response("body1", 60);
@@ -594,7 +613,8 @@ mod tests {
 
     #[tokio::test]
     async fn test_cache_lru_eviction() {
-        let config = CacheConfig { max_entries: 2, max_bytes: usize::MAX, default_ttl: 60, enabled: true };
+        let config =
+            CacheConfig { max_entries: 2, max_bytes: usize::MAX, default_ttl: 60, enabled: true };
         let cache = ResponseCache::new(config);
 
         cache.set("key1".to_string(), create_test_response("body1", 60)).await;
@@ -612,7 +632,8 @@ mod tests {
 
     #[tokio::test]
     async fn test_cache_disabled() {
-        let config = CacheConfig { max_entries: 10, max_bytes: usize::MAX, default_ttl: 60, enabled: false };
+        let config =
+            CacheConfig { max_entries: 10, max_bytes: usize::MAX, default_ttl: 60, enabled: false };
         let cache = ResponseCache::new(config);
 
         let response = create_test_response("test body", 60);
@@ -623,7 +644,8 @@ mod tests {
 
     #[tokio::test]
     async fn test_cache_clear() {
-        let config = CacheConfig { max_entries: 10, max_bytes: usize::MAX, default_ttl: 60, enabled: true };
+        let config =
+            CacheConfig { max_entries: 10, max_bytes: usize::MAX, default_ttl: 60, enabled: true };
         let cache = ResponseCache::new(config);
 
         cache.set("key1".to_string(), create_test_response("body1", 60)).await;
@@ -640,7 +662,8 @@ mod tests {
 
     #[tokio::test]
     async fn test_clear_percentage() {
-        let config = CacheConfig { max_entries: 10, max_bytes: usize::MAX, default_ttl: 60, enabled: true };
+        let config =
+            CacheConfig { max_entries: 10, max_bytes: usize::MAX, default_ttl: 60, enabled: true };
         let cache = ResponseCache::new(config);
 
         for i in 0..10 {
@@ -658,7 +681,8 @@ mod tests {
 
     #[tokio::test]
     async fn test_memory_pressure_detection() {
-        let config = CacheConfig { max_entries: 10, max_bytes: usize::MAX, default_ttl: 60, enabled: true };
+        let config =
+            CacheConfig { max_entries: 10, max_bytes: usize::MAX, default_ttl: 60, enabled: true };
         let cache = ResponseCache::new(config);
 
         for i in 0..8 {
@@ -768,6 +792,22 @@ mod tests {
         assert_eq!(policy.ttl, 3600);
         assert!(policy.enabled);
         assert_eq!(policy.tags, vec!["/test".to_string()]);
+    }
+
+    #[test]
+    fn test_route_cache_policy_s_maxage_precedence() {
+        // Shared caches: s-maxage wins over max-age regardless of order.
+        assert_eq!(
+            RouteCachePolicy::from_cache_control("max-age=0, s-maxage=3600", "/t").ttl,
+            3600
+        );
+        assert_eq!(RouteCachePolicy::from_cache_control("s-maxage=60, max-age=600", "/t").ttl, 60);
+        assert_eq!(RouteCachePolicy::from_cache_control("s-maxage=60", "/t").ttl, 60);
+        // Garbage s-maxage falls back to max-age.
+        assert_eq!(
+            RouteCachePolicy::from_cache_control("s-maxage=garbage, max-age=60", "/t").ttl,
+            60
+        );
     }
 
     #[test]
