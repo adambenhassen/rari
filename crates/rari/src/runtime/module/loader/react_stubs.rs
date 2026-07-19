@@ -27,11 +27,16 @@ export default { jsx, jsxs, Fragment };
 
 pub const REACT_STUB: &str = r#"
 const createElement = (type, props, ...children) => {
-  if (typeof type === 'string') {
-    return { type, props: props || {}, children: children.flat() };
+  // React semantics: positional children land in props.children (single child
+  // unwrapped, multiple as array). The HTML renderer reads props.children, so
+  // storing them only on element.children silently drops rendered children
+  // (e.g. every lucide icon's <path>s). element.children is kept for the RSC
+  // traversal fallback.
+  const merged = { ...(props || {}) };
+  if (children.length > 0) {
+    merged.children = children.length === 1 ? children[0] : children;
   }
-
-  return { type, props: props || {}, children: children.flat() };
+  return { type, props: merged, children: children.flat() };
 };
 
 const Fragment = Symbol.for('react.fragment');

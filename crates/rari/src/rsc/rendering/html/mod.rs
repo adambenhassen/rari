@@ -1010,6 +1010,26 @@ impl RscHtmlRenderer {
                     let attr_name = match key.as_str() {
                         "className" => "class",
                         "htmlFor" => "for",
+                        // Camel-cased SVG presentation attributes: React DOM
+                        // serializes these kebab-cased; emitting them verbatim
+                        // makes browsers ignore them (SVG attrs are
+                        // case-sensitive).
+                        "strokeWidth" => "stroke-width",
+                        "strokeLinecap" => "stroke-linecap",
+                        "strokeLinejoin" => "stroke-linejoin",
+                        "strokeDasharray" => "stroke-dasharray",
+                        "strokeDashoffset" => "stroke-dashoffset",
+                        "strokeMiterlimit" => "stroke-miterlimit",
+                        "strokeOpacity" => "stroke-opacity",
+                        "fillOpacity" => "fill-opacity",
+                        "fillRule" => "fill-rule",
+                        "clipRule" => "clip-rule",
+                        "clipPath" => "clip-path",
+                        "stopColor" => "stop-color",
+                        "stopOpacity" => "stop-opacity",
+                        "dominantBaseline" => "dominant-baseline",
+                        "textAnchor" => "text-anchor",
+                        "vectorEffect" => "vector-effect",
                         _ => key.as_str(),
                     };
 
@@ -2418,12 +2438,12 @@ mod tests {
         let template = r#"<html><body><div id="root"></div></body></html>"#;
         let content = r#"<h1>XLM eyes $0.20 breakout</h1><p>$1 &amp; $&amp;</p>"#;
 
-        let html = renderer
-            .inject_into_template(content, template)
-            .expect("inject should succeed");
+        let html = renderer.inject_into_template(content, template).expect("inject should succeed");
 
         assert!(
-            html.contains(r#"<div id="root"><h1>XLM eyes $0.20 breakout</h1><p>$1 &amp; $&amp;</p></div>"#),
+            html.contains(
+                r#"<div id="root"><h1>XLM eyes $0.20 breakout</h1><p>$1 &amp; $&amp;</p></div>"#
+            ),
             "dollar sequences must survive verbatim, got: {html}"
         );
     }

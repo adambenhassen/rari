@@ -44,6 +44,27 @@ function isSelfClosing(tagName) {
   return SELF_CLOSING_TAGS.has(tagName.toLowerCase())
 }
 
+// Camel-cased SVG presentation attributes React DOM serializes kebab-cased.
+// Browsers ignore the camelCase spellings (SVG attrs are case-sensitive).
+const SVG_ATTR_MAP = {
+  strokeWidth: 'stroke-width',
+  strokeLinecap: 'stroke-linecap',
+  strokeLinejoin: 'stroke-linejoin',
+  strokeDasharray: 'stroke-dasharray',
+  strokeDashoffset: 'stroke-dashoffset',
+  strokeMiterlimit: 'stroke-miterlimit',
+  strokeOpacity: 'stroke-opacity',
+  fillOpacity: 'fill-opacity',
+  fillRule: 'fill-rule',
+  clipRule: 'clip-rule',
+  clipPath: 'clip-path',
+  stopColor: 'stop-color',
+  stopOpacity: 'stop-opacity',
+  dominantBaseline: 'dominant-baseline',
+  textAnchor: 'text-anchor',
+  vectorEffect: 'vector-effect',
+}
+
 async function renderHtmlElement(tagName, props, depth) {
   const { children, dangerouslySetInnerHTML, ...attributes } = props
 
@@ -75,7 +96,7 @@ async function renderHtmlElement(tagName, props, depth) {
     }
 
     if (typeof value === 'string' || typeof value === 'number')
-      html += ` ${key}="${escapeHtml(String(value))}"`
+      html += ` ${SVG_ATTR_MAP[key] || key}="${escapeHtml(String(value))}"`
   }
 
   if (isSelfClosing(tagName)) {
