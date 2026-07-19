@@ -57,16 +57,20 @@ impl JsExecutionRuntime {
         // Startup runs the whole server bundle through this timeout; under
         // rollout CPU contention 30s is not enough and the process fatally
         // exits ("Failed to create server: Script execution timed out").
+        const DEFAULT_SCRIPT_TIMEOUT_MS: u64 = 30_000;
         let timeout_ms = match std::env::var("RARI_SCRIPT_TIMEOUT_MS") {
             // 0 is rejected too: a zero timeout fails every script that yields.
-            Ok(v) => match v.parse() {
+            Ok(v) => match v.trim().parse() {
                 Ok(ms) if ms > 0 => ms,
                 _ => {
-                    tracing::warn!(value = %v, "invalid RARI_SCRIPT_TIMEOUT_MS; using default 30000");
-                    30000
+                    tracing::warn!(
+                        value = %v,
+                        "invalid RARI_SCRIPT_TIMEOUT_MS; using default {DEFAULT_SCRIPT_TIMEOUT_MS}"
+                    );
+                    DEFAULT_SCRIPT_TIMEOUT_MS
                 }
             },
-            Err(_) => 30000,
+            Err(_) => DEFAULT_SCRIPT_TIMEOUT_MS,
         };
         Self { runtime: Arc::new(runtime), timeout_ms }
     }

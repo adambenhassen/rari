@@ -302,7 +302,12 @@ impl ResponseCache {
         }
 
         self.bytes.fetch_add(new_size, Ordering::Relaxed);
-        self.cache.insert(key.clone(), response);
+        // A concurrent set of the same key can land between the remove above
+        // and this insert; the overwritten entry's bytes must come off the
+        // counter or they leak until the byte cap is exhausted.
+        if let Some(old) = self.cache.insert(key.clone(), response) {
+            self.sub_bytes(old.size_bytes());
+        }
 
         {
             let mut lru = self.lru.lock();
