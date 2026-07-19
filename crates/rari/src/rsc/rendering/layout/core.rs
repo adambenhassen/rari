@@ -60,7 +60,7 @@ impl LayoutHtmlCache {
         use std::sync::atomic::Ordering;
         let _ = self
             .bytes
-            .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |cur| Some(cur.saturating_sub(n)));
+            .try_update(Ordering::Relaxed, Ordering::Relaxed, |cur| Some(cur.saturating_sub(n)));
     }
 
     fn insert(&self, key: u64, html: String) {

@@ -334,7 +334,7 @@ impl ResponseCache {
     fn sub_bytes(&self, n: usize) {
         let _ = self
             .bytes
-            .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |cur| Some(cur.saturating_sub(n)));
+            .try_update(Ordering::Relaxed, Ordering::Relaxed, |cur| Some(cur.saturating_sub(n)));
     }
 
     /// Evict LRU entries until the byte cap holds (or one entry remains).
