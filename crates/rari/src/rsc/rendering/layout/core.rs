@@ -49,9 +49,18 @@ impl LayoutHtmlCache {
         // Entry ref dropped above; safe to remove without deadlocking the shard.
         // Condition on the timestamp so a concurrent re-insert isn't evicted.
         if let Some((_, (old, _))) = self.cache.remove_if(&key, |_, (_, at)| *at == expired_at) {
-            self.bytes.fetch_sub(old.len(), std::sync::atomic::Ordering::Relaxed);
+            self.sub_bytes(old.len());
         }
         None
+    }
+
+    /// Saturating subtraction: a raw `fetch_sub` wraps on underflow, and a
+    /// wrapped counter makes the byte-budget check pass forever.
+    fn sub_bytes(&self, n: usize) {
+        use std::sync::atomic::Ordering;
+        let _ = self
+            .bytes
+            .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |cur| Some(cur.saturating_sub(n)));
     }
 
     fn insert(&self, key: u64, html: String) {
@@ -64,7 +73,7 @@ impl LayoutHtmlCache {
         }
         self.bytes.fetch_add(html.len(), Ordering::Relaxed);
         if let Some((old, _)) = self.cache.insert(key, (html, std::time::Instant::now())) {
-            self.bytes.fetch_sub(old.len(), Ordering::Relaxed);
+            self.sub_bytes(old.len());
         }
     }
 
@@ -213,7 +222,8 @@ impl LayoutRenderer {
             return Ok(RenderResult::Static(html));
         }
 
-        if can_use_html_cache {
+        // TTL 0 (max-age=0 route): the entry would be born expired; skip the write.
+        if can_use_html_cache && !layout_cache_ttl(&route_match.pathname).is_zero() {
             self.html_cache.insert(cache_key, html.clone());
         }
         Ok(RenderResult::Static(html))
@@ -469,7 +479,8 @@ if (typeof window !== 'undefined') {
                 format!("{}{}\n{}", html, payload_script, completion_script)
             };
 
-            if route_match.not_found.is_none() {
+            if route_match.not_found.is_none() && !layout_cache_ttl(&route_match.pathname).is_zero()
+            {
                 self.html_cache.insert(cache_key, html.clone());
             }
 

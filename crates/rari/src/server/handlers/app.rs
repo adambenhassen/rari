@@ -762,8 +762,11 @@ pub async fn render_fallback_html(
             && let Some(cached_html) = state.html_cache.get("__fallback_index__")
         {
             let html = cached_html.clone();
+            // Same status logic as the uncached path below: a hit must not
+            // flip a not-found route from 404 to 200.
+            let status_code = if is_not_found { StatusCode::NOT_FOUND } else { StatusCode::OK };
             return Ok(Response::builder()
-                .status(StatusCode::OK)
+                .status(status_code)
                 .header("content-type", "text/html; charset=utf-8")
                 .header("vary", "Accept")
                 .body(Body::from(html))

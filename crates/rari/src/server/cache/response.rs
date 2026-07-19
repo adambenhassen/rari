@@ -277,7 +277,7 @@ impl ResponseCache {
         // Replace any existing entry up front so byte accounting and the tag
         // index have a single source of truth for this key.
         if let Some((_, old)) = self.cache.remove(&key) {
-            self.bytes.fetch_sub(old.size_bytes(), Ordering::Relaxed);
+            self.sub_bytes(old.size_bytes());
             let mut lru = self.lru.lock();
             lru.pop(&key);
         }
@@ -316,7 +316,7 @@ impl ResponseCache {
         if self.cache.contains_key(key) {
             let new_size = response.size_bytes();
             if let Some(old) = self.cache.insert(key.to_string(), response) {
-                self.bytes.fetch_sub(old.size_bytes(), Ordering::Relaxed);
+                self.sub_bytes(old.size_bytes());
             }
             self.bytes.fetch_add(new_size, Ordering::Relaxed);
             // In-place updates grow entries after admission (lazy compression
@@ -326,6 +326,15 @@ impl ResponseCache {
             self.evict_until_under_byte_cap().await;
             self.update_entry_count();
         }
+    }
+
+    /// Saturating subtraction: a raw `fetch_sub` wraps on underflow, and a
+    /// wrapped counter makes the byte-cap check pass forever. Any accounting
+    /// drift saturates at 0 instead of disabling the cap.
+    fn sub_bytes(&self, n: usize) {
+        let _ = self
+            .bytes
+            .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |cur| Some(cur.saturating_sub(n)));
     }
 
     /// Evict LRU entries until the byte cap holds (or one entry remains).
@@ -339,7 +348,7 @@ impl ResponseCache {
 
     pub async fn invalidate(&self, key: &str) {
         if let Some((_, response)) = self.cache.remove(key) {
-            self.bytes.fetch_sub(response.size_bytes(), Ordering::Relaxed);
+            self.sub_bytes(response.size_bytes());
             for tag in &response.metadata.tags {
                 if let Some(mut keys) = self.tag_index.get_mut(tag) {
                     keys.retain(|k| k != key);
@@ -418,7 +427,7 @@ impl ResponseCache {
         };
 
         if let Some((_, evicted)) = self.cache.remove(&key) {
-            self.bytes.fetch_sub(evicted.size_bytes(), Ordering::Relaxed);
+            self.sub_bytes(evicted.size_bytes());
             for tag in &evicted.metadata.tags {
                 if let Some(mut keys) = self.tag_index.get_mut(tag) {
                     keys.retain(|k| k != &key);
