@@ -88,16 +88,25 @@ jobs:
           cargo build --release --target ${{ matrix.target }} --bin rari --features jemalloc
 
       - name: Prepare binary
+        # Ship the binary without DWARF (~150MB instead of ~460MB): the
+        # symtab stays, so Pyroscope keeps function names. Full line tables
+        # live on in the .debug sidecar (attached to the release) for
+        # offline file:line symbolization: `go tool pprof rari.debug <dump>`.
+        # The debuglink lets tooling find the sidecar by name.
         run: |
           mkdir -p binaries
-          cp target/${{ matrix.target }}/release/rari binaries/${{ matrix.name }}
+          BIN=target/${{ matrix.target }}/release/rari
+          objcopy --only-keep-debug "$BIN" "binaries/${{ matrix.name }}.debug"
+          objcopy --strip-debug "$BIN" "binaries/${{ matrix.name }}"
+          objcopy --add-gnu-debuglink="binaries/${{ matrix.name }}.debug" "binaries/${{ matrix.name }}"
           chmod +x binaries/${{ matrix.name }}
+          ls -lh binaries/
 
       - name: Upload binary
         uses: actions/upload-artifact@v7
         with:
           name: ${{ matrix.name }}
-          path: binaries/${{ matrix.name }}
+          path: binaries/
 
   release:
     name: Package and publish prerelease
@@ -209,5 +218,6 @@ jobs:
             --prerelease \
             --target "${GITHUB_SHA}" \
             dist-tarballs/*.tgz \
-            artifacts/rari-linux-x64/rari-linux-x64
+            artifacts/rari-linux-x64/rari-linux-x64 \
+            artifacts/rari-linux-x64/rari-linux-x64.debug
           # darwin: add artifacts/rari-darwin-arm64/rari-darwin-arm64 when re-enabled
