@@ -78,8 +78,15 @@ impl LayoutHtmlCache {
     }
 
     pub fn clear(&self) {
-        self.cache.clear();
-        self.bytes.store(0, std::sync::atomic::Ordering::Relaxed);
+        // Subtract exactly what was removed instead of store(0): a concurrent
+        // insert landing around the reset would leave its bytes untracked (or
+        // tracked twice) forever.
+        let mut removed_bytes = 0usize;
+        self.cache.retain(|_, (html, _)| {
+            removed_bytes = removed_bytes.saturating_add(html.len());
+            false
+        });
+        self.sub_bytes(removed_bytes);
     }
 
     pub fn bytes(&self) -> usize {

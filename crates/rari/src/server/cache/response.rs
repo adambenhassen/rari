@@ -383,13 +383,20 @@ impl ResponseCache {
     }
 
     pub async fn clear(&self) {
-        self.cache.clear();
+        // Subtract exactly what was removed instead of store(0): a concurrent
+        // set landing around the reset would leave its bytes untracked (or
+        // tracked twice) forever.
+        let mut removed_bytes = 0usize;
+        self.cache.retain(|_, entry| {
+            removed_bytes = removed_bytes.saturating_add(entry.size_bytes());
+            false
+        });
         {
             let mut lru = self.lru.lock();
             lru.clear();
         }
         self.tag_index.clear();
-        self.bytes.store(0, Ordering::Relaxed);
+        self.sub_bytes(removed_bytes);
 
         let mut metrics = self.metrics.lock();
         metrics.total_entries = 0;
