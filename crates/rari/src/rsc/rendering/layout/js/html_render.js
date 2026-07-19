@@ -23,6 +23,52 @@ function kebabCase(str) {
   return VENDOR_PREFIX_REGEX.test(str) ? `-${kebab}` : kebab
 }
 
+// Mirrors the Rust serializer's UNITLESS_PROPERTIES (serialize_style_object).
+const UNITLESS_STYLE_PROPERTIES = new Set([
+  'animation-iteration-count',
+  'border-image-outset',
+  'border-image-slice',
+  'border-image-width',
+  'box-flex',
+  'box-flex-group',
+  'box-ordinal-group',
+  'column-count',
+  'columns',
+  'flex',
+  'flex-grow',
+  'flex-positive',
+  'flex-shrink',
+  'flex-negative',
+  'flex-order',
+  'grid-area',
+  'grid-row',
+  'grid-row-end',
+  'grid-row-span',
+  'grid-row-start',
+  'grid-column',
+  'grid-column-end',
+  'grid-column-span',
+  'grid-column-start',
+  'font-weight',
+  'line-clamp',
+  'line-height',
+  'opacity',
+  'order',
+  'orphans',
+  'tab-size',
+  'widows',
+  'z-index',
+  'zoom',
+  'fill-opacity',
+  'flood-opacity',
+  'stop-opacity',
+  'stroke-dasharray',
+  'stroke-dashoffset',
+  'stroke-miterlimit',
+  'stroke-opacity',
+  'stroke-width',
+])
+
 const SELF_CLOSING_TAGS = new Set([
   'area',
   'base',
@@ -82,7 +128,14 @@ async function renderHtmlElement(tagName, props, depth) {
 
     if (key === 'style' && typeof value === 'object' && value !== null) {
       const styleStr = Object.entries(value)
-        .map(([k, v]) => `${kebabCase(k)}:${v}`)
+        .map(([k, v]) => {
+          const prop = kebabCase(k)
+          // React appends px to numeric values of non-unitless properties.
+          const css = typeof v === 'number' && v !== 0 && !UNITLESS_STYLE_PROPERTIES.has(prop)
+            ? `${v}px`
+            : v
+          return `${prop}:${css}`
+        })
         .join(';')
       if (styleStr)
         html += ` style="${escapeHtml(styleStr)}"`
