@@ -659,7 +659,7 @@ pub async fn health_check() -> Result<Json<Value>, StatusCode> {
 pub async fn runtime_health_check(
     axum::extract::State(state): axum::extract::State<crate::server::types::ServerState>,
     axum::extract::Query(params): axum::extract::Query<
-        std::collections::HashMap<String, String>,
+        rustc_hash::FxHashMap<String, String>,
     >,
 ) -> Result<Json<Value>, StatusCode> {
     let timeout_ms: u64 =
