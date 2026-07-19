@@ -142,6 +142,9 @@ pub fn spawn_pprof_gateway_client() {
     });
 }
 
+// serde_json::json! expands to internal Result::unwrap calls that trip the
+// disallowed-methods lint; there are no hand-written unwraps here.
+#[allow(clippy::disallowed_methods)]
 async fn run_gateway_session(
     ws_url: &str,
     hostname: &str,
