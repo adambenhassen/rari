@@ -219,5 +219,5 @@ jobs:
             --target "${GITHUB_SHA}" \
             dist-tarballs/*.tgz \
             artifacts/rari-linux-x64/rari-linux-x64 \
-            artifacts/rari-linux-x64/rari-linux-x64.debug
+            artifacts/rari-linux-x64.debug/rari-linux-x64.debug
           # darwin: add artifacts/rari-darwin-arm64/rari-darwin-arm64 when re-enabled
