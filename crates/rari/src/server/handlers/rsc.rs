@@ -658,17 +658,14 @@ pub async fn health_check() -> Result<Json<Value>, StatusCode> {
 #[axum::debug_handler]
 pub async fn runtime_health_check(
     axum::extract::State(state): axum::extract::State<crate::server::types::ServerState>,
-    axum::extract::Query(params): axum::extract::Query<
-        rustc_hash::FxHashMap<String, String>,
-    >,
+    axum::extract::Query(params): axum::extract::Query<rustc_hash::FxHashMap<String, String>>,
 ) -> Result<Json<Value>, StatusCode> {
     let timeout_ms: u64 =
         params.get("timeout_ms").and_then(|v| v.parse().ok()).unwrap_or(5000).min(30000);
 
     let started = std::time::Instant::now();
-    let probe = state
-        .js_runtime
-        .execute_script("runtime_health_probe".to_string(), "1 + 1".to_string());
+    let probe =
+        state.js_runtime.execute_script("runtime_health_probe".to_string(), "1 + 1".to_string());
 
     match tokio::time::timeout(std::time::Duration::from_millis(timeout_ms), probe).await {
         Ok(Ok(_)) =>

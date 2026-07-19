@@ -191,10 +191,9 @@ async fn run_gateway_session(
             continue;
         }
 
-        let (Some(id), Some(url)) = (
-            req.get("id").and_then(|v| v.as_str()),
-            req.get("url").and_then(|v| v.as_str()),
-        ) else {
+        let (Some(id), Some(url)) =
+            (req.get("id").and_then(|v| v.as_str()), req.get("url").and_then(|v| v.as_str()))
+        else {
             continue;
         };
 

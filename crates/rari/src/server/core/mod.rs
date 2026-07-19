@@ -262,10 +262,7 @@ impl Server {
         {
             router = router
                 .route("/_rari/metrics", get(crate::server::profiling::metrics_handler))
-                .route(
-                    "/_rari/debug/heap",
-                    get(crate::server::profiling::heap_dump_handler),
-                );
+                .route("/_rari/debug/heap", get(crate::server::profiling::heap_dump_handler));
             crate::server::profiling::spawn_pyroscope_pusher();
             crate::server::profiling::spawn_pprof_gateway_client();
         }
