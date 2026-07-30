@@ -38,6 +38,10 @@ jobs:
             os: ubuntu-latest
             target: x86_64-unknown-linux-gnu
             name: rari-linux-x64
+          - platform: linux-arm64
+            os: ubuntu-24.04-arm
+            target: aarch64-unknown-linux-gnu
+            name: rari-linux-arm64
           # darwin-arm64 disabled — local dev stays on cachefix.0; uncomment to build
           # (also uncomment the darwin lines in the release job below):
           # - platform: darwin-arm64
@@ -167,7 +171,8 @@ jobs:
             (cd "${dir}" && npm pkg fix && npm pack --pack-destination "${GITHUB_WORKSPACE}/dist-tarballs")
           }
 
-          build_platform linux-x64  linux  x64   "Linux x64 binary"   '"linux", "x64",'
+          build_platform linux-x64   linux  x64   "Linux x64 binary"   '"linux", "x64",'
+          build_platform linux-arm64 linux  arm64 "Linux ARM64 binary" '"linux", "arm64",'
           # build_platform darwin-arm64 darwin arm64 "macOS ARM64 binary" '"darwin", "arm64", "macos", "apple-silicon",'
 
           ls -la dist-tarballs
@@ -187,7 +192,7 @@ jobs:
           The fix is in the Rust binary only; the \`rari\` JS package is unchanged from
           \`0.14.12\`. So use the official JS package and override just the patched binary.
 
-          Platforms: \`darwin-arm64\`, \`linux-x64\`. Patched binary tarballs are version \`${VERSION}\`.
+          Platforms: \`darwin-arm64\`, \`linux-x64\`, \`linux-arm64\`. Patched binary tarballs are version \`${VERSION}\`.
 
           ## Install (in the consuming project)
 
@@ -219,5 +224,7 @@ jobs:
             --target "${GITHUB_SHA}" \
             dist-tarballs/*.tgz \
             artifacts/rari-linux-x64/rari-linux-x64 \
-            artifacts/rari-linux-x64.debug/rari-linux-x64.debug
+            artifacts/rari-linux-x64.debug/rari-linux-x64.debug \
+            artifacts/rari-linux-arm64/rari-linux-arm64 \
+            artifacts/rari-linux-arm64.debug/rari-linux-arm64.debug
           # darwin: add artifacts/rari-darwin-arm64/rari-darwin-arm64 when re-enabled
