@@ -6,6 +6,7 @@ pub mod core;
 pub mod error_response;
 pub mod image;
 pub mod loader;
+pub mod metrics_http;
 pub mod middleware;
 pub mod og;
 #[cfg(feature = "jemalloc")]

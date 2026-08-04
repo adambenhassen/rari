@@ -141,6 +141,16 @@ impl LayoutHtmlCache {
         Self { handler, default_ttl_secs }
     }
 
+    /// Live entry count under this cache's namespace (metrics only).
+    pub fn entries(&self) -> usize {
+        self.handler.prefix_stats(LAYOUT_KEY_PREFIX).0
+    }
+
+    /// Approximate payload bytes under this cache's namespace (metrics only).
+    pub fn bytes(&self) -> usize {
+        self.handler.prefix_stats(LAYOUT_KEY_PREFIX).1.unwrap_or(0)
+    }
+
     fn namespaced(key: u64) -> String {
         format!("{LAYOUT_KEY_PREFIX}{key}")
     }
