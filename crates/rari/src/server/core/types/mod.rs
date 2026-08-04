@@ -85,6 +85,9 @@ impl FallbackHtmlCache {
 #[non_exhaustive]
 pub struct ServerState {
     pub renderer: Arc<Mutex<RscRenderer>>,
+    /// Direct runtime handle for the liveness probe: lets /_rari/health/runtime
+    /// exercise the JS event loop without contending on the renderer mutex.
+    pub js_runtime: Arc<crate::runtime::JsExecutionRuntime>,
     pub ssr_renderer: Arc<RscHtmlRenderer>,
     pub config: Arc<Config>,
     pub request_count: Arc<AtomicU64>,

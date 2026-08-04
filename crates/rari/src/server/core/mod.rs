@@ -66,7 +66,9 @@ use crate::{
         vite::{
             check_vite_server_health,
             hmr::handle_hmr_action,
-            rsc::{health_check, register_client_component, register_component},
+            rsc::{
+                health_check, register_client_component, register_component, runtime_health_check,
+            },
             vite_reverse_proxy, vite_src_proxy, vite_websocket_proxy,
         },
     },
@@ -228,6 +230,7 @@ impl Server {
 
         let state = ServerState {
             renderer: renderer_arc,
+            js_runtime: Arc::clone(&js_runtime),
             ssr_renderer,
             config: Arc::new(config.clone()),
             request_count: Arc::new(AtomicU64::new(0)),
@@ -311,6 +314,7 @@ impl Server {
 
         let mut router = Router::new()
             .route("/_rari/health", routing::get(health_check))
+            .route("/_rari/health/runtime", routing::get(runtime_health_check))
             .layer(medium_body_limit)
             .route("/_rari/route-info", routing::post(get_route_info))
             .layer(small_body_limit)

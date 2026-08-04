@@ -453,3 +453,40 @@ pub async fn health_check() -> Result<Json<Value>, StatusCode> {
         "service": "rari-rsc-server"
     })))
 }
+
+/// `GET /_rari/health/runtime` — liveness probe that exercises the JS event
+/// loop. The static /_rari/health stays green while a wedged runtime times out
+/// every render for minutes; this one returns 503 within `timeout` so the
+/// kubelet can restart the pod promptly. Timeout via `?timeout_ms=` (default
+/// 5000, capped at 30000).
+#[axum::debug_handler]
+pub async fn runtime_health_check(
+    State(state): State<ServerState>,
+    axum::extract::Query(params): axum::extract::Query<
+        std::collections::HashMap<String, String>,
+    >,
+) -> Result<Json<Value>, StatusCode> {
+    let timeout_ms: u64 =
+        params.get("timeout_ms").and_then(|v| v.parse().ok()).unwrap_or(5000).min(30000);
+
+    let started = std::time::Instant::now();
+    let probe = state
+        .js_runtime
+        .execute_script("runtime_health_probe".to_string(), "1 + 1".to_string());
+
+    match tokio::time::timeout(std::time::Duration::from_millis(timeout_ms), probe).await {
+        Ok(Ok(_)) => Ok(Json(serde_json::json!({
+            "status": "ok",
+            "runtime": "responsive",
+            "elapsed_ms": started.elapsed().as_millis() as u64,
+        }))),
+        Ok(Err(e)) => {
+            tracing::error!("Runtime health probe failed: {e}");
+            Err(StatusCode::SERVICE_UNAVAILABLE)
+        }
+        Err(_) => {
+            tracing::error!("Runtime health probe timed out after {timeout_ms} ms");
+            Err(StatusCode::SERVICE_UNAVAILABLE)
+        }
+    }
+}
