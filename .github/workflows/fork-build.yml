@@ -1,0 +1,230 @@
+name: Fork Build
+
+# Fork-only workflow: builds the patched rari binary on GitHub-hosted runners and
+# publishes a prerelease on this fork's Releases page with the platform binaries
+# and npm tarballs attached. Does NOT npm-publish and does NOT touch the upstream
+# release.yml (which targets self-hosted runners this fork does not have).
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Prerelease version for the packed npm tarballs (semver)'
+        required: true
+        default: '0.15.7-cachefix.1'
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    name: Build ${{ matrix.platform }}
+    runs-on: ${{ matrix.os }}
+    # Job-level so rust-cache's environment hash covers these: a profile
+    # change then mints a new cache key instead of poisoning the old one.
+    # Fat LTO comes from the profile; line tables give Pyroscope file:line
+    # at ~10% of full DWARF's link cost (DEBUG=true needs ~20GB and OOMs
+    # the runner — never use it), strip=none keeps them, frame pointers
+    # keep jemalloc stack unwinding fast and complete.
+    env:
+      CARGO_PROFILE_RELEASE_DEBUG: line-tables-only
+      CARGO_PROFILE_RELEASE_STRIP: none
+      RUSTFLAGS: -Cforce-frame-pointers=yes
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - platform: linux-x64
+            os: ubuntu-latest
+            target: x86_64-unknown-linux-gnu
+            name: rari-linux-x64
+          - platform: linux-arm64
+            os: ubuntu-24.04-arm
+            target: aarch64-unknown-linux-gnu
+            name: rari-linux-arm64
+          # darwin-arm64 disabled — local dev stays on cachefix.0; uncomment to build
+          # (also uncomment the darwin lines in the release job below):
+          # - platform: darwin-arm64
+          #   os: macos-14
+          #   target: aarch64-apple-darwin
+          #   name: rari-darwin-arm64
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@master
+        with:
+          # Keep in sync with rust-toolchain.toml — a floating `nightly`
+          # invalidates every cached artifact on each nightly rollover.
+          toolchain: nightly-2026-07-17
+          targets: ${{ matrix.target }}
+
+      - name: Rust cache
+        uses: Swatinem/rust-cache@v2
+        with:
+          # v1: old v0 caches were built with different profile env
+          # (DEBUG=true era) — key still hit but every fingerprint missed,
+          # so runs recompiled everything and never re-saved good artifacts.
+          prefix-key: v1-rust
+          key: ${{ matrix.target }}
+          cache-on-failure: true
+
+      - name: Install dependencies (Linux)
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y pkg-config libfontconfig1-dev
+
+      - name: Install dependencies (macOS)
+        if: runner.os == 'macOS'
+        run: |
+          brew list pkg-config &>/dev/null || brew install pkg-config
+          brew list fontconfig &>/dev/null || brew install fontconfig
+
+      - name: Build binary
+        run: |
+          mkdir -p crates/rari/snapshots
+          touch crates/rari/snapshots/RARI_SNAPSHOT.bin
+          echo 'pub static RESIDUAL_LAZY_ESM_SOURCES: &[(&str, &str)] = &[];' > crates/rari/snapshots/residual_lazy_sources.rs
+          echo 'pub static RESIDUAL_LAZY_JS_SOURCES: &[(&str, &str)] = &[];' >> crates/rari/snapshots/residual_lazy_sources.rs
+          cargo run --release --manifest-path tools/snapshot/Cargo.toml -- crates/rari/snapshots
+          cargo build --release --target ${{ matrix.target }} --bin rari --features jemalloc
+
+      - name: Prepare binary
+        # Ship the binary without DWARF (~150MB instead of ~460MB): the
+        # symtab stays, so Pyroscope keeps function names. Full line tables
+        # live on in the .debug sidecar (attached to the release) for
+        # offline file:line symbolization: `go tool pprof rari.debug <dump>`.
+        # The debuglink lets tooling find the sidecar by name.
+        run: |
+          mkdir -p binaries
+          BIN=target/${{ matrix.target }}/release/rari
+          objcopy --only-keep-debug "$BIN" "binaries/${{ matrix.name }}.debug"
+          objcopy --strip-debug "$BIN" "binaries/${{ matrix.name }}"
+          objcopy --add-gnu-debuglink="binaries/${{ matrix.name }}.debug" "binaries/${{ matrix.name }}"
+          chmod +x binaries/${{ matrix.name }}
+          ls -lh binaries/
+
+      - name: Upload binary
+        uses: actions/upload-artifact@v7
+        with:
+          name: ${{ matrix.name }}
+          path: binaries/
+
+  release:
+    name: Package and publish prerelease
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v7
+        with:
+          node-version: 22.14.0
+
+      - name: Download binaries
+        uses: actions/download-artifact@v8
+        with:
+          path: artifacts
+
+      - name: Normalize artifact layout
+        # download-artifact@v8 flattens a single-file artifact to
+        # artifacts/<name>; later steps expect artifacts/<name>/<name>.
+        run: |
+          set -euo pipefail
+          for f in artifacts/*; do
+            if [ -f "$f" ]; then
+              mv "$f" "$f.tmp"
+              mkdir "$f"
+              mv "$f.tmp" "$f/$(basename "$f")"
+            fi
+          done
+          find artifacts -type f
+
+      - name: Build platform npm tarballs
+        run: |
+          set -euo pipefail
+          VERSION="${{ inputs.version }}"
+          mkdir -p dist-tarballs
+
+          build_platform() {
+            local platform="$1" os="$2" cpu="$3" desc="$4" keywords="$5"
+            local pkg="rari-${platform}"
+            local dir="packages/${pkg}"
+            mkdir -p "${dir}/bin"
+            cp "artifacts/${pkg}/${pkg}" "${dir}/bin/rari"
+            chmod +x "${dir}/bin/rari"
+            cp .github/templates/package.json.platform "${dir}/package.json"
+            sed -i "s|{NAME}|${pkg}|g" "${dir}/package.json"
+            sed -i "s|{VERSION}|${VERSION}|g" "${dir}/package.json"
+            sed -i "s|{DESCRIPTION}|${desc}|g" "${dir}/package.json"
+            sed -i "s|{OS}|${os}|g" "${dir}/package.json"
+            sed -i "s|{CPU}|${cpu}|g" "${dir}/package.json"
+            sed -i "s|{KEYWORDS}|${keywords}|g" "${dir}/package.json"
+            sed -i "s|{BIN_PATH}|./bin/rari|g" "${dir}/package.json"
+            sed -i "s|{BIN_FILE}|bin/rari|g" "${dir}/package.json"
+            cp LICENSE "${dir}/LICENSE"
+            echo "# ${pkg}" > "${dir}/README.md"
+            (cd "${dir}" && npm pkg fix && npm pack --pack-destination "${GITHUB_WORKSPACE}/dist-tarballs")
+          }
+
+          build_platform linux-x64   linux  x64   "Linux x64 binary"   '"linux", "x64",'
+          build_platform linux-arm64 linux  arm64 "Linux ARM64 binary" '"linux", "arm64",'
+          # build_platform darwin-arm64 darwin arm64 "macOS ARM64 binary" '"darwin", "arm64", "macos", "apple-silicon",'
+
+          ls -la dist-tarballs
+
+      - name: Create prerelease
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          VERSION="${{ inputs.version }}"
+          TAG="build-${VERSION}"
+          BASE="https://github.com/${GITHUB_REPOSITORY}/releases/download/${TAG}"
+          NOTES_FILE="$(mktemp)"
+          cat > "${NOTES_FILE}" <<EOF
+          Patched rari build (Cache-Control on static/synchronous render paths) for hand-off.
+
+          The fix is in the Rust binary only; the \`rari\` JS package is unchanged from
+          \`0.14.12\`. So use the official JS package and override just the patched binary.
+
+          Platforms: \`darwin-arm64\`, \`linux-x64\`, \`linux-arm64\`. Patched binary tarballs are version \`${VERSION}\`.
+
+          ## Install (in the consuming project)
+
+          Install the official JS wrapper, then force the patched platform binary via npm \`overrides\`.
+          Apple Silicon:
+
+          \`\`\`jsonc
+          // package.json
+          "overrides": {
+            "rari-darwin-arm64": "${BASE}/rari-darwin-arm64-${VERSION}.tgz"
+          }
+          \`\`\`
+
+          \`\`\`sh
+          npm install rari@0.14.12 && npm install
+          \`\`\`
+
+          Linux x64: use \`"rari-linux-x64": "${BASE}/rari-linux-x64-${VERSION}.tgz"\` instead.
+
+          Raw binaries (\`rari-darwin-arm64\`, \`rari-linux-x64\`) are also attached if you prefer to
+          drop one into \`node_modules/rari-<platform>/bin/rari\` directly.
+          EOF
+
+          gh release create "${TAG}" \
+            --repo "${GITHUB_REPOSITORY}" \
+            --title "rari ${VERSION}" \
+            --notes-file "${NOTES_FILE}" \
+            --prerelease \
+            --target "${GITHUB_SHA}" \
+            dist-tarballs/*.tgz \
+            artifacts/rari-linux-x64/rari-linux-x64 \
+            artifacts/rari-linux-x64/rari-linux-x64.debug \
+            artifacts/rari-linux-arm64/rari-linux-arm64 \
+            artifacts/rari-linux-arm64/rari-linux-arm64.debug
+          # darwin: add artifacts/rari-darwin-arm64/rari-darwin-arm64 when re-enabled
