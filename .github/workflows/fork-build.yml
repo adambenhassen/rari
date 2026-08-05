@@ -167,7 +167,7 @@ jobs:
             mkdir -p "${dir}/bin"
             cp "artifacts/${pkg}/${pkg}" "${dir}/bin/rari"
             chmod +x "${dir}/bin/rari"
-            cp .github/templates/package.json.platform "${dir}/package.json"
+            cp .github/templates/package-json/platform.json "${dir}/package.json"
             sed -i "s|{NAME}|${pkg}|g" "${dir}/package.json"
             sed -i "s|{VERSION}|${VERSION}|g" "${dir}/package.json"
             sed -i "s|{DESCRIPTION}|${desc}|g" "${dir}/package.json"
