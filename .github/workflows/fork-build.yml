@@ -82,6 +82,16 @@ jobs:
           brew list pkg-config &>/dev/null || brew install pkg-config
           brew list fontconfig &>/dev/null || brew install fontconfig
 
+      # The V8 snapshot embeds React vendor ESM generated into the gitignored
+      # crates/rari/src/runtime/ext/rari/react/vendor/ dir. Without it the
+      # snapshot tool fails with Io NotFound. setup-pnpm installs the toolchain
+      # + deps the bundle-react-esm action assumes are already present.
+      - name: Setup pnpm and Node
+        uses: ./.github/actions/setup-pnpm
+
+      - name: Bundle React ESM vendor files
+        uses: ./.github/actions/bundle-react-esm
+
       - name: Build binary
         run: |
           mkdir -p crates/rari/snapshots
