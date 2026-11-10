@@ -1076,7 +1076,7 @@ mod tests {
     ) -> ServerState {
         let runtime = Arc::new(JsExecutionRuntime::new(None));
         let renderer = Arc::new(Mutex::new(RscRenderer::new(Arc::clone(&runtime))));
-        let ssr_renderer = Arc::new(RscHtmlRenderer::new(runtime));
+        let ssr_renderer = Arc::new(RscHtmlRenderer::new(Arc::clone(&runtime)));
         let cache_registry = Arc::new(CacheHandlerRegistry::default_with_memory());
         let image_handler = Arc::new(MemoryCacheHandler::default());
 
@@ -1085,6 +1085,7 @@ mod tests {
 
         ServerState {
             renderer,
+            js_runtime: runtime,
             ssr_renderer,
             config: Arc::new(config),
             app_router: None,
