@@ -1,0 +1,58 @@
+name: Fork PR check
+
+on:
+  pull_request:
+    branches:
+      - feat/jemalloc-0.14.13-cachefix
+
+permissions: {}
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+jobs:
+  check:
+    name: rari checks
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout
+        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@e97e2d8cc328f1b50210efc529dca0028893a2d9 # v1
+        with:
+          toolchain: nightly-2026-07-17
+          components: clippy, rustfmt
+
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y pkg-config libfontconfig1-dev
+
+      - name: Cache Rust
+        uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
+        with:
+          shared-key: fork-pr-check
+
+      - name: Create snapshot placeholder
+        run: |
+          mkdir -p crates/rari/snapshots
+          touch crates/rari/snapshots/RARI_SNAPSHOT.bin
+          echo 'pub static RESIDUAL_LAZY_ESM_SOURCES: &[(&str, &str)] = &[];' > crates/rari/snapshots/residual_lazy_sources.rs
+          echo 'pub static RESIDUAL_LAZY_JS_SOURCES: &[(&str, &str)] = &[];' >> crates/rari/snapshots/residual_lazy_sources.rs
+
+      - name: Generate V8 snapshot
+        run: cargo run --manifest-path tools/snapshot/Cargo.toml -- crates/rari/snapshots
+
+      - name: Check formatting
+        run: cargo fmt --all -- --check
+
+      - name: Run clippy
+        run: cargo clippy --package rari --all-targets --all-features -- -D warnings
+
+      - name: Test rari
+        run: cargo test --package rari --all-features
