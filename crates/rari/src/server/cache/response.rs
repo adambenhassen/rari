@@ -270,6 +270,7 @@ impl ResponseCache {
         Some(cached_response)
     }
 
+    #[cfg(test)]
     async fn set(&self, key: String, response: CachedResponse) {
         self.set_inner(key, response, None).await;
     }

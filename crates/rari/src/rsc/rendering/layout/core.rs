@@ -212,7 +212,6 @@ impl LayoutRenderer {
         route_match: &AppRouteMatch,
         return_rsc_on_fallback: bool,
         request_context: Option<Arc<crate::server::middleware::request_context::RequestContext>>,
-        can_use_html_cache: bool,
         cache_key: u64,
     ) -> Result<RenderResult, RariError> {
         let request_context_id = request_context.as_ref().map(|ctx| ctx.request_id());
@@ -242,7 +241,7 @@ impl LayoutRenderer {
         }
 
         // TTL 0 (max-age=0 route): the entry would be born expired; skip the write.
-        if can_use_html_cache && !layout_cache_ttl(&route_match.pathname).is_zero() {
+        if !layout_cache_ttl(&route_match.pathname).is_zero() {
             if let Some(request_context) = request_context.as_ref() {
                 self.html_cache.insert_for_request(cache_key, html.clone(), request_context);
             } else {
@@ -538,8 +537,6 @@ if (typeof window !== 'undefined') {
             false,
         )?;
 
-        let can_use_html_cache = true;
-
         if let Some(ctx) = request_context {
             let renderer_guard = self.renderer.lock().await;
             let runtime = Arc::clone(&renderer_guard.runtime);
@@ -638,7 +635,6 @@ if (typeof window !== 'undefined') {
                             route_match,
                             return_rsc_on_fallback,
                             Some(Arc::clone(&ctx)),
-                            can_use_html_cache,
                             cache_key,
                         )
                         .await
@@ -735,7 +731,6 @@ if (typeof window !== 'undefined') {
                                 route_match,
                                 return_rsc_on_fallback,
                                 request_context_for_cache.clone(),
-                                can_use_html_cache,
                                 cache_key,
                             )
                             .await;
