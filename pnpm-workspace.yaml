@@ -35,6 +35,9 @@ packages:
   - tools/bundle-react-esm
   - web
 
+catalog:
+  lucide-react: 0.562.0
+
 catalogs:
   analytics:
     posthog-js: ^1.438.13
