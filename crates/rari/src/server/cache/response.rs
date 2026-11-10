@@ -348,11 +348,24 @@ impl Default for CacheConfig {
     }
 }
 
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+#[non_exhaustive]
+pub struct CacheMetrics {
+    pub total_entries: usize,
+    pub cache_hits: usize,
+    pub cache_misses: usize,
+    pub evictions: usize,
+    pub memory_usage_bytes: usize,
+}
+
 pub struct ResponseCache {
     handler: Arc<dyn CacheHandler>,
     pub config: CacheConfig,
     entry_count: Arc<AtomicUsize>,
     payload_bytes: Arc<AtomicUsize>,
+    cache_hits: AtomicUsize,
+    cache_misses: AtomicUsize,
+    evictions: AtomicUsize,
 }
 
 impl ResponseCache {
@@ -374,6 +387,9 @@ impl ResponseCache {
             config,
             entry_count: Arc::new(AtomicUsize::new(0)),
             payload_bytes: Arc::new(AtomicUsize::new(0)),
+            cache_hits: AtomicUsize::new(0),
+            cache_misses: AtomicUsize::new(0),
+            evictions: AtomicUsize::new(0),
         }
     }
 
@@ -474,10 +490,12 @@ impl ResponseCache {
         let bytes = match self.handler.get(&Self::ns(key)).await {
             Ok(Some(b)) => b,
             Ok(None) => {
+                self.cache_misses.fetch_add(1, Ordering::Relaxed);
                 return None;
             }
             Err(e) => {
                 tracing::debug!(error = %e, key = %key, "cache get failed");
+                self.cache_misses.fetch_add(1, Ordering::Relaxed);
                 return None;
             }
         };
@@ -488,6 +506,7 @@ impl ResponseCache {
                 tracing::warn!(error = %e, key = %key, "cache deserialize failed; evicting");
                 let _ = self.handler.invalidate(&Self::ns(key)).await;
                 self.resync_entry_count();
+                self.cache_misses.fetch_add(1, Ordering::Relaxed);
                 return None;
             }
         };
@@ -495,9 +514,11 @@ impl ResponseCache {
         if !response.is_valid() {
             let _ = self.handler.invalidate(&Self::ns(key)).await;
             self.resync_entry_count();
+            self.cache_misses.fetch_add(1, Ordering::Relaxed);
             return None;
         }
 
+        self.cache_hits.fetch_add(1, Ordering::Relaxed);
         Some(response)
     }
 
@@ -529,6 +550,7 @@ impl ResponseCache {
                 tracing::warn!(error = %e, key = %key, "cache set failed");
             }
             Ok(outcome) => {
+                self.evictions.fetch_add(outcome.evicted, Ordering::Relaxed);
                 if outcome.stored || outcome.replaced || outcome.evicted > 0 {
                     self.resync_entry_count();
                 }
@@ -561,6 +583,7 @@ impl ResponseCache {
                 tracing::warn!(error = %e, key = %key, "cache update_in_place failed");
             }
             Ok(outcome) => {
+                self.evictions.fetch_add(outcome.evicted, Ordering::Relaxed);
                 if outcome.stored || outcome.replaced || outcome.evicted > 0 {
                     self.resync_entry_count();
                 }
@@ -629,6 +652,16 @@ impl ResponseCache {
             .filter(|k| k.starts_with(Self::KEY_PREFIX))
             .map(|k| k.strip_prefix(Self::KEY_PREFIX).unwrap_or(&k).to_string())
             .collect()
+    }
+
+    pub fn get_metrics(&self) -> CacheMetrics {
+        CacheMetrics {
+            total_entries: self.entry_count.load(Ordering::Relaxed),
+            cache_hits: self.cache_hits.load(Ordering::Relaxed),
+            cache_misses: self.cache_misses.load(Ordering::Relaxed),
+            evictions: self.evictions.load(Ordering::Relaxed),
+            memory_usage_bytes: self.payload_bytes.load(Ordering::Relaxed),
+        }
     }
 
     fn resync_entry_count(&self) {
@@ -783,6 +816,23 @@ mod tests {
         assert_eq!(retrieved.unwrap().body, Bytes::from("test body"));
 
         assert_eq!(cache.test_entry_count(), 1);
+    }
+
+    #[tokio::test]
+    async fn test_cache_metrics_track_entries_hits_misses_and_bytes() {
+        let config =
+            CacheConfig { max_entries: 10, default_ttl: 60, enabled: true, ..Default::default() };
+        let cache = ResponseCache::new(config);
+
+        assert!(cache.get("test-key").await.is_none());
+        cache.set("test-key".to_string(), create_test_response("test body", 60)).await;
+        assert!(cache.get("test-key").await.is_some());
+
+        let metrics = cache.get_metrics();
+        assert_eq!(metrics.total_entries, 1);
+        assert_eq!(metrics.cache_hits, 1);
+        assert_eq!(metrics.cache_misses, 1);
+        assert!(metrics.memory_usage_bytes > 0);
     }
 
     #[tokio::test]
