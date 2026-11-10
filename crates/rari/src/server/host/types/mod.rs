@@ -9,6 +9,7 @@ pub mod request;
 use crate::{
     RscHtmlRenderer, RscRenderer,
     rendering::layout::LayoutHtmlCache,
+    runtime::JsExecutionRuntime,
     server::{
         cache::{
             CacheHandlerRegistry,
@@ -79,6 +80,7 @@ impl FallbackHtmlCache {
 #[non_exhaustive]
 pub struct ServerState {
     pub renderer: Arc<Mutex<RscRenderer>>,
+    pub js_runtime: Arc<JsExecutionRuntime>,
     pub ssr_renderer: Arc<RscHtmlRenderer>,
     pub config: Arc<Config>,
     pub app_router: Option<Arc<AppRouter>>,

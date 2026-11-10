@@ -1,8 +1,16 @@
 #![expect(clippy::missing_errors_doc, clippy::too_many_lines)]
 
-use std::{path::Path, sync::Arc};
+use std::{
+    path::Path,
+    sync::Arc,
+    time::{Duration, Instant},
+};
 
-use axum::{extract::State, http::StatusCode, response::Json};
+use axum::{
+    extract::{Query, State},
+    http::StatusCode,
+    response::Json,
+};
 use cow_utils::CowUtils;
 use rari_error::RariError;
 use serde_json::Value;
@@ -446,4 +454,43 @@ pub async fn health_check() -> Result<Json<Value>, StatusCode> {
         "status": "ok",
         "service": "rari-rsc-server"
     })))
+}
+
+/// Exercise the JavaScript event loop so liveness checks detect stuck runtimes.
+/// The optional timeout is capped to keep a misconfigured probe bounded.
+#[expect(clippy::implicit_hasher, reason = "FxHashMap is specific to query params")]
+#[axum::debug_handler]
+pub async fn runtime_health_check(
+    State(state): State<ServerState>,
+    Query(params): Query<rustc_hash::FxHashMap<String, String>>,
+) -> Result<Json<Value>, StatusCode> {
+    let timeout_ms = params
+        .get("timeout_ms")
+        .and_then(|value| value.parse::<u64>().ok())
+        .unwrap_or(5_000)
+        .min(30_000);
+    if timeout_ms == 0 {
+        return Err(StatusCode::SERVICE_UNAVAILABLE);
+    }
+    let started = Instant::now();
+    let probe = state.js_runtime.execute_script("runtime_health_probe".into(), "1 + 1".into());
+
+    match time::timeout(Duration::from_millis(timeout_ms), probe).await {
+        Ok(Ok(_)) => {
+            let elapsed_ms = u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX);
+            Ok(Json(serde_json::json!({
+                "status": "ok",
+                "runtime": "responsive",
+                "elapsed_ms": elapsed_ms,
+            })))
+        }
+        Ok(Err(error)) => {
+            tracing::error!(error = %error, "Runtime health probe failed");
+            Err(StatusCode::SERVICE_UNAVAILABLE)
+        }
+        Err(_) => {
+            tracing::error!(timeout_ms, "Runtime health probe timed out");
+            Err(StatusCode::SERVICE_UNAVAILABLE)
+        }
+    }
 }
