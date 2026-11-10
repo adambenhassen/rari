@@ -20,6 +20,7 @@ jobs:
       contents: read
     env:
       NODE_OPTIONS: --max-old-space-size=6144
+      PNPM_CONFIG_WORKSPACE_CONCURRENCY: 1
     steps:
       - name: Checkout
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -37,6 +38,15 @@ jobs:
 
       - name: Install JavaScript dependencies
         run: pnpm install --frozen-lockfile
+
+      - name: Build JavaScript packages
+        run: |
+          pnpm --filter=@rari/lint run build
+          pnpm --filter=@rari/use-cache run build
+          pnpm --filter=@rari/logger run build
+          pnpm --filter=@rari/deploy run build
+          pnpm --filter=rari run build
+          pnpm --filter=create-rari-app run build
 
       - name: Lint JavaScript
         run: pnpm lint
