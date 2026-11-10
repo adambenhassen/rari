@@ -294,6 +294,30 @@ impl ResponseCache {
             return;
         }
 
+        if request_context.is_some_and(|context| !context.response_cache_allowed()) {
+            return;
+        }
+
+        // Evict until both the entry cap and the byte cap hold. The new entry
+        // itself is always admitted, even if it alone exceeds max_bytes.
+        let new_size = response.size_bytes();
+        loop {
+            let replacing = self.cache.contains_key(&key);
+            let replacing_size = self.cache.get(&key).map(|entry| entry.size_bytes()).unwrap_or(0);
+            let projected_entries =
+                self.lru.lock().len().saturating_sub(if replacing { 1 } else { 0 });
+            let projected_bytes = self.bytes.load(Ordering::Relaxed).saturating_sub(replacing_size);
+            let over_entries = projected_entries >= self.config.max_entries;
+            let over_bytes = projected_entries > 0
+                && projected_bytes.saturating_add(new_size) > self.config.max_bytes;
+            if !(over_entries || over_bytes) || !self.evict_lru().await {
+                break;
+            }
+        }
+
+        // Only hold the request marker lock across the synchronous cache write.
+        // Taking it after the asynchronous eviction loop keeps this future Send,
+        // while still making the availability check atomic with insertion.
         let _cache_guard = match request_context {
             Some(context) => match context.response_cache_write_guard() {
                 Some(guard) => Some(guard),
@@ -302,24 +326,12 @@ impl ResponseCache {
             None => None,
         };
 
-        // Replace any existing entry up front so byte accounting and the tag
-        // index have a single source of truth for this key.
+        // Replace any existing entry so byte accounting has a single source
+        // of truth for this key.
         if let Some((_, old)) = self.cache.remove(&key) {
             self.sub_bytes(old.size_bytes());
             let mut lru = self.lru.lock();
             lru.pop(&key);
-        }
-
-        // Evict until both the entry cap and the byte cap hold. The new entry
-        // itself is always admitted, even if it alone exceeds max_bytes.
-        let new_size = response.size_bytes();
-        loop {
-            let over_entries = { self.lru.lock().len() >= self.config.max_entries };
-            let over_bytes = !self.cache.is_empty()
-                && self.bytes.load(Ordering::Relaxed) + new_size > self.config.max_bytes;
-            if !(over_entries || over_bytes) || !self.evict_lru().await {
-                break;
-            }
         }
 
         let insert = || {
@@ -538,6 +550,20 @@ mod tests {
             compressed_br: None,
             compressed_gzip: None,
         }
+    }
+
+    #[test]
+    fn set_for_request_future_is_send() {
+        fn assert_send<T: Send>(_: T) {}
+
+        let cache = ResponseCache::new(CacheConfig::default());
+        let request_context = RequestContext::new("/test".to_string());
+
+        assert_send(cache.set_for_request(
+            "test-key".to_string(),
+            create_test_response("test body", 60),
+            &request_context,
+        ));
     }
 
     #[test]
