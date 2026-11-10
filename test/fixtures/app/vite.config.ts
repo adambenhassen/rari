@@ -12,6 +12,7 @@ export default defineConfig({
         routes: {
           '/headers-test': 'no-store',
           '/use-cache-revalidate': 'no-store',
+          '/runtime-health-blocker': 'no-store',
         },
       },
       experimental: {
