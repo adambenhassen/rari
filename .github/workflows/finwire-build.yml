@@ -1,0 +1,256 @@
+name: Finwire build
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: Prerelease version for platform tarballs
+        required: true
+        default: 0.17.9-finwire.0
+        type: string
+
+permissions: {}
+
+jobs:
+  validate:
+    name: Validate release request
+    runs-on: ubuntu-latest
+    steps:
+      - name: Require finwire/main and a finwire version
+        env:
+          BUILD_REF: ${{ github.ref }}
+          VERSION: ${{ inputs.version }}
+        run: |
+          set -euo pipefail
+          if [[ "$BUILD_REF" != "refs/heads/finwire/main" ]]; then
+            echo "Dispatch this workflow from finwire/main (got $BUILD_REF)" >&2
+            exit 1
+          fi
+          if [[ ! "$VERSION" =~ ^0\.17\.9-finwire\.[0-9]+$ ]]; then
+            echo "Version must match 0.17.9-finwire.<n> (got $VERSION)" >&2
+            exit 1
+          fi
+
+  build:
+    name: Build ${{ matrix.platform }}
+    needs: validate
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 90
+    permissions:
+      contents: read
+    env:
+      CARGO_PROFILE_RELEASE_DEBUG: line-tables-only
+      CARGO_PROFILE_RELEASE_STRIP: none
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - platform: linux-x64
+            os: ubuntu-latest
+            target: x86_64-unknown-linux-gnu
+            name: rari-linux-x64
+          - platform: linux-arm64
+            os: ubuntu-24.04-arm
+            target: aarch64-unknown-linux-gnu
+            name: rari-linux-arm64
+          - platform: darwin-arm64
+            os: macos-14
+            target: aarch64-apple-darwin
+            name: rari-darwin-arm64
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+
+      - name: Install pnpm
+        uses: pnpm/action-setup@ea17c68df8912ef543352723c149a84f56e3d413 # v6.1.0
+
+      - name: Install Node.js
+        uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: 24.21.0
+          cache: pnpm
+
+      - name: Install JavaScript dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@02cb101ec7c40f2c49e1d9714d64511d8e1b74de # v1
+        with:
+          toolchain: nightly
+          targets: ${{ matrix.target }}
+
+      - name: Cache Rust
+        uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
+        with:
+          key: ${{ matrix.target }}
+          prefix-key: finwire-main-v1
+
+      - name: Install Linux build dependencies
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y binutils mold pkg-config libfontconfig1-dev
+
+      - name: Install macOS build dependencies
+        if: runner.os == 'macOS'
+        run: |
+          brew list pkg-config &>/dev/null || brew install pkg-config
+          brew list fontconfig &>/dev/null || brew install fontconfig
+
+      - name: Bundle React ESM vendor files
+        run: pnpm --filter @rari/bundle-react-esm bundle
+
+      - name: Create snapshot placeholder
+        run: |
+          mkdir -p crates/rari/snapshots
+          touch crates/rari/snapshots/RARI_SNAPSHOT.bin
+          echo 'pub static RESIDUAL_LAZY_ESM_SOURCES: &[(&str, &str)] = &[];' > crates/rari/snapshots/residual_lazy_sources.rs
+          echo 'pub static RESIDUAL_LAZY_JS_SOURCES: &[(&str, &str)] = &[];' >> crates/rari/snapshots/residual_lazy_sources.rs
+
+      - name: Generate V8 snapshot (Linux)
+        if: runner.os == 'Linux'
+        run: cargo run --release --manifest-path tools/snapshot/Cargo.toml -- crates/rari/snapshots
+        env:
+          RUSTFLAGS: -C link-arg=-fuse-ld=mold -Cforce-frame-pointers=yes
+
+      - name: Generate V8 snapshot (macOS)
+        if: runner.os == 'macOS'
+        run: cargo run --release --manifest-path tools/snapshot/Cargo.toml -- crates/rari/snapshots
+        env:
+          RUSTFLAGS: -Cforce-frame-pointers=yes
+
+      - name: Build binary (Linux)
+        if: runner.os == 'Linux'
+        run: cargo build --release --target ${{ matrix.target }} --bin rari --features ext-full
+        env:
+          RUSTFLAGS: -C link-arg=-fuse-ld=mold -Cforce-frame-pointers=yes
+
+      - name: Build binary (macOS)
+        if: runner.os == 'macOS'
+        run: cargo build --release --target ${{ matrix.target }} --bin rari --features ext-full
+        env:
+          RUSTFLAGS: -Cforce-frame-pointers=yes
+
+      - name: Prepare Linux binary and debug sidecar
+        if: runner.os == 'Linux'
+        run: |
+          set -euo pipefail
+          mkdir -p binaries
+          BIN=target/${{ matrix.target }}/release/rari
+          objcopy --only-keep-debug "$BIN" "binaries/${{ matrix.name }}.debug"
+          objcopy --strip-debug "$BIN" "binaries/${{ matrix.name }}"
+          objcopy --add-gnu-debuglink="binaries/${{ matrix.name }}.debug" "binaries/${{ matrix.name }}"
+          chmod +x "binaries/${{ matrix.name }}"
+          ls -lh binaries/
+
+      - name: Prepare macOS binary and debug sidecar
+        if: runner.os == 'macOS'
+        run: |
+          set -euo pipefail
+          mkdir -p binaries
+          BIN=target/${{ matrix.target }}/release/rari
+          cp "$BIN" "binaries/${{ matrix.name }}"
+          dsymutil "$BIN" -o "binaries/${{ matrix.name }}.dSYM"
+          ditto -c -k --sequesterRsrc --keepParent "binaries/${{ matrix.name }}.dSYM" "binaries/${{ matrix.name }}.debug.zip"
+          rm -rf "binaries/${{ matrix.name }}.dSYM"
+          strip -S "binaries/${{ matrix.name }}"
+          chmod +x "binaries/${{ matrix.name }}"
+          ls -lh binaries/
+
+      - name: Upload binary and debug sidecar
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: ${{ matrix.name }}
+          path: binaries/
+          if-no-files-found: error
+          retention-days: 7
+
+  release:
+    name: Package and publish prerelease
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+
+      - name: Setup Node.js
+        uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: 24.21.0
+
+      - name: Download binaries
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          path: artifacts
+
+      - name: Build platform tarballs
+        env:
+          VERSION: ${{ inputs.version }}
+        run: |
+          set -euo pipefail
+          mkdir -p dist-tarballs
+
+          build_platform() {
+            local platform="$1" os="$2" cpu="$3" description="$4"
+            local pkg="rari-${platform}"
+            local dir="packages/${pkg}"
+            mkdir -p "${dir}/bin"
+            cp "artifacts/${pkg}/${pkg}" "${dir}/bin/rari"
+            chmod +x "${dir}/bin/rari"
+            cat > "${dir}/package.json" <<EOF
+          {
+            "name": "${pkg}",
+            "type": "module",
+            "version": "${VERSION}",
+            "description": "Runtime Accelerated Rendering Infrastructure (${description})",
+            "author": "Ryan Skinner",
+            "license": "MIT",
+            "os": ["${os}"],
+            "cpu": ["${cpu}"],
+            "homepage": "https://github.com/rari-build/rari#readme",
+            "bin": {"rari": "./bin/rari"},
+            "files": ["LICENSE", "README.md", "bin/rari"],
+            "engines": {"node": ">=22.12.0"}
+          }
+          EOF
+            cp LICENSE "${dir}/LICENSE"
+            printf '# %s\n' "${pkg}" > "${dir}/README.md"
+            (cd "${dir}" && npm pack --pack-destination "${GITHUB_WORKSPACE}/dist-tarballs")
+          }
+
+          build_platform linux-x64 linux x64 "Linux x64 binary"
+          build_platform linux-arm64 linux arm64 "Linux ARM64 binary"
+          build_platform darwin-arm64 darwin arm64 "macOS ARM64 binary"
+          ls -lh dist-tarballs
+
+      - name: Create GitHub prerelease
+        env:
+          GH_TOKEN: ${{ github.token }}
+          VERSION: ${{ inputs.version }}
+        run: |
+          set -euo pipefail
+          TAG="build-${VERSION}"
+          NOTES_FILE="${RUNNER_TEMP}/release-notes.md"
+          cat > "${NOTES_FILE}" <<EOF
+          Finwire prerelease built from finwire/main at ${GITHUB_SHA}.
+
+          Platform packages are version ${VERSION} and can be consumed through pnpm overrides using the attached tarball URLs.
+
+          Assets include stripped rari binaries and separate debug sidecars. Linux sidecars are .debug ELF files; the macOS sidecar is a zipped dSYM bundle.
+          EOF
+          gh release create "${TAG}" \
+            --repo "${GITHUB_REPOSITORY}" \
+            --title "${TAG}" \
+            --notes-file "${NOTES_FILE}" \
+            --prerelease \
+            --target "${GITHUB_SHA}" \
+            dist-tarballs/*.tgz \
+            artifacts/rari-*/*
