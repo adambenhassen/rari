@@ -27,7 +27,9 @@ use tower_http::{
 use types::{FallbackHtmlCache, ServerState};
 
 #[cfg(feature = "jemalloc")]
-use crate::server::profiling::metrics_handler;
+use crate::server::profiling::{
+    heap_dump_handler, metrics_handler, spawn_pprof_gateway_client, spawn_pyroscope_pusher,
+};
 use crate::{
     RscHtmlRenderer, RscRenderer,
     rendering::{base::ResourceLimits, layout::LayoutRenderer},
@@ -342,7 +344,11 @@ impl Server {
 
         #[cfg(feature = "jemalloc")]
         {
-            router = router.route("/_rari/metrics", routing::get(metrics_handler));
+            router = router
+                .route("/_rari/metrics", routing::get(metrics_handler))
+                .route("/_rari/debug/heap", routing::get(heap_dump_handler));
+            spawn_pyroscope_pusher();
+            spawn_pprof_gateway_client();
         }
 
         let image_router = Router::new()

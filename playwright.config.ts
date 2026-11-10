@@ -39,6 +39,8 @@ export default defineConfig({
     env: {
       NODE_ENV: 'production',
       RUST_LOG: 'debug',
+      MALLOC_CONF: 'prof:true,prof_active:true',
+      RARI_PROFILING_TOKEN: 'e2e-profiling-token',
     },
   },
 
