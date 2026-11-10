@@ -120,6 +120,16 @@ fn wrap_html_with_metadata(
     }
 }
 
+fn response_unavailable(body: Body, content_type: &str, retry_after_seconds: u64) -> Response {
+    Response::builder()
+        .status(StatusCode::SERVICE_UNAVAILABLE)
+        .header("content-type", content_type)
+        .header("cache-control", "no-store")
+        .header("retry-after", retry_after_seconds.to_string())
+        .body(body)
+        .expect("Valid service unavailable response")
+}
+
 async fn collect_page_metadata(
     state: &ServerState,
     route_match: &AppRouteMatch,
@@ -324,6 +334,7 @@ pub async fn render_with_fallback(
     state: Arc<ServerState>,
     route_match: crate::server::routing::AppRouteMatch,
     context: crate::rsc::rendering::layout::LayoutRenderContext,
+    request_context: Arc<crate::server::middleware::request_context::RequestContext>,
     accept_encoding: Option<&str>,
 ) -> Result<Response, StatusCode> {
     let layout_renderer =
@@ -333,6 +344,7 @@ pub async fn render_with_fallback(
         state.clone(),
         route_match.clone(),
         context.clone(),
+        request_context.clone(),
         &layout_renderer,
         accept_encoding,
     )
@@ -341,7 +353,7 @@ pub async fn render_with_fallback(
         Ok(response) => Ok(response),
         Err(e) => {
             error!("Streaming render failed, falling back to synchronous: {}", e);
-            render_synchronous(state, route_match, context, accept_encoding).await
+            render_synchronous(state, route_match, context, request_context, accept_encoding).await
         }
     }
 }
@@ -350,16 +362,12 @@ pub async fn render_rsc_navigation_streaming(
     state: Arc<ServerState>,
     route_match: crate::server::routing::AppRouteMatch,
     context: crate::rsc::rendering::layout::LayoutRenderContext,
+    request_context: Arc<crate::server::middleware::request_context::RequestContext>,
     accept_encoding: Option<&str>,
 ) -> Result<Response, StatusCode> {
     let layout_renderer =
         LayoutRenderer::with_shared_cache(state.renderer.clone(), state.layout_html_cache.clone());
     let is_not_found = route_match.not_found.is_some();
-
-    let request_context =
-        std::sync::Arc::new(crate::server::middleware::request_context::RequestContext::new(
-            route_match.route.path.clone(),
-        ));
 
     let render_result = match layout_renderer
         .render_route_with_streaming(&route_match, &context, Some(request_context.clone()), true)
@@ -383,11 +391,20 @@ pub async fn render_rsc_navigation_streaming(
                 context,
                 rsc_stream,
                 is_not_found,
+                request_context,
                 accept_encoding,
             )
             .await
         }
         crate::rsc::rendering::layout::RenderResult::Static(rsc_wire_format) => {
+            if let Some(retry_after_seconds) = request_context.response_unavailable_after() {
+                return Ok(response_unavailable(
+                    Body::from(rsc_wire_format),
+                    "text/x-component",
+                    retry_after_seconds,
+                ));
+            }
+
             let status_code = if is_not_found { StatusCode::NOT_FOUND } else { StatusCode::OK };
 
             let sorted_wire_format = sort_rsc_rows(&rsc_wire_format);
@@ -422,6 +439,7 @@ async fn render_rsc_streaming_response(
     context: crate::rsc::rendering::layout::LayoutRenderContext,
     mut rsc_stream: crate::rsc::rendering::streaming::stream::RscStream,
     is_not_found: bool,
+    request_context: Arc<crate::server::middleware::request_context::RequestContext>,
     accept_encoding: Option<&str>,
 ) -> Result<Response, StatusCode> {
     use crate::server::compression::compress_stream;
@@ -448,17 +466,31 @@ async fn render_rsc_streaming_response(
     let encoding = CompressionEncoding::from_accept_encoding(accept_encoding);
     let compressed_stream = compress_stream(rsc_wire_stream, encoding);
 
-    let status_code = if is_not_found { StatusCode::NOT_FOUND } else { StatusCode::OK };
-    let cache_control = state.config.get_cache_control_for_route(&context.pathname);
+    let response_unavailable_after = request_context.response_unavailable_after();
+    let status_code = if response_unavailable_after.is_some() {
+        StatusCode::SERVICE_UNAVAILABLE
+    } else if is_not_found {
+        StatusCode::NOT_FOUND
+    } else {
+        StatusCode::OK
+    };
 
     let mut response_builder = Response::builder()
         .status(status_code)
         .header("content-type", "text/x-component")
         .header("transfer-encoding", "chunked")
         .header("x-render-mode", "streaming")
-        .header("cache-control", cache_control)
         .header("vary", "Accept")
         .header("x-content-type-options", "nosniff");
+
+    if let Some(retry_after_seconds) = response_unavailable_after {
+        response_builder = response_builder
+            .header("cache-control", "no-store")
+            .header("retry-after", retry_after_seconds.to_string());
+    } else {
+        response_builder = response_builder
+            .header("cache-control", state.config.get_cache_control_for_route(&context.pathname));
+    }
 
     if let Some(encoding_header) = encoding.as_header_value() {
         response_builder = response_builder.header("content-encoding", encoding_header);
@@ -479,19 +511,15 @@ pub async fn render_synchronous(
     state: Arc<ServerState>,
     route_match: crate::server::routing::AppRouteMatch,
     context: crate::rsc::rendering::layout::LayoutRenderContext,
+    request_context: Arc<crate::server::middleware::request_context::RequestContext>,
     accept_encoding: Option<&str>,
 ) -> Result<Response, StatusCode> {
     let layout_renderer =
         LayoutRenderer::with_shared_cache(state.renderer.clone(), state.layout_html_cache.clone());
-    let request_context =
-        std::sync::Arc::new(crate::server::middleware::request_context::RequestContext::new(
-            route_match.route.path.clone(),
-        ));
-
     let is_not_found = route_match.not_found.is_some();
 
     match layout_renderer
-        .render_route_with_streaming(&route_match, &context, Some(request_context), false)
+        .render_route_with_streaming(&route_match, &context, Some(request_context.clone()), false)
         .await
     {
         Ok(render_result) => match render_result {
@@ -507,6 +535,14 @@ pub async fn render_synchronous(
 
                 let final_html =
                     wrap_html_with_metadata(html_with_assets, context.metadata.as_ref(), &state);
+
+                if let Some(retry_after_seconds) = request_context.response_unavailable_after() {
+                    return Ok(response_unavailable(
+                        Body::from(final_html),
+                        "text/html; charset=utf-8",
+                        retry_after_seconds,
+                    ));
+                }
 
                 let status_code = if is_not_found { StatusCode::NOT_FOUND } else { StatusCode::OK };
                 let cache_control = state.config.get_cache_control_for_route(&context.pathname);
@@ -527,6 +563,7 @@ pub async fn render_synchronous(
                     context,
                     stream,
                     is_not_found,
+                    request_context,
                     accept_encoding,
                 )
                 .await
@@ -545,6 +582,7 @@ async fn render_streaming_response(
     context: crate::rsc::rendering::layout::LayoutRenderContext,
     mut rsc_stream: crate::rsc::rendering::streaming::stream::RscStream,
     is_not_found: bool,
+    request_context: Arc<crate::server::middleware::request_context::RequestContext>,
     accept_encoding: Option<&str>,
 ) -> Result<Response, StatusCode> {
     use crate::server::compression::compress_stream;
@@ -639,16 +677,30 @@ async fn render_streaming_response(
     let encoding = CompressionEncoding::from_accept_encoding(accept_encoding);
     let compressed_stream = compress_stream(html_stream, encoding);
 
-    let status_code = if is_not_found { StatusCode::NOT_FOUND } else { StatusCode::OK };
-    let cache_control = state.config.get_cache_control_for_route(&context.pathname);
+    let response_unavailable_after = request_context.response_unavailable_after();
+    let status_code = if response_unavailable_after.is_some() {
+        StatusCode::SERVICE_UNAVAILABLE
+    } else if is_not_found {
+        StatusCode::NOT_FOUND
+    } else {
+        StatusCode::OK
+    };
 
     let mut response_builder = Response::builder()
         .status(status_code)
         .header("content-type", "text/html; charset=utf-8")
         .header("transfer-encoding", "chunked")
         .header("x-content-type-options", "nosniff")
-        .header("cache-control", cache_control)
         .header("vary", "Accept");
+
+    if let Some(retry_after_seconds) = response_unavailable_after {
+        response_builder = response_builder
+            .header("cache-control", "no-store")
+            .header("retry-after", retry_after_seconds.to_string());
+    } else {
+        response_builder = response_builder
+            .header("cache-control", state.config.get_cache_control_for_route(&context.pathname));
+    }
 
     if let Some(encoding_header) = encoding.as_header_value() {
         response_builder = response_builder.header("content-encoding", encoding_header);
@@ -662,19 +714,15 @@ pub async fn render_streaming_with_layout(
     state: Arc<ServerState>,
     route_match: crate::server::routing::AppRouteMatch,
     context: crate::rsc::rendering::layout::LayoutRenderContext,
+    request_context: Arc<crate::server::middleware::request_context::RequestContext>,
     layout_renderer: &LayoutRenderer,
     accept_encoding: Option<&str>,
 ) -> Result<Response, StatusCode> {
     let layout_count = route_match.layouts.len();
     let is_not_found = route_match.not_found.is_some();
 
-    let request_context =
-        std::sync::Arc::new(crate::server::middleware::request_context::RequestContext::new(
-            route_match.route.path.clone(),
-        ));
-
     let render_result = match layout_renderer
-        .render_route_with_streaming(&route_match, &context, Some(request_context), false)
+        .render_route_with_streaming(&route_match, &context, Some(request_context.clone()), false)
         .await
     {
         Ok(result) => result,
@@ -689,7 +737,14 @@ pub async fn render_streaming_with_layout(
                 error!("  Layout {}: {} (is_root: {})", idx, layout.file_path, layout.is_root);
             }
 
-            return render_synchronous(state, route_match, context, accept_encoding).await;
+            return render_synchronous(
+                state,
+                route_match,
+                context,
+                request_context,
+                accept_encoding,
+            )
+            .await;
         }
     };
 
@@ -708,6 +763,14 @@ pub async fn render_streaming_with_layout(
 
             let final_html =
                 wrap_html_with_metadata(html_with_assets, context.metadata.as_ref(), &state);
+
+            if let Some(retry_after_seconds) = request_context.response_unavailable_after() {
+                return Ok(response_unavailable(
+                    Body::from(final_html),
+                    "text/html; charset=utf-8",
+                    retry_after_seconds,
+                ));
+            }
 
             let status_code = if is_not_found { StatusCode::NOT_FOUND } else { StatusCode::OK };
             let cache_control = state.config.get_cache_control_for_route(&context.pathname);
@@ -737,6 +800,7 @@ pub async fn render_streaming_with_layout(
         context,
         rsc_stream,
         is_not_found,
+        request_context,
         accept_encoding,
     )
     .await
@@ -986,6 +1050,7 @@ pub async fn handle_app_route(
                     Arc::new(state),
                     route_match,
                     context,
+                    request_context.clone(),
                     accept_encoding,
                 )
                 .await;
@@ -1034,6 +1099,15 @@ pub async fn handle_app_route(
                 .await
             {
                 Ok(rsc_wire_format) => {
+                    if let Some(retry_after_seconds) = request_context.response_unavailable_after()
+                    {
+                        return Ok(response_unavailable(
+                            Body::from(rsc_wire_format),
+                            "text/x-component",
+                            retry_after_seconds,
+                        ));
+                    }
+
                     let status_code = if route_match.not_found.is_some() {
                         StatusCode::NOT_FOUND
                     } else {
@@ -1194,6 +1268,7 @@ pub async fn handle_app_route(
                     Arc::new(state.clone()),
                     route_match.clone(),
                     context.clone(),
+                    request_context.clone(),
                     accept_encoding,
                 )
                 .await?;
@@ -1441,6 +1516,16 @@ pub async fn handle_app_route(
                 StatusCode::OK
             };
 
+            let body_bytes = bytes::Bytes::from(final_html);
+
+            if let Some(retry_after_seconds) = request_context.response_unavailable_after() {
+                return Ok(response_unavailable(
+                    Body::from(body_bytes),
+                    "text/html; charset=utf-8",
+                    retry_after_seconds,
+                ));
+            }
+
             let mut response_builder = Response::builder()
                 .status(status_code)
                 .header("content-type", "text/html; charset=utf-8")
@@ -1458,8 +1543,6 @@ pub async fn handle_app_route(
 
             let cache_policy =
                 response::RouteCachePolicy::from_cache_control(cache_control_value, path);
-
-            let body_bytes = bytes::Bytes::from(final_html);
 
             if cache_policy.enabled {
                 let cached_response = response::CachedResponse {

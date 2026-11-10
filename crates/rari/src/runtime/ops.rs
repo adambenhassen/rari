@@ -234,10 +234,32 @@ pub fn get_streaming_ops() -> Vec<OpDecl> {
         op_send_chunk_to_rust(),
         op_internal_log(),
         op_sanitize_html(),
+        op_mark_response_unavailable(),
         op_get_cookies(),
         op_set_cookie(),
         op_delete_cookie(),
     ]
+}
+
+#[op2(fast)]
+pub fn op_mark_response_unavailable(
+    state: Rc<RefCell<OpState>>,
+    #[string] retry_after_seconds: String,
+) -> Result<(), JsErrorBox> {
+    let retry_after_seconds = retry_after_seconds
+        .parse::<u64>()
+        .map_err(|_| JsErrorBox::type_error("retry-after must be a non-negative integer"))?;
+
+    let op_state_ref = state.borrow();
+    let request_context = op_state_ref
+        .try_borrow::<Arc<crate::server::middleware::request_context::RequestContext>>()
+        .ok_or_else(|| {
+            JsErrorBox::generic("markResponseUnavailable can only be called during a server render")
+        })?;
+
+    request_context.mark_response_unavailable(retry_after_seconds);
+
+    Ok(())
 }
 
 #[op2(fast)]

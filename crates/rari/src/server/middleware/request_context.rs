@@ -75,6 +75,7 @@ pub struct RequestContext {
     request_id: String,
     start_time: Instant,
     route_path: String,
+    response_unavailable_after: Mutex<Option<u64>>,
     pub cookie_header: Option<String>,
     pub pending_cookies: Arc<DashMap<PendingCookieKey, PendingCookie>>,
     pub function_cache: Arc<DashMap<String, JsonValue>>,
@@ -88,6 +89,7 @@ impl RequestContext {
             request_id: Uuid::new_v4().to_string(),
             start_time: Instant::now(),
             route_path,
+            response_unavailable_after: Mutex::new(None),
             cookie_header: None,
             pending_cookies: Arc::new(DashMap::new()),
             function_cache: Arc::new(DashMap::new()),
@@ -105,6 +107,14 @@ impl RequestContext {
 
     pub fn route_path(&self) -> &str {
         &self.route_path
+    }
+
+    pub fn mark_response_unavailable(&self, retry_after_seconds: u64) {
+        self.response_unavailable_after.lock().get_or_insert(retry_after_seconds);
+    }
+
+    pub fn response_unavailable_after(&self) -> Option<u64> {
+        *self.response_unavailable_after.lock()
     }
 
     pub fn start_time(&self) -> Instant {

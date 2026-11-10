@@ -34,7 +34,14 @@ const REFERRER_STRICT_ORIGIN: &str = "strict-origin-when-cross-origin";
 const PERMISSIONS_RESTRICTIVE: &str = "geolocation=(), microphone=(), camera=(), payment=()";
 
 fn apply_error_cache_control(headers: &mut axum::http::HeaderMap, status: StatusCode) {
-    if status.is_client_error() || status.is_server_error() {
+    let explicitly_no_store = headers
+        .get(axum::http::header::CACHE_CONTROL)
+        .and_then(|value| value.to_str().ok())
+        .is_some_and(|value| {
+            value.split(',').any(|directive| directive.trim().eq_ignore_ascii_case("no-store"))
+        });
+
+    if (status.is_client_error() || status.is_server_error()) && !explicitly_no_store {
         headers.insert(
             axum::http::header::CACHE_CONTROL,
             HeaderValue::from_static("no-cache, no-store, must-revalidate"),
@@ -115,5 +122,35 @@ fn add_security_headers(headers: &mut axum::http::HeaderMap) {
 
     if let Ok(value) = HeaderValue::from_str(&csp_policy) {
         headers.insert(CONTENT_SECURITY_POLICY, value);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn error_cache_control_preserves_explicit_no_store() {
+        let mut headers = axum::http::HeaderMap::new();
+        headers.insert(axum::http::header::CACHE_CONTROL, HeaderValue::from_static("no-store"));
+
+        apply_error_cache_control(&mut headers, StatusCode::SERVICE_UNAVAILABLE);
+
+        assert_eq!(
+            headers[axum::http::header::CACHE_CONTROL],
+            HeaderValue::from_static("no-store")
+        );
+    }
+
+    #[test]
+    fn error_cache_control_defaults_when_unset() {
+        let mut headers = axum::http::HeaderMap::new();
+
+        apply_error_cache_control(&mut headers, StatusCode::INTERNAL_SERVER_ERROR);
+
+        assert_eq!(
+            headers[axum::http::header::CACHE_CONTROL],
+            HeaderValue::from_static("no-cache, no-store, must-revalidate")
+        );
     }
 }

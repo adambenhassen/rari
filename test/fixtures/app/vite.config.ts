@@ -5,7 +5,13 @@ import { defineConfig } from 'vite'
 
 export default defineConfig({
   plugins: [
-    rari(),
+    rari({
+      cacheControl: {
+        routes: {
+          '/server-response': 'public, max-age=60',
+        },
+      },
+    }),
     tailwindcss(),
   ],
   resolve: {

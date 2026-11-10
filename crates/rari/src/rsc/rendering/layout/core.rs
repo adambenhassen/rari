@@ -415,8 +415,13 @@ impl LayoutRenderer {
         return_rsc_on_fallback: bool,
     ) -> Result<RenderResult, RariError> {
         let cache_key = utils::generate_cache_key(route_match, context);
+        let request_context_for_cache = request_context.clone();
+        let response_is_cacheable = request_context_for_cache
+            .as_ref()
+            .is_none_or(|ctx| ctx.response_unavailable_after().is_none());
 
         if !return_rsc_on_fallback
+            && response_is_cacheable
             && let Some(cached_html) =
                 self.html_cache.get(cache_key, layout_cache_ttl(&route_match.pathname))
         {
@@ -486,7 +491,11 @@ if (typeof window !== 'undefined') {
                 format!("{}{}\n{}", html, payload_script, completion_script)
             };
 
-            if route_match.not_found.is_none() && !layout_cache_ttl(&route_match.pathname).is_zero()
+            if route_match.not_found.is_none()
+                && request_context_for_cache
+                    .as_ref()
+                    .is_none_or(|ctx| ctx.response_unavailable_after().is_none())
+                && !layout_cache_ttl(&route_match.pathname).is_zero()
             {
                 self.html_cache.insert(cache_key, html.clone());
             }
@@ -603,7 +612,7 @@ if (typeof window !== 'undefined') {
                             fallback_script,
                             route_match,
                             return_rsc_on_fallback,
-                            can_use_html_cache,
+                            can_use_html_cache && ctx.response_unavailable_after().is_none(),
                             cache_key,
                         )
                         .await
@@ -698,7 +707,10 @@ if (typeof window !== 'undefined') {
                                 fallback_script,
                                 route_match,
                                 return_rsc_on_fallback,
-                                can_use_html_cache,
+                                can_use_html_cache
+                                    && request_context_for_cache.as_ref().is_none_or(|ctx| {
+                                        ctx.response_unavailable_after().is_none()
+                                    }),
                                 cache_key,
                             )
                             .await;
