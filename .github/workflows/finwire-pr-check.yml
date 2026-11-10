@@ -39,6 +39,9 @@ jobs:
       - name: Install JavaScript dependencies
         run: pnpm install --frozen-lockfile
 
+      - name: Bundle React ESM vendor files
+        run: pnpm --filter @rari/bundle-react-esm bundle
+
       - name: Build JavaScript packages
         run: |
           pnpm --filter=@rari/lint run build
@@ -72,9 +75,6 @@ jobs:
         uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
         with:
           shared-key: finwire-main-pr-check
-
-      - name: Bundle React ESM vendor files
-        run: pnpm --filter @rari/bundle-react-esm bundle
 
       - name: Create snapshot placeholder
         run: |
