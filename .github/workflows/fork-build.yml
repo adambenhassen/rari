@@ -12,6 +12,10 @@ on:
         description: 'Prerelease version for the packed npm tarballs (semver)'
         required: true
         default: '0.14.13-cachefix.1'
+      issue:
+        description: 'Issue key to route this build run to (for example MAIN-3668)'
+        required: false
+        type: string
 
 permissions:
   contents: write
