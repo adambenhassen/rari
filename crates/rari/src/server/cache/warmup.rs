@@ -92,10 +92,7 @@ async fn warm_route(
     let cache_control = state.config.get_cache_control_for_route(path);
     let cache_policy = response::RouteCachePolicy::from_cache_control(cache_control, path);
 
-    if cache_policy.enabled
-        && state.response_cache.config.enabled
-        && request_context.response_cache_allowed()
-    {
+    if cache_policy.enabled && state.response_cache.config.enabled {
         let cached_response = response::CachedResponse {
             body: bytes::Bytes::from(rsc_wire_format),
             headers: axum::http::HeaderMap::new(),
@@ -110,7 +107,7 @@ async fn warm_route(
             compressed_gzip: None,
         };
 
-        state.response_cache.set(cache_key, cached_response).await;
+        state.response_cache.set_for_request(cache_key, cached_response, &request_context).await;
     }
 
     Ok(())

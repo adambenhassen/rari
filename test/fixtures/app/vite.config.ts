@@ -10,6 +10,8 @@ export default defineConfig({
         routes: {
           '/server-response': 'public, max-age=60',
           '/server-response-delayed': 'public, max-age=60',
+          '/server-response-streaming': 'public, max-age=60',
+          '/server-response-fallback': 'public, max-age=60',
         },
       },
     }),

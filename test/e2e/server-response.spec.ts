@@ -100,4 +100,32 @@ test.describe('Server response status', () => {
     expect(secondBody).not.toBe(firstBody)
     expect(secondBody).toContain('Delayed unavailable content')
   })
+
+  test('keeps unavailable marks scoped across concurrent streaming renders', async ({ request }) => {
+    const [unavailable, healthy] = await Promise.all([
+      request.get('/server-response-streaming?mode=unavailable'),
+      request.get('/server-response-streaming?mode=healthy'),
+    ])
+
+    expect(unavailable.status()).toBe(503)
+    expect(healthy.status()).toBe(200)
+    expect(unavailable.headers()['cache-control']).toBe('no-store')
+    expect(unavailable.headers()['retry-after']).toBe('60')
+
+    const healthyAfter = await request.get('/server-response-streaming?mode=healthy')
+    expect(healthyAfter.status()).toBe(200)
+    expect(healthyAfter.headers()['cache-control']).toBe('public, max-age=60')
+  })
+
+  test('does not cache a fallback render that marks unavailable', async ({ request }) => {
+    const first = await request.get('/server-response-fallback')
+    const second = await request.get('/server-response-fallback')
+
+    expect(first.status()).toBe(503)
+    expect(first.headers()['cache-control']).toBe('no-store')
+    expect(second.status()).toBe(503)
+    expect(second.headers()['cache-control']).toBe('no-store')
+    expect(second.headers()['x-cache']).not.toBe('HIT')
+    expect(await second.text()).toContain('Fallback page content')
+  })
 })

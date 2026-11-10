@@ -30,6 +30,7 @@ pub fn create_deno_runtime(
         ops: Cow::Owned(streaming_ops),
         op_state_fn: Some(Box::new(|state| {
             state.put(StreamOpState::default());
+            state.put(crate::runtime::ops::RequestContextRegistry::default());
             let mut feature_checker = deno_features::FeatureChecker::default();
             feature_checker.enable_feature("broadcast-channel");
             feature_checker.enable_feature("webgpu");

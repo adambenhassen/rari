@@ -1,12 +1,47 @@
 use crate::server::http_client::get_http_client;
 use deno_core::{OpDecl, OpState, op2};
 use deno_error::JsErrorBox;
+use rustc_hash::FxHashMap;
 use serde::Deserialize;
 use std::cell::RefCell;
 use std::rc::Rc;
 use std::sync::Arc;
 use tokio::sync::mpsc;
 use tracing::error;
+
+#[derive(Default)]
+pub struct RequestContextRegistry {
+    contexts: FxHashMap<String, Arc<crate::server::middleware::request_context::RequestContext>>,
+}
+
+impl RequestContextRegistry {
+    pub fn insert(
+        &mut self,
+        request_context: Arc<crate::server::middleware::request_context::RequestContext>,
+    ) {
+        self.contexts.insert(request_context.request_id().to_string(), request_context);
+    }
+
+    pub fn get(
+        &self,
+        request_id: &str,
+    ) -> Option<&Arc<crate::server::middleware::request_context::RequestContext>> {
+        self.contexts.get(request_id)
+    }
+
+    pub fn remove_if_matches(
+        &mut self,
+        expected: &Arc<crate::server::middleware::request_context::RequestContext>,
+    ) {
+        if self
+            .contexts
+            .get(expected.request_id())
+            .is_some_and(|current| Arc::ptr_eq(current, expected))
+        {
+            self.contexts.remove(expected.request_id());
+        }
+    }
+}
 
 #[derive(Deserialize, Debug)]
 #[serde(tag = "type")]
@@ -245,6 +280,7 @@ pub fn get_streaming_ops() -> Vec<OpDecl> {
 pub fn op_mark_response_unavailable(
     state: Rc<RefCell<OpState>>,
     #[string] retry_after_seconds: String,
+    #[string] request_id: String,
 ) -> Result<(), JsErrorBox> {
     let retry_after_seconds = retry_after_seconds
         .parse::<u64>()
@@ -252,7 +288,8 @@ pub fn op_mark_response_unavailable(
 
     let op_state_ref = state.borrow();
     let request_context = op_state_ref
-        .try_borrow::<Arc<crate::server::middleware::request_context::RequestContext>>()
+        .try_borrow::<RequestContextRegistry>()
+        .and_then(|contexts| contexts.get(&request_id))
         .ok_or_else(|| {
             JsErrorBox::generic("markResponseUnavailable can only be called during a server render")
         })?;

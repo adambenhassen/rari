@@ -62,6 +62,27 @@ async fn decompress_bytes(
     }
 }
 
+#[cfg(test)]
+#[allow(clippy::disallowed_methods)]
+mod response_unavailable_tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn unavailable_response_has_no_store_retry_after_and_rendered_body() {
+        let response = response_unavailable(
+            Body::from("<main>maintenance</main>"),
+            "text/html; charset=utf-8",
+            60,
+        );
+
+        assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+        assert_eq!(response.headers()["cache-control"], "no-store");
+        assert_eq!(response.headers()["retry-after"], "60");
+        let body = axum::body::to_bytes(response.into_body(), usize::MAX).await.unwrap();
+        assert_eq!(body, "<main>maintenance</main>");
+    }
+}
+
 fn sort_rsc_rows(wire_format: &str) -> String {
     let mut rows_with_ids: Vec<(u32, String)> = Vec::new();
 
@@ -1137,10 +1158,7 @@ pub async fn handle_app_route(
                     let cache_policy =
                         response::RouteCachePolicy::from_cache_control(cache_control, path);
 
-                    if cache_policy.enabled
-                        && state.response_cache.config.enabled
-                        && request_context.response_cache_allowed()
-                    {
+                    if cache_policy.enabled && state.response_cache.config.enabled {
                         let cached_response = response::CachedResponse {
                             body: bytes::Bytes::from(rsc_wire_format.clone()),
                             headers: cache_headers,
@@ -1155,7 +1173,10 @@ pub async fn handle_app_route(
                             compressed_gzip: None,
                         };
 
-                        state.response_cache.set(cache_key, cached_response).await;
+                        state
+                            .response_cache
+                            .set_for_request(cache_key, cached_response, &request_context)
+                            .await;
                     }
 
                     Ok(response_builder
@@ -1300,10 +1321,7 @@ pub async fn handle_app_route(
                         policy
                     };
 
-                    if cache_policy.enabled
-                        && state.response_cache.config.enabled
-                        && request_context.response_cache_allowed()
-                    {
+                    if cache_policy.enabled && state.response_cache.config.enabled {
                         let response_encoding = parts
                             .headers
                             .get("content-encoding")
@@ -1367,7 +1385,10 @@ pub async fn handle_app_route(
                             compressed_gzip,
                         };
 
-                        state.response_cache.set(cache_key.clone(), cached_response).await;
+                        state
+                            .response_cache
+                            .set_for_request(cache_key.clone(), cached_response, &request_context)
+                            .await;
 
                         let merged_vary = merge_vary_with_accept(parts.headers.get("vary"));
 
@@ -1550,7 +1571,7 @@ pub async fn handle_app_route(
             let cache_policy =
                 response::RouteCachePolicy::from_cache_control(cache_control_value, path);
 
-            if cache_policy.enabled && request_context.response_cache_allowed() {
+            if cache_policy.enabled {
                 let cached_response = response::CachedResponse {
                     body: body_bytes.clone(),
                     headers: response_headers,
@@ -1565,7 +1586,10 @@ pub async fn handle_app_route(
                     compressed_gzip: None,
                 };
 
-                state.response_cache.set(cache_key, cached_response).await;
+                state
+                    .response_cache
+                    .set_for_request(cache_key, cached_response, &request_context)
+                    .await;
             }
 
             Ok(response_builder.body(Body::from(body_bytes)).expect("Valid HTML response"))

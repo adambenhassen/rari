@@ -1,3 +1,4 @@
+use crate::server::middleware::request_context::RequestContext;
 use axum::http::HeaderMap;
 use bytes::Bytes;
 use dashmap::DashMap;
@@ -269,8 +270,30 @@ impl ResponseCache {
         Some(cached_response)
     }
 
-    pub async fn set(&self, key: String, response: CachedResponse) {
+    async fn set(&self, key: String, response: CachedResponse) {
+        self.set_inner(key, response, None).await;
+    }
+
+    pub async fn set_for_request(
+        &self,
+        key: String,
+        response: CachedResponse,
+        request_context: &RequestContext,
+    ) {
+        self.set_inner(key, response, Some(request_context)).await;
+    }
+
+    async fn set_inner(
+        &self,
+        key: String,
+        response: CachedResponse,
+        request_context: Option<&RequestContext>,
+    ) {
         if !self.config.enabled {
+            return;
+        }
+
+        if request_context.is_some_and(|context| !context.response_cache_allowed()) {
             return;
         }
 
@@ -294,27 +317,35 @@ impl ResponseCache {
             }
         }
 
-        for tag in &response.metadata.tags {
-            let mut keys = self.tag_index.entry(tag.clone()).or_default();
-            if !keys.contains(&key) {
-                keys.push(key.clone());
+        let insert = || {
+            for tag in &response.metadata.tags {
+                let mut keys = self.tag_index.entry(tag.clone()).or_default();
+                if !keys.contains(&key) {
+                    keys.push(key.clone());
+                }
             }
-        }
 
-        self.bytes.fetch_add(new_size, Ordering::Relaxed);
-        // A concurrent set of the same key can land between the remove above
-        // and this insert; the overwritten entry's bytes must come off the
-        // counter or they leak until the byte cap is exhausted.
-        if let Some(old) = self.cache.insert(key.clone(), response) {
-            self.sub_bytes(old.size_bytes());
-        }
+            self.bytes.fetch_add(new_size, Ordering::Relaxed);
+            // A concurrent set of the same key can land between the remove above
+            // and this insert; the overwritten entry's bytes must come off the
+            // counter or they leak until the byte cap is exhausted.
+            if let Some(old) = self.cache.insert(key.clone(), response) {
+                self.sub_bytes(old.size_bytes());
+            }
 
-        {
-            let mut lru = self.lru.lock();
-            lru.put(key, ());
-        }
+            {
+                let mut lru = self.lru.lock();
+                lru.put(key, ());
+            }
 
-        self.update_entry_count();
+            self.update_entry_count();
+        };
+
+        if let Some(request_context) = request_context {
+            request_context.with_response_cache_allowed(insert);
+        } else {
+            insert();
+        }
     }
 
     pub async fn update_in_place(&self, key: &str, response: CachedResponse) {
@@ -566,7 +597,8 @@ mod tests {
         assert!(cache.get("test-key").await.is_none());
 
         let response = create_test_response("test body", 60);
-        cache.set("test-key".to_string(), response).await;
+        let request_context = RequestContext::new("/test".to_string());
+        cache.set_for_request("test-key".to_string(), response, &request_context).await;
 
         let retrieved = cache.get("test-key").await;
         assert!(retrieved.is_some());
@@ -576,6 +608,24 @@ mod tests {
         assert_eq!(metrics.total_entries, 1);
         assert_eq!(metrics.cache_hits, 1);
         assert_eq!(metrics.cache_misses, 1);
+    }
+
+    #[tokio::test]
+    async fn marked_requests_are_rejected_at_response_cache_insertion() {
+        let cache = ResponseCache::new(CacheConfig::default());
+        let request_context =
+            crate::server::middleware::request_context::RequestContext::new("/test".to_string());
+        request_context.mark_response_unavailable(23);
+
+        cache
+            .set_for_request(
+                "marked".to_string(),
+                create_test_response("maintenance", 60),
+                &request_context,
+            )
+            .await;
+
+        assert!(cache.get("marked").await.is_none());
     }
 
     #[tokio::test]

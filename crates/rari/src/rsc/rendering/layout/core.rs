@@ -77,6 +77,15 @@ impl LayoutHtmlCache {
         }
     }
 
+    fn insert_for_request(
+        &self,
+        key: u64,
+        html: String,
+        request_context: &crate::server::middleware::request_context::RequestContext,
+    ) {
+        request_context.with_response_cache_allowed(|| self.insert(key, html));
+    }
+
     pub fn clear(&self) {
         // Subtract exactly what was removed instead of store(0): a concurrent
         // insert landing around the reset would leave its bytes untracked (or
@@ -202,11 +211,14 @@ impl LayoutRenderer {
         fallback_script: String,
         route_match: &AppRouteMatch,
         return_rsc_on_fallback: bool,
+        request_context: Option<Arc<crate::server::middleware::request_context::RequestContext>>,
         can_use_html_cache: bool,
         cache_key: u64,
     ) -> Result<RenderResult, RariError> {
+        let request_context_id = request_context.as_ref().map(|ctx| ctx.request_id());
         let rsc_wire_format =
-            Self::execute_composition_and_serialize(renderer, fallback_script).await?;
+            Self::execute_composition_and_serialize(renderer, fallback_script, request_context_id)
+                .await?;
 
         Self::validate_rsc_wire_format(&rsc_wire_format)?;
 
@@ -231,7 +243,11 @@ impl LayoutRenderer {
 
         // TTL 0 (max-age=0 route): the entry would be born expired; skip the write.
         if can_use_html_cache && !layout_cache_ttl(&route_match.pathname).is_zero() {
-            self.html_cache.insert(cache_key, html.clone());
+            if let Some(request_context) = request_context.as_ref() {
+                self.html_cache.insert_for_request(cache_key, html.clone(), request_context);
+            } else {
+                self.html_cache.insert(cache_key, html.clone());
+            }
         }
         Ok(RenderResult::Static(html))
     }
@@ -366,14 +382,20 @@ impl LayoutRenderer {
             loading_component_id.is_some(),
         )?;
 
+        let request_context_id = request_context.as_ref().map(|ctx| ctx.request_id().to_string());
+
         let renderer = self.renderer.lock().await;
 
         let render_operation = async {
             Self::enable_streaming_and_inject_lazy_resolver(&renderer).await?;
 
             let result = async {
-                let rsc_wire_format =
-                    Self::execute_composition_and_serialize(&renderer, composition_script).await?;
+                let rsc_wire_format = Self::execute_composition_and_serialize(
+                    &renderer,
+                    composition_script,
+                    request_context_id.as_deref(),
+                )
+                .await?;
                 Self::validate_rsc_wire_format(&rsc_wire_format)?;
 
                 Self::validate_html_structure(&rsc_wire_format, route_match)?;
@@ -490,11 +512,13 @@ if (typeof window !== 'undefined') {
                 format!("{}{}\n{}", html, payload_script, completion_script)
             };
 
-            if route_match.not_found.is_none()
-                && request_context_for_cache.as_ref().is_none_or(|ctx| ctx.response_cache_allowed())
-                && !layout_cache_ttl(&route_match.pathname).is_zero()
+            if route_match.not_found.is_none() && !layout_cache_ttl(&route_match.pathname).is_zero()
             {
-                self.html_cache.insert(cache_key, html.clone());
+                if let Some(request_context) = request_context_for_cache.as_ref() {
+                    self.html_cache.insert_for_request(cache_key, html.clone(), request_context);
+                } else {
+                    self.html_cache.insert(cache_key, html.clone());
+                }
             }
 
             return Ok(RenderResult::Static(html));
@@ -566,7 +590,11 @@ if (typeof window !== 'undefined') {
                 let layout_structure = crate::rsc::rendering::layout::LayoutStructure::new();
 
                 let streaming_result = streaming_renderer
-                    .start_streaming_with_composition(composition_script, layout_structure)
+                    .start_streaming_with_composition(
+                        composition_script,
+                        layout_structure,
+                        Some(ctx.request_id()),
+                    )
                     .await;
 
                 match streaming_result {
@@ -609,7 +637,8 @@ if (typeof window !== 'undefined') {
                             fallback_script,
                             route_match,
                             return_rsc_on_fallback,
-                            can_use_html_cache && ctx.response_cache_allowed(),
+                            Some(Arc::clone(&ctx)),
+                            can_use_html_cache,
                             cache_key,
                         )
                         .await
@@ -642,7 +671,8 @@ if (typeof window !== 'undefined') {
                     Ok(RenderResult::Streaming(stream_with_context))
                 }
                 other_result => {
-                    if let Err(e) = runtime.clear_request_context().await {
+                    if let Err(e) = runtime.clear_request_context_if_matches(Arc::clone(&ctx)).await
+                    {
                         tracing::error!(
                             "Failed to clear request context after non-streaming result: {}",
                             e
@@ -670,7 +700,7 @@ if (typeof window !== 'undefined') {
                 drop(renderer_guard);
 
                 let streaming_result = streaming_renderer
-                    .start_streaming_with_composition(composition_script, layout_structure)
+                    .start_streaming_with_composition(composition_script, layout_structure, None)
                     .await;
 
                 match streaming_result {
@@ -704,10 +734,8 @@ if (typeof window !== 'undefined') {
                                 fallback_script,
                                 route_match,
                                 return_rsc_on_fallback,
-                                can_use_html_cache
-                                    && request_context_for_cache
-                                        .as_ref()
-                                        .is_none_or(|ctx| ctx.response_cache_allowed()),
+                                request_context_for_cache.clone(),
+                                can_use_html_cache,
                                 cache_key,
                             )
                             .await;
@@ -926,7 +954,18 @@ if (typeof window !== 'undefined') {
     async fn execute_composition_and_serialize(
         renderer: &RscRenderer,
         composition_script: String,
+        request_context_id: Option<&str>,
     ) -> Result<String, RariError> {
+        let composition_script = if let Some(request_context_id) = request_context_id {
+            let request_context_id = serde_json::to_string(request_context_id)
+                .map_err(|e| RariError::serialization(e.to_string()))?;
+            format!(
+                "globalThis['~rari'].withResponseAvailabilityContext({request_context_id}, () => ({composition_script}))"
+            )
+        } else {
+            composition_script
+        };
+
         let promise_result = renderer
             .runtime
             .execute_script("compose_and_render".to_string(), composition_script)
@@ -1225,5 +1264,18 @@ mod layout_html_cache_tests {
         // Re-insert restores byte accounting.
         cache.insert(1, "<html>hi</html>".to_string());
         assert_eq!(cache.bytes(), "<html>hi</html>".len());
+    }
+
+    #[test]
+    fn marked_request_cannot_insert_rendered_html() {
+        let cache = LayoutHtmlCache::new();
+        let request_context =
+            crate::server::middleware::request_context::RequestContext::new("/test".to_string());
+        request_context.mark_response_unavailable(23);
+
+        cache.insert_for_request(1, "<html>maintenance</html>".to_string(), &request_context);
+
+        assert_eq!(cache.get(1, Duration::from_secs(60)), None);
+        assert_eq!(cache.entries(), 0);
     }
 }

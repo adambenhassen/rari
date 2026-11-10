@@ -206,6 +206,7 @@ async fn get_or_allocate_row_id(
 
 pub struct BackgroundPromiseResolver {
     runtime: Arc<JsExecutionRuntime>,
+    request_context_id: Option<String>,
     active_promises: Arc<Mutex<FxHashMap<String, PendingSuspensePromise>>>,
     update_sender: mpsc::UnboundedSender<BoundaryUpdate>,
     error_sender: mpsc::UnboundedSender<BoundaryError>,
@@ -220,9 +221,11 @@ impl BackgroundPromiseResolver {
         error_sender: mpsc::UnboundedSender<BoundaryError>,
         shared_row_counter: Arc<Mutex<u32>>,
         promise_to_row: Arc<Mutex<FxHashMap<String, u32>>>,
+        request_context_id: Option<String>,
     ) -> Self {
         Self {
             runtime,
+            request_context_id,
             active_promises: Arc::new(Mutex::new(FxHashMap::default())),
             update_sender,
             error_sender,
@@ -246,6 +249,10 @@ impl BackgroundPromiseResolver {
         let shared_row_counter = Arc::clone(&self.shared_row_counter);
         let active_promises = Arc::clone(&self.active_promises);
         let promise_to_row_map = Arc::clone(&self.promise_to_row);
+        let request_context_id = self
+            .request_context_id
+            .as_deref()
+            .map(|id| serde_json::to_string(id).expect("Request context IDs are serializable"));
 
         tokio::spawn(async move {
             let mut queue: VecDeque<PendingSuspensePromise> = promises.into_iter().collect();
@@ -270,6 +277,13 @@ impl BackgroundPromiseResolver {
                             .cow_replace("{component_path}", &p.component_path)
                             .cow_replace("{render_generation}", &p.render_generation.to_string())
                             .into_owned();
+                        let script = if let Some(request_context_id) = request_context_id.as_ref() {
+                            format!(
+                                "globalThis['~rari'].withResponseAvailabilityContext({request_context_id}, () => ({script}))"
+                            )
+                        } else {
+                            script
+                        };
                         (format!("<promise_resolution_{}>", p.id), script)
                     })
                     .collect();

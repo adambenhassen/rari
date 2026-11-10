@@ -123,6 +123,16 @@ impl RequestContext {
         self.response_unavailable_after().is_none()
     }
 
+    /// Run a synchronous cache insertion only while this request remains cacheable.
+    /// The marker lock stays held through the insertion so the decision cannot
+    /// go stale between checking the marker and storing the response.
+    pub fn with_response_cache_allowed(&self, insert: impl FnOnce()) {
+        let unavailable_after = self.response_unavailable_after.lock();
+        if unavailable_after.is_none() {
+            insert();
+        }
+    }
+
     pub fn start_time(&self) -> Instant {
         self.start_time
     }
@@ -335,6 +345,17 @@ mod tests {
         assert!(ctx.response_cache_allowed());
         ctx.mark_response_unavailable(23);
         assert!(!ctx.response_cache_allowed());
+    }
+
+    #[test]
+    fn does_not_run_cache_insertion_after_unavailable_mark() {
+        let ctx = RequestContext::new("/test".to_string());
+        ctx.mark_response_unavailable(23);
+
+        let mut inserted = false;
+        ctx.with_response_cache_allowed(|| inserted = true);
+
+        assert!(!inserted);
     }
 
     #[test]
