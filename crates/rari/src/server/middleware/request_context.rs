@@ -117,6 +117,12 @@ impl RequestContext {
         *self.response_unavailable_after.lock()
     }
 
+    /// Marked renders must not enter a response cache, even when a deferred
+    /// Suspense render marks the request after the response status is chosen.
+    pub fn response_cache_allowed(&self) -> bool {
+        self.response_unavailable_after().is_none()
+    }
+
     pub fn start_time(&self) -> Instant {
         self.start_time
     }
@@ -320,6 +326,15 @@ mod tests {
         assert_eq!(ctx.route_path(), "/test");
         assert!(!ctx.request_id().is_empty());
         assert!(ctx.elapsed().as_millis() < 100);
+    }
+
+    #[test]
+    fn response_cache_is_disabled_after_unavailable_mark() {
+        let ctx = RequestContext::new("/test".to_string());
+
+        assert!(ctx.response_cache_allowed());
+        ctx.mark_response_unavailable(23);
+        assert!(!ctx.response_cache_allowed());
     }
 
     #[test]

@@ -83,7 +83,7 @@ async fn warm_route(
         ));
 
     let rsc_wire_format = layout_renderer
-        .render_route_by_mode(&route_match, &context, Some(request_context))
+        .render_route_by_mode(&route_match, &context, Some(request_context.clone()))
         .await
         .map_err(|e| format!("Render failed: {}", e))?;
 
@@ -92,7 +92,10 @@ async fn warm_route(
     let cache_control = state.config.get_cache_control_for_route(path);
     let cache_policy = response::RouteCachePolicy::from_cache_control(cache_control, path);
 
-    if cache_policy.enabled && state.response_cache.config.enabled {
+    if cache_policy.enabled
+        && state.response_cache.config.enabled
+        && request_context.response_cache_allowed()
+    {
         let cached_response = response::CachedResponse {
             body: bytes::Bytes::from(rsc_wire_format),
             headers: axum::http::HeaderMap::new(),

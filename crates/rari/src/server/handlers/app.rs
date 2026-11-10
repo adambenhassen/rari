@@ -1137,7 +1137,10 @@ pub async fn handle_app_route(
                     let cache_policy =
                         response::RouteCachePolicy::from_cache_control(cache_control, path);
 
-                    if cache_policy.enabled && state.response_cache.config.enabled {
+                    if cache_policy.enabled
+                        && state.response_cache.config.enabled
+                        && request_context.response_cache_allowed()
+                    {
                         let cached_response = response::CachedResponse {
                             body: bytes::Bytes::from(rsc_wire_format.clone()),
                             headers: cache_headers,
@@ -1297,7 +1300,10 @@ pub async fn handle_app_route(
                         policy
                     };
 
-                    if cache_policy.enabled && state.response_cache.config.enabled {
+                    if cache_policy.enabled
+                        && state.response_cache.config.enabled
+                        && request_context.response_cache_allowed()
+                    {
                         let response_encoding = parts
                             .headers
                             .get("content-encoding")
@@ -1544,7 +1550,7 @@ pub async fn handle_app_route(
             let cache_policy =
                 response::RouteCachePolicy::from_cache_control(cache_control_value, path);
 
-            if cache_policy.enabled {
+            if cache_policy.enabled && request_context.response_cache_allowed() {
                 let cached_response = response::CachedResponse {
                     body: body_bytes.clone(),
                     headers: response_headers,

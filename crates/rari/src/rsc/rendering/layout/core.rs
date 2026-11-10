@@ -416,9 +416,8 @@ impl LayoutRenderer {
     ) -> Result<RenderResult, RariError> {
         let cache_key = utils::generate_cache_key(route_match, context);
         let request_context_for_cache = request_context.clone();
-        let response_is_cacheable = request_context_for_cache
-            .as_ref()
-            .is_none_or(|ctx| ctx.response_unavailable_after().is_none());
+        let response_is_cacheable =
+            request_context_for_cache.as_ref().is_none_or(|ctx| ctx.response_cache_allowed());
 
         if !return_rsc_on_fallback
             && response_is_cacheable
@@ -492,9 +491,7 @@ if (typeof window !== 'undefined') {
             };
 
             if route_match.not_found.is_none()
-                && request_context_for_cache
-                    .as_ref()
-                    .is_none_or(|ctx| ctx.response_unavailable_after().is_none())
+                && request_context_for_cache.as_ref().is_none_or(|ctx| ctx.response_cache_allowed())
                 && !layout_cache_ttl(&route_match.pathname).is_zero()
             {
                 self.html_cache.insert(cache_key, html.clone());
@@ -612,7 +609,7 @@ if (typeof window !== 'undefined') {
                             fallback_script,
                             route_match,
                             return_rsc_on_fallback,
-                            can_use_html_cache && ctx.response_unavailable_after().is_none(),
+                            can_use_html_cache && ctx.response_cache_allowed(),
                             cache_key,
                         )
                         .await
@@ -708,9 +705,9 @@ if (typeof window !== 'undefined') {
                                 route_match,
                                 return_rsc_on_fallback,
                                 can_use_html_cache
-                                    && request_context_for_cache.as_ref().is_none_or(|ctx| {
-                                        ctx.response_unavailable_after().is_none()
-                                    }),
+                                    && request_context_for_cache
+                                        .as_ref()
+                                        .is_none_or(|ctx| ctx.response_cache_allowed()),
                                 cache_key,
                             )
                             .await;
