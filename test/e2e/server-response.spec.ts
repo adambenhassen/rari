@@ -26,6 +26,26 @@ test.describe('Server response status', () => {
     expect(custom.headers()['retry-after']).toBe('17')
   })
 
+  test('recovers at the same URL and caches the first healthy response', async ({ request }) => {
+    const url = '/server-response-recovery?case=recovery'
+    const unavailableFirst = await request.get(url)
+    const unavailableSecond = await request.get(url)
+    const recovered = await request.get(url)
+    const cachedRecovery = await request.get(url)
+
+    expect(unavailableFirst.status()).toBe(503)
+    expect(unavailableFirst.headers()['cache-control']).toBe('no-store')
+    expect(unavailableSecond.status()).toBe(503)
+    expect(unavailableSecond.headers()['cache-control']).toBe('no-store')
+
+    expect(recovered.status()).toBe(200)
+    expect(recovered.headers()['cache-control']).toBe('public, max-age=60')
+    expect(recovered.headers()['x-cache']).toBe('MISS')
+    expect(cachedRecovery.status()).toBe(200)
+    expect(cachedRecovery.headers()['x-cache']).toBe('HIT')
+    expect(await cachedRecovery.text()).toBe(await recovered.text())
+  })
+
   test('keeps the unavailable signal scoped to the request that sets it', async ({ request }) => {
     const [unavailable, healthy] = await Promise.all([
       request.get('/server-response?mode=unavailable&case=concurrent'),
