@@ -1,12 +1,82 @@
 use crate::server::http_client::get_http_client;
+use crate::server::middleware::request_context::RequestContext;
 use deno_core::{OpDecl, OpState, op2};
 use deno_error::JsErrorBox;
+use rustc_hash::{FxHashMap, FxHashSet};
 use serde::Deserialize;
 use std::cell::RefCell;
+use std::collections::VecDeque;
 use std::rc::Rc;
-use std::sync::Arc;
+use std::sync::{Arc, Weak};
 use tokio::sync::mpsc;
 use tracing::error;
+
+/// Bound serial JS-executor work while reclaiming expired weak registrations.
+const REQUEST_CONTEXT_REGISTRY_CLEANUP_BUDGET: usize = 16;
+
+#[derive(Default)]
+pub(crate) struct RequestContextRegistry {
+    contexts: FxHashMap<String, Weak<RequestContext>>,
+    cleanup_queue: VecDeque<String>,
+    cleanup_queued: FxHashSet<String>,
+    #[cfg(test)]
+    last_cleanup_work: usize,
+}
+
+impl RequestContextRegistry {
+    pub(crate) fn insert(&mut self, request_context: Arc<RequestContext>) {
+        let cleanup_work = self.prune_expired();
+        #[cfg(test)]
+        {
+            self.last_cleanup_work = cleanup_work;
+        }
+        #[cfg(not(test))]
+        let _ = cleanup_work;
+
+        let request_id = request_context.request_id().to_string();
+        self.contexts.insert(request_id.clone(), Arc::downgrade(&request_context));
+        if self.cleanup_queued.insert(request_id.clone()) {
+            self.cleanup_queue.push_back(request_id);
+        }
+    }
+
+    pub(crate) fn get(&self, request_id: &str) -> Option<Arc<RequestContext>> {
+        self.contexts.get(request_id).and_then(Weak::upgrade)
+    }
+
+    pub(crate) fn remove_if_matches(&mut self, expected: &Arc<RequestContext>) {
+        if self
+            .contexts
+            .get(expected.request_id())
+            .and_then(Weak::upgrade)
+            .is_some_and(|current| Arc::ptr_eq(&current, expected))
+        {
+            self.contexts.remove(expected.request_id());
+        }
+    }
+
+    fn prune_expired(&mut self) -> usize {
+        let scan_count = self.cleanup_queue.len().min(REQUEST_CONTEXT_REGISTRY_CLEANUP_BUDGET);
+        let mut scanned = 0;
+
+        for _ in 0..scan_count {
+            let Some(request_id) = self.cleanup_queue.pop_front() else {
+                break;
+            };
+            scanned += 1;
+            self.cleanup_queued.remove(&request_id);
+
+            if self.contexts.get(&request_id).is_some_and(|context| context.strong_count() > 0) {
+                self.cleanup_queued.insert(request_id.clone());
+                self.cleanup_queue.push_back(request_id);
+            } else {
+                self.contexts.remove(&request_id);
+            }
+        }
+
+        scanned
+    }
+}
 
 #[derive(Deserialize, Debug)]
 #[serde(tag = "type")]
@@ -234,10 +304,34 @@ pub fn get_streaming_ops() -> Vec<OpDecl> {
         op_send_chunk_to_rust(),
         op_internal_log(),
         op_sanitize_html(),
+        op_mark_response_unavailable(),
         op_get_cookies(),
         op_set_cookie(),
         op_delete_cookie(),
     ]
+}
+
+#[op2(fast)]
+pub fn op_mark_response_unavailable(
+    state: Rc<RefCell<OpState>>,
+    #[string] retry_after_seconds: String,
+    #[string] request_id: String,
+) -> Result<(), JsErrorBox> {
+    let retry_after_seconds = retry_after_seconds
+        .parse::<u64>()
+        .map_err(|_| JsErrorBox::type_error("retry-after must be a non-negative integer"))?;
+
+    let op_state_ref = state.borrow();
+    let request_context = op_state_ref
+        .try_borrow::<RequestContextRegistry>()
+        .and_then(|contexts| contexts.get(&request_id))
+        .ok_or_else(|| {
+            JsErrorBox::generic("markResponseUnavailable can only be called during a server render")
+        })?;
+
+    request_context.mark_response_unavailable(retry_after_seconds);
+
+    Ok(())
 }
 
 #[op2(fast)]
@@ -608,6 +702,49 @@ mod tests {
         stream_state.chunk_sender = Some(sender);
 
         assert!(stream_state.chunk_sender.is_some());
+    }
+
+    #[test]
+    fn request_context_registration_cleanup_is_bounded_at_1x_and_100x_concurrency() {
+        for concurrency in [1, 100] {
+            let mut registry = RequestContextRegistry::default();
+            let contexts: Vec<_> = (0..concurrency)
+                .map(|index| Arc::new(RequestContext::new(format!("/concurrent-{index}"))))
+                .collect();
+
+            for context in &contexts {
+                registry.insert(Arc::clone(context));
+            }
+
+            registry.insert(Arc::new(RequestContext::new("/probe".to_string())));
+            assert_eq!(
+                registry.last_cleanup_work,
+                concurrency.min(REQUEST_CONTEXT_REGISTRY_CLEANUP_BUDGET),
+                "registration with {concurrency} live contexts scanned an unexpected number of entries"
+            );
+        }
+    }
+
+    #[test]
+    fn expired_request_contexts_are_pruned_over_bounded_registrations() {
+        let mut registry = RequestContextRegistry::default();
+        let contexts: Vec<_> = (0..100)
+            .map(|index| Arc::new(RequestContext::new(format!("/expired-{index}"))))
+            .collect();
+
+        for context in &contexts {
+            registry.insert(Arc::clone(context));
+        }
+        drop(contexts);
+
+        let probe = Arc::new(RequestContext::new("/probe".to_string()));
+        for _ in 0..=100_usize.div_ceil(REQUEST_CONTEXT_REGISTRY_CLEANUP_BUDGET) {
+            registry.insert(Arc::clone(&probe));
+            assert!(registry.last_cleanup_work <= REQUEST_CONTEXT_REGISTRY_CLEANUP_BUDGET);
+        }
+
+        assert_eq!(registry.contexts.len(), 1);
+        assert!(registry.contexts.contains_key(probe.request_id()));
     }
 
     #[test]

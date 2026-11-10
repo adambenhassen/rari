@@ -632,23 +632,6 @@ impl JsExecutionRuntime {
         }
     }
 
-    pub async fn clear_request_context(&self) -> Result<(), RariError> {
-        let runtime = self.runtime.clone();
-
-        match tokio::time::timeout(
-            Duration::from_millis(self.timeout_ms),
-            runtime.clear_request_context(),
-        )
-        .await
-        {
-            Ok(result) => result,
-            Err(_) => Err(RariError::timeout(format!(
-                "Clearing request context timed out after {} ms",
-                self.timeout_ms
-            ))),
-        }
-    }
-
     pub async fn clear_request_context_if_matches(
         &self,
         expected_context: std::sync::Arc<
@@ -679,11 +662,11 @@ impl JsExecutionRuntime {
     where
         F: std::future::Future<Output = Result<T, RariError>>,
     {
-        self.set_request_context(request_context).await?;
+        self.set_request_context(Arc::clone(&request_context)).await?;
 
         let result = operation.await;
 
-        let clear_result = self.clear_request_context().await;
+        let clear_result = self.clear_request_context_if_matches(request_context).await;
 
         match (result, clear_result) {
             (Ok(value), Ok(())) => Ok(value),
@@ -721,5 +704,101 @@ impl From<crate::error::RariError> for JsError {
 impl From<deno_core::v8::DataError> for crate::error::RariError {
     fn from(err: deno_core::v8::DataError) -> Self {
         crate::error::RariError::JsRuntime(format!("V8 Data Error: {err}"), None)
+    }
+}
+
+#[cfg(test)]
+#[allow(clippy::disallowed_methods)]
+mod response_availability_tests {
+    use super::JsExecutionRuntime;
+    use crate::server::middleware::request_context::RequestContext;
+    use std::sync::Arc;
+
+    #[tokio::test]
+    async fn concurrent_async_renders_mark_only_their_own_request_context() {
+        let runtime = JsExecutionRuntime::new(None);
+        let first = Arc::new(RequestContext::new("/first".to_string()));
+        let second = Arc::new(RequestContext::new("/second".to_string()));
+        runtime.set_request_context(Arc::clone(&first)).await.unwrap();
+        runtime.set_request_context(Arc::clone(&second)).await.unwrap();
+
+        let first_id = serde_json::to_string(first.request_id()).unwrap();
+        let second_id = serde_json::to_string(second.request_id()).unwrap();
+        let script = format!(
+            r#"(async () => {{
+                const withContext = globalThis['~rari'].withResponseAvailabilityContext;
+                await Promise.all([
+                    withContext({first_id}, async () => {{
+                        await new Promise(resolve => setTimeout(resolve, 20));
+                        globalThis.markResponseUnavailable(11);
+                    }}),
+                    withContext({second_id}, async () => {{
+                        await new Promise(resolve => setTimeout(resolve, 5));
+                        globalThis.markResponseUnavailable(22);
+                    }}),
+                ]);
+                return true;
+            }})()"#
+        );
+
+        runtime.execute_script("concurrent_response_marks".to_string(), script).await.unwrap();
+
+        assert_eq!(first.response_unavailable_after(), Some(11));
+        assert_eq!(second.response_unavailable_after(), Some(22));
+
+        runtime.clear_request_context_if_matches(Arc::clone(&first)).await.unwrap();
+        let first_no_longer_registered = format!(
+            "globalThis['~rari'].withResponseAvailabilityContext({}, () => {{ try {{ globalThis.markResponseUnavailable(33); return false; }} catch {{ return true; }} }})",
+            first_id
+        );
+        let first_mark_result = runtime
+            .execute_script(
+                "cleared_request_context_is_rejected".to_string(),
+                first_no_longer_registered,
+            )
+            .await
+            .unwrap();
+        assert_eq!(first_mark_result.as_bool(), Some(true));
+
+        let second_still_registered = format!(
+            "globalThis['~rari'].withResponseAvailabilityContext({}, () => globalThis.markResponseUnavailable(22))",
+            second_id
+        );
+        runtime
+            .execute_script(
+                "request_context_clear_is_conditional".to_string(),
+                second_still_registered,
+            )
+            .await
+            .unwrap();
+    }
+
+    #[tokio::test]
+    async fn cancelled_render_does_not_retain_request_context() {
+        let runtime = Arc::new(JsExecutionRuntime::new(None));
+        let request_context = Arc::new(RequestContext::new("/cancelled".to_string()));
+        let request_context_weak = Arc::downgrade(&request_context);
+        let runtime_for_render = Arc::clone(&runtime);
+        let context_for_render = Arc::clone(&request_context);
+        let (started_sender, started_receiver) = tokio::sync::oneshot::channel();
+
+        let render = tokio::spawn(async move {
+            runtime_for_render
+                .execute_with_request_context(context_for_render, async move {
+                    let _ = started_sender.send(());
+                    std::future::pending::<Result<(), crate::error::RariError>>().await
+                })
+                .await
+        });
+
+        started_receiver.await.unwrap();
+        render.abort();
+        let _ = render.await;
+
+        let replacement = Arc::new(RequestContext::new("/replacement".to_string()));
+        runtime.set_request_context(Arc::clone(&replacement)).await.unwrap();
+        drop(request_context);
+
+        assert!(request_context_weak.upgrade().is_none());
     }
 }

@@ -5,7 +5,17 @@ import { defineConfig } from 'vite'
 
 export default defineConfig({
   plugins: [
-    rari(),
+    rari({
+      cacheControl: {
+        routes: {
+          '/server-response': 'public, max-age=60',
+          '/server-response-recovery': 'public, max-age=60',
+          '/server-response-delayed': 'public, max-age=60',
+          '/server-response-streaming': 'public, max-age=60',
+          '/server-response-fallback': 'public, max-age=60',
+        },
+      },
+    }),
     tailwindcss(),
   ],
   resolve: {

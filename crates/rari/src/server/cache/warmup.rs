@@ -83,7 +83,7 @@ async fn warm_route(
         ));
 
     let rsc_wire_format = layout_renderer
-        .render_route_by_mode(&route_match, &context, Some(request_context))
+        .render_route_by_mode(&route_match, &context, Some(request_context.clone()))
         .await
         .map_err(|e| format!("Render failed: {}", e))?;
 
@@ -107,7 +107,7 @@ async fn warm_route(
             compressed_gzip: None,
         };
 
-        state.response_cache.set(cache_key, cached_response).await;
+        state.response_cache.set_for_request(cache_key, cached_response, &request_context).await;
     }
 
     Ok(())

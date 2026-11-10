@@ -46,6 +46,7 @@ impl StreamingRenderer {
         &mut self,
         composition_script: String,
         layout_structure: crate::rsc::rendering::layout::LayoutStructure,
+        request_context_id: Option<&str>,
     ) -> Result<RscStream, RariError> {
         if !layout_structure.is_valid() {
             for boundary in &layout_structure.suspense_boundaries {
@@ -70,9 +71,11 @@ impl StreamingRenderer {
             error_sender,
             Arc::clone(&self.shared_row_counter),
             Arc::clone(&self.promise_to_row),
+            request_context_id.map(str::to_string),
         )));
 
-        let partial_result = self.render_partial_from_composition(composition_script).await?;
+        let partial_result =
+            self.render_partial_from_composition(composition_script, request_context_id).await?;
 
         let boundary_positions: Arc<Mutex<FxHashMap<String, Vec<usize>>>> = Arc::new(Mutex::new(
             partial_result.boundaries.iter().map(|b| (b.id.clone(), Vec::new())).collect(),
@@ -196,6 +199,7 @@ impl StreamingRenderer {
             error_sender,
             Arc::clone(&self.shared_row_counter),
             Arc::clone(&self.promise_to_row),
+            None,
         )));
 
         let suspense_boundaries =
@@ -313,6 +317,7 @@ impl StreamingRenderer {
             error_sender,
             Arc::clone(&self.shared_row_counter),
             Arc::clone(&self.promise_to_row),
+            None,
         )));
 
         let partial_result =
@@ -456,6 +461,7 @@ impl StreamingRenderer {
             error_sender,
             Arc::clone(&self.shared_row_counter),
             Arc::clone(&self.promise_to_row),
+            None,
         )));
 
         self.module_path = Some(format!("{component_id}.js"));
@@ -782,6 +788,7 @@ impl StreamingRenderer {
     async fn render_partial_from_composition(
         &mut self,
         composition_script: String,
+        request_context_id: Option<&str>,
     ) -> Result<PartialRenderResult, RariError> {
         let react_init_result = self
             .runtime
@@ -835,6 +842,15 @@ impl StreamingRenderer {
         let wrapped_script = COMPOSITION_WRAPPER_SCRIPT
             .cow_replace("{composition_script}", &composition_script)
             .into_owned();
+        let wrapped_script = if let Some(request_context_id) = request_context_id {
+            let request_context_id = serde_json::to_string(request_context_id)
+                .map_err(|e| RariError::serialization(e.to_string()))?;
+            format!(
+                "globalThis['~rari'].withResponseAvailabilityContext({request_context_id}, () => ({wrapped_script}))"
+            )
+        } else {
+            wrapped_script
+        };
 
         let result = self
             .runtime

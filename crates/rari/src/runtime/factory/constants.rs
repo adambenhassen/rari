@@ -41,6 +41,9 @@ pub const COMPONENT_LOADER_INIT_SCRIPT: &str = include_str!("js/component_loader
 
 pub const COOKIES_INIT_SCRIPT: &str = include_str!("js/cookies_helper.js");
 
+pub const RESPONSE_AVAILABILITY_INIT_SCRIPT: &str =
+    include_str!("js/response_availability_helper.js");
+
 pub const PROMISE_SETUP_SCRIPT: &str = r#"
 (function() {
     try {

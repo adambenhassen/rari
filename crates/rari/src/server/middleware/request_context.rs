@@ -4,7 +4,7 @@ use axum::http::HeaderMap;
 use bytes::Bytes;
 use dashmap::DashMap;
 use lru::LruCache;
-use parking_lot::Mutex;
+use parking_lot::{Mutex, MutexGuard};
 use rustc_hash::{FxHashMap, FxHashSet};
 use serde_json::Value as JsonValue;
 use std::num::NonZeroUsize;
@@ -75,9 +75,15 @@ pub struct RequestContext {
     request_id: String,
     start_time: Instant,
     route_path: String,
+    response_unavailable_after: Mutex<Option<u64>>,
     pub cookie_header: Option<String>,
     pub pending_cookies: Arc<DashMap<PendingCookieKey, PendingCookie>>,
     pub function_cache: Arc<DashMap<String, JsonValue>>,
+}
+
+#[must_use = "hold this guard until the cache insertion is complete"]
+pub struct ResponseCacheWriteGuard<'a> {
+    _unavailable_after: MutexGuard<'a, Option<u64>>,
 }
 
 impl RequestContext {
@@ -88,6 +94,7 @@ impl RequestContext {
             request_id: Uuid::new_v4().to_string(),
             start_time: Instant::now(),
             route_path,
+            response_unavailable_after: Mutex::new(None),
             cookie_header: None,
             pending_cookies: Arc::new(DashMap::new()),
             function_cache: Arc::new(DashMap::new()),
@@ -105,6 +112,32 @@ impl RequestContext {
 
     pub fn route_path(&self) -> &str {
         &self.route_path
+    }
+
+    pub fn mark_response_unavailable(&self, retry_after_seconds: u64) {
+        self.response_unavailable_after.lock().get_or_insert(retry_after_seconds);
+    }
+
+    pub fn response_unavailable_after(&self) -> Option<u64> {
+        *self.response_unavailable_after.lock()
+    }
+
+    /// Marked renders must not enter a response cache, even when a deferred
+    /// Suspense render marks the request after the response status is chosen.
+    pub fn response_cache_allowed(&self) -> bool {
+        self.response_unavailable_after().is_none()
+    }
+
+    /// Hold the marker state while a response cache insertion is committed.
+    /// This avoids running an arbitrary closure while holding the non-reentrant
+    /// marker lock.
+    pub fn response_cache_write_guard(&self) -> Option<ResponseCacheWriteGuard<'_>> {
+        let unavailable_after = self.response_unavailable_after.lock();
+        if unavailable_after.is_none() {
+            Some(ResponseCacheWriteGuard { _unavailable_after: unavailable_after })
+        } else {
+            None
+        }
     }
 
     pub fn start_time(&self) -> Instant {
@@ -310,6 +343,25 @@ mod tests {
         assert_eq!(ctx.route_path(), "/test");
         assert!(!ctx.request_id().is_empty());
         assert!(ctx.elapsed().as_millis() < 100);
+    }
+
+    #[test]
+    fn response_cache_is_disabled_after_unavailable_mark() {
+        let ctx = RequestContext::new("/test".to_string());
+
+        assert!(ctx.response_cache_allowed());
+        ctx.mark_response_unavailable(23);
+        assert!(!ctx.response_cache_allowed());
+    }
+
+    #[test]
+    fn response_cache_write_guard_tracks_unavailable_mark() {
+        let ctx = RequestContext::new("/test".to_string());
+        assert!(ctx.response_cache_write_guard().is_some());
+
+        ctx.mark_response_unavailable(23);
+
+        assert!(ctx.response_cache_write_guard().is_none());
     }
 
     #[test]

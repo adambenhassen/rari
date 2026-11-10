@@ -2,6 +2,7 @@ use crate::error::RariError;
 use crate::runtime::factory::constants::{
     API_HANDLER_INIT_SCRIPT, COMPONENT_LOADER_INIT_SCRIPT, COOKIES_INIT_SCRIPT,
     ENV_INJECTION_SCRIPT, METADATA_COLLECTOR_INIT_SCRIPT, MODULE_CHECK_SCRIPT,
+    RESPONSE_AVAILABILITY_INIT_SCRIPT,
 };
 use crate::runtime::module::loader::RariModuleLoader;
 use crate::runtime::ops::StreamOpState;
@@ -29,6 +30,7 @@ pub fn create_deno_runtime(
         ops: Cow::Owned(streaming_ops),
         op_state_fn: Some(Box::new(|state| {
             state.put(StreamOpState::default());
+            state.put(crate::runtime::ops::RequestContextRegistry::default());
             let mut feature_checker = deno_features::FeatureChecker::default();
             feature_checker.enable_feature("broadcast-channel");
             feature_checker.enable_feature("webgpu");
@@ -92,6 +94,15 @@ pub fn create_deno_runtime(
     runtime
         .execute_script("cookies_init.js", COOKIES_INIT_SCRIPT.to_string())
         .map_err(|e| RariError::internal(format!("Failed to initialize cookies helper: {e}")))?;
+
+    runtime
+        .execute_script(
+            "response_availability_init.js",
+            RESPONSE_AVAILABILITY_INIT_SCRIPT.to_string(),
+        )
+        .map_err(|e| {
+            RariError::internal(format!("Failed to initialize response availability helper: {e}"))
+        })?;
 
     Ok((runtime, module_loader))
 }

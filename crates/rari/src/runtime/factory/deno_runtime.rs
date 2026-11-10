@@ -75,9 +75,6 @@ enum JsRequest {
         request_context: std::sync::Arc<crate::server::middleware::request_context::RequestContext>,
         result_tx: oneshot::Sender<Result<(), RariError>>,
     },
-    ClearRequestContext {
-        result_tx: oneshot::Sender<Result<(), RariError>>,
-    },
     ClearRequestContextIfMatches {
         expected_context:
             std::sync::Arc<crate::server::middleware::request_context::RequestContext>,
@@ -455,26 +452,27 @@ async fn handle_js_request(
             let _ = result_tx.send(Ok(()));
         }
         JsRequest::SetRequestContext { request_context, result_tx } => {
-            deno_runtime.op_state().borrow_mut().put(request_context);
-            let _ = result_tx.send(Ok(()));
-        }
-        JsRequest::ClearRequestContext { result_tx } => {
-            deno_runtime.op_state().borrow_mut().try_take::<std::sync::Arc<crate::server::middleware::request_context::RequestContext>>();
+            let op_state_handle = deno_runtime.op_state();
+            let mut op_state = op_state_handle.borrow_mut();
+            op_state
+                .borrow_mut::<crate::runtime::ops::RequestContextRegistry>()
+                .insert(request_context.clone());
+            op_state.put(request_context);
             let _ = result_tx.send(Ok(()));
         }
         JsRequest::ClearRequestContextIfMatches { expected_context, result_tx } => {
-            let should_clear = {
-                let op_state = deno_runtime.op_state();
-                let borrowed = op_state.borrow();
-                if let Some(current_context) = borrowed.try_borrow::<std::sync::Arc<crate::server::middleware::request_context::RequestContext>>() {
+            let op_state_handle = deno_runtime.op_state();
+            let mut op_state = op_state_handle.borrow_mut();
+            op_state
+                .borrow_mut::<crate::runtime::ops::RequestContextRegistry>()
+                .remove_if_matches(&expected_context);
+            let should_clear = op_state
+                .try_borrow::<std::sync::Arc<crate::server::middleware::request_context::RequestContext>>()
+                .is_some_and(|current_context| {
                     std::sync::Arc::ptr_eq(current_context, &expected_context)
-                } else {
-                    false
-                }
-            };
-
+                });
             if should_clear {
-                deno_runtime.op_state().borrow_mut().try_take::<std::sync::Arc<crate::server::middleware::request_context::RequestContext>>();
+                op_state.try_take::<std::sync::Arc<crate::server::middleware::request_context::RequestContext>>();
             }
             let _ = result_tx.send(Ok(()));
         }
@@ -1103,27 +1101,6 @@ impl JsRuntimeInterface for DenoRuntime {
             response_receiver.await.map_err(|_| {
                 RariError::js_runtime(
                     "JS executor failed to respond (set_request_context)".to_string(),
-                )
-            })?
-        })
-    }
-
-    fn clear_request_context(&self) -> Pin<Box<dyn Future<Output = Result<(), RariError>> + Send>> {
-        let request_sender = self.request_sender.clone();
-
-        Box::pin(async move {
-            let (response_sender, response_receiver) = oneshot::channel();
-            request_sender
-                .send(JsRequest::ClearRequestContext { result_tx: response_sender })
-                .await
-                .map_err(|_| {
-                    RariError::js_runtime(
-                        "JS executor channel closed (clear_request_context)".to_string(),
-                    )
-                })?;
-            response_receiver.await.map_err(|_| {
-                RariError::js_runtime(
-                    "JS executor failed to respond (clear_request_context)".to_string(),
                 )
             })?
         })

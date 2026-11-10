@@ -56,3 +56,39 @@ jobs:
 
       - name: Test rari
         run: cargo test --package rari --all-features
+
+      - name: Install pnpm
+        uses: pnpm/action-setup@0ebf47130e4866e96fce0953f49152a61190b271 # v6.0.9
+
+      - name: Install Node
+        uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e # v6.4.0
+        with:
+          node-version: lts/*
+          cache: pnpm
+
+      - name: Install JavaScript dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Build JavaScript packages
+        run: |
+          pnpm --filter=@rari/logger run build
+          pnpm --filter=@rari/deploy run build
+          pnpm --filter=rari run build
+
+      - name: Link fixture CLI after package build
+        run: |
+          mkdir -p test/fixtures/app/node_modules/.bin
+          ln -sf ../../../../../packages/rari/dist/cli.mjs test/fixtures/app/node_modules/.bin/rari
+
+      - name: Build rari binary
+        run: |
+          cargo build --bin rari
+          mkdir -p packages/rari-linux-x64/bin
+          cp target/debug/rari packages/rari-linux-x64/bin/rari
+          chmod +x packages/rari-linux-x64/bin/rari
+
+      - name: Install Playwright
+        run: pnpm playwright install chromium --with-deps
+
+      - name: Test server response availability
+        run: pnpm exec playwright test test/e2e/server-response.spec.ts --project='Desktop Chrome' --workers=1

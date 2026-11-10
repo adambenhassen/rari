@@ -1,3 +1,4 @@
+use crate::server::middleware::request_context::RequestContext;
 use axum::http::HeaderMap;
 use bytes::Bytes;
 use dashmap::DashMap;
@@ -269,52 +270,95 @@ impl ResponseCache {
         Some(cached_response)
     }
 
-    pub async fn set(&self, key: String, response: CachedResponse) {
+    #[cfg(test)]
+    async fn set(&self, key: String, response: CachedResponse) {
+        self.set_inner(key, response, None).await;
+    }
+
+    pub async fn set_for_request(
+        &self,
+        key: String,
+        response: CachedResponse,
+        request_context: &RequestContext,
+    ) {
+        self.set_inner(key, response, Some(request_context)).await;
+    }
+
+    async fn set_inner(
+        &self,
+        key: String,
+        response: CachedResponse,
+        request_context: Option<&RequestContext>,
+    ) {
         if !self.config.enabled {
             return;
         }
 
-        // Replace any existing entry up front so byte accounting and the tag
-        // index have a single source of truth for this key.
-        if let Some((_, old)) = self.cache.remove(&key) {
-            self.sub_bytes(old.size_bytes());
-            let mut lru = self.lru.lock();
-            lru.pop(&key);
+        if request_context.is_some_and(|context| !context.response_cache_allowed()) {
+            return;
         }
 
         // Evict until both the entry cap and the byte cap hold. The new entry
         // itself is always admitted, even if it alone exceeds max_bytes.
         let new_size = response.size_bytes();
         loop {
-            let over_entries = { self.lru.lock().len() >= self.config.max_entries };
-            let over_bytes = !self.cache.is_empty()
-                && self.bytes.load(Ordering::Relaxed) + new_size > self.config.max_bytes;
+            let replacing = self.cache.contains_key(&key);
+            let replacing_size = self.cache.get(&key).map(|entry| entry.size_bytes()).unwrap_or(0);
+            let projected_entries =
+                self.lru.lock().len().saturating_sub(if replacing { 1 } else { 0 });
+            let projected_bytes = self.bytes.load(Ordering::Relaxed).saturating_sub(replacing_size);
+            let over_entries = projected_entries >= self.config.max_entries;
+            let over_bytes = projected_entries > 0
+                && projected_bytes.saturating_add(new_size) > self.config.max_bytes;
             if !(over_entries || over_bytes) || !self.evict_lru().await {
                 break;
             }
         }
 
-        for tag in &response.metadata.tags {
-            let mut keys = self.tag_index.entry(tag.clone()).or_default();
-            if !keys.contains(&key) {
-                keys.push(key.clone());
-            }
-        }
+        // Only hold the request marker lock across the synchronous cache write.
+        // Taking it after the asynchronous eviction loop keeps this future Send,
+        // while still making the availability check atomic with insertion.
+        let _cache_guard = match request_context {
+            Some(context) => match context.response_cache_write_guard() {
+                Some(guard) => Some(guard),
+                None => return,
+            },
+            None => None,
+        };
 
-        self.bytes.fetch_add(new_size, Ordering::Relaxed);
-        // A concurrent set of the same key can land between the remove above
-        // and this insert; the overwritten entry's bytes must come off the
-        // counter or they leak until the byte cap is exhausted.
-        if let Some(old) = self.cache.insert(key.clone(), response) {
+        // Replace any existing entry so byte accounting has a single source
+        // of truth for this key.
+        if let Some((_, old)) = self.cache.remove(&key) {
             self.sub_bytes(old.size_bytes());
-        }
-
-        {
             let mut lru = self.lru.lock();
-            lru.put(key, ());
+            lru.pop(&key);
         }
 
-        self.update_entry_count();
+        let insert = || {
+            for tag in &response.metadata.tags {
+                let mut keys = self.tag_index.entry(tag.clone()).or_default();
+                if !keys.contains(&key) {
+                    keys.push(key.clone());
+                }
+            }
+
+            self.bytes.fetch_add(new_size, Ordering::Relaxed);
+            // A concurrent set of the same key can land between the remove above
+            // and this insert; the overwritten entry's bytes must come off the
+            // counter or they leak until the byte cap is exhausted.
+            if let Some(old) = self.cache.insert(key.clone(), response) {
+                self.sub_bytes(old.size_bytes());
+            }
+
+            {
+                let mut lru = self.lru.lock();
+                lru.put(key, ());
+            }
+
+            self.update_entry_count();
+        };
+
+        insert();
     }
 
     pub async fn update_in_place(&self, key: &str, response: CachedResponse) {
@@ -509,6 +553,20 @@ mod tests {
     }
 
     #[test]
+    fn set_for_request_future_is_send() {
+        fn assert_send<T: Send>(_: T) {}
+
+        let cache = ResponseCache::new(CacheConfig::default());
+        let request_context = RequestContext::new("/test".to_string());
+
+        assert_send(cache.set_for_request(
+            "test-key".to_string(),
+            create_test_response("test body", 60),
+            &request_context,
+        ));
+    }
+
+    #[test]
     fn test_generate_cache_key_without_params() {
         let key = ResponseCache::generate_cache_key("/blog/post", None);
         assert_eq!(key, "/blog/post");
@@ -566,7 +624,8 @@ mod tests {
         assert!(cache.get("test-key").await.is_none());
 
         let response = create_test_response("test body", 60);
-        cache.set("test-key".to_string(), response).await;
+        let request_context = RequestContext::new("/test".to_string());
+        cache.set_for_request("test-key".to_string(), response, &request_context).await;
 
         let retrieved = cache.get("test-key").await;
         assert!(retrieved.is_some());
@@ -576,6 +635,24 @@ mod tests {
         assert_eq!(metrics.total_entries, 1);
         assert_eq!(metrics.cache_hits, 1);
         assert_eq!(metrics.cache_misses, 1);
+    }
+
+    #[tokio::test]
+    async fn marked_requests_are_rejected_at_response_cache_insertion() {
+        let cache = ResponseCache::new(CacheConfig::default());
+        let request_context =
+            crate::server::middleware::request_context::RequestContext::new("/test".to_string());
+        request_context.mark_response_unavailable(23);
+
+        cache
+            .set_for_request(
+                "marked".to_string(),
+                create_test_response("maintenance", 60),
+                &request_context,
+            )
+            .await;
+
+        assert!(cache.get("marked").await.is_none());
     }
 
     #[tokio::test]
