@@ -147,6 +147,11 @@ impl LayoutHtmlCache {
         Self { handler, default_ttl_secs }
     }
 
+    pub fn get_metrics(&self) -> (usize, usize) {
+        let (entries, bytes) = self.handler.prefix_stats(LAYOUT_KEY_PREFIX);
+        (entries, bytes.unwrap_or_else(|| entries.saturating_mul(10_000)))
+    }
+
     fn namespaced(key: u64) -> String {
         format!("{LAYOUT_KEY_PREFIX}{key}")
     }

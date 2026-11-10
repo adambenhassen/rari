@@ -18,6 +18,8 @@ crate-type = ["rlib"]
 default = []
 # Optional Deno leaf extensions
 ext-full = ["dep:deno_webgpu", "dep:deno_kv", "dep:deno_cron", "dep:deno_node_sqlite"]
+# jemalloc allocator and allocator statistics exposed by /_rari/metrics.
+jemalloc = ["dep:tikv-jemallocator", "dep:tikv-jemalloc-ctl"]
 
 [dependencies]
 # === Core Runtime Dependencies ===
@@ -136,6 +138,11 @@ serde_json = { workspace = true }
 # === System Integration ===
 hyper-util = { version = "0.1.21", features = ["client-legacy", "tokio"] }
 libc = "0.2.191"
+tikv-jemallocator = { version = "0.7", optional = true, features = [
+  "profiling",
+  "unprefixed_malloc_on_supported_platforms",
+] }
+tikv-jemalloc-ctl = { version = "0.7", optional = true, features = ["stats"] }
 nix = { workspace = true, features = ["term"] }
 rustyline = { workspace = true }
 sys_traits = { workspace = true }

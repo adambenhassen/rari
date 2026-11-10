@@ -26,6 +26,8 @@ use super::{
         should_use_streaming, wrap_html_with_metadata,
     },
 };
+#[cfg(feature = "jemalloc")]
+use crate::server::metrics_http::{RequestTimer, route_label};
 use crate::{
     rendering::layout::{
         ChunkedContentType, LayoutRenderer, RenderResult, create_layout_context,
@@ -206,6 +208,10 @@ pub async fn handle_app_route(
             None => return Err(StatusCode::NOT_FOUND),
         },
     };
+
+    #[cfg(feature = "jemalloc")]
+    let _request_timer =
+        RequestTimer::start(route_label(&route_match.route.path, route_match.not_found.is_some()));
 
     let request_context = Arc::new(
         RequestContext::new(path.to_string())
