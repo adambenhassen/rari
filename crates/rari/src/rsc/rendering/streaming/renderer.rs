@@ -74,7 +74,8 @@ impl StreamingRenderer {
             request_context_id.map(str::to_string),
         )));
 
-        let partial_result = self.render_partial_from_composition(composition_script).await?;
+        let partial_result =
+            self.render_partial_from_composition(composition_script, request_context_id).await?;
 
         let boundary_positions: Arc<Mutex<FxHashMap<String, Vec<usize>>>> = Arc::new(Mutex::new(
             partial_result.boundaries.iter().map(|b| (b.id.clone(), Vec::new())).collect(),
@@ -198,6 +199,7 @@ impl StreamingRenderer {
             error_sender,
             Arc::clone(&self.shared_row_counter),
             Arc::clone(&self.promise_to_row),
+            None,
         )));
 
         let suspense_boundaries =
@@ -315,6 +317,7 @@ impl StreamingRenderer {
             error_sender,
             Arc::clone(&self.shared_row_counter),
             Arc::clone(&self.promise_to_row),
+            None,
         )));
 
         let partial_result =
@@ -458,6 +461,7 @@ impl StreamingRenderer {
             error_sender,
             Arc::clone(&self.shared_row_counter),
             Arc::clone(&self.promise_to_row),
+            None,
         )));
 
         self.module_path = Some(format!("{component_id}.js"));
@@ -784,6 +788,7 @@ impl StreamingRenderer {
     async fn render_partial_from_composition(
         &mut self,
         composition_script: String,
+        request_context_id: Option<&str>,
     ) -> Result<PartialRenderResult, RariError> {
         let react_init_result = self
             .runtime

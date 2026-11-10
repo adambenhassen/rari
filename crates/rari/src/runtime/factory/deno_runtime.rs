@@ -452,7 +452,8 @@ async fn handle_js_request(
             let _ = result_tx.send(Ok(()));
         }
         JsRequest::SetRequestContext { request_context, result_tx } => {
-            let mut op_state = deno_runtime.op_state().borrow_mut();
+            let op_state_handle = deno_runtime.op_state();
+            let mut op_state = op_state_handle.borrow_mut();
             op_state
                 .borrow_mut::<crate::runtime::ops::RequestContextRegistry>()
                 .insert(request_context.clone());
@@ -460,7 +461,8 @@ async fn handle_js_request(
             let _ = result_tx.send(Ok(()));
         }
         JsRequest::ClearRequestContextIfMatches { expected_context, result_tx } => {
-            let mut op_state = deno_runtime.op_state().borrow_mut();
+            let op_state_handle = deno_runtime.op_state();
+            let mut op_state = op_state_handle.borrow_mut();
             op_state
                 .borrow_mut::<crate::runtime::ops::RequestContextRegistry>()
                 .remove_if_matches(&expected_context);
