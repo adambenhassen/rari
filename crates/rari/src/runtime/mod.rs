@@ -747,6 +747,19 @@ mod response_availability_tests {
         assert_eq!(second.response_unavailable_after(), Some(22));
 
         runtime.clear_request_context_if_matches(Arc::clone(&first)).await.unwrap();
+        let first_no_longer_registered = format!(
+            "globalThis['~rari'].withResponseAvailabilityContext({}, () => {{ try {{ globalThis.markResponseUnavailable(33); return false; }} catch {{ return true; }} }})",
+            first_id
+        );
+        let first_mark_result = runtime
+            .execute_script(
+                "cleared_request_context_is_rejected".to_string(),
+                first_no_longer_registered,
+            )
+            .await
+            .unwrap();
+        assert_eq!(first_mark_result.as_bool(), Some(true));
+
         let second_still_registered = format!(
             "globalThis['~rari'].withResponseAvailabilityContext({}, () => globalThis.markResponseUnavailable(22))",
             second_id
@@ -758,5 +771,34 @@ mod response_availability_tests {
             )
             .await
             .unwrap();
+    }
+
+    #[tokio::test]
+    async fn cancelled_render_does_not_retain_request_context() {
+        let runtime = Arc::new(JsExecutionRuntime::new(None));
+        let request_context = Arc::new(RequestContext::new("/cancelled".to_string()));
+        let request_context_weak = Arc::downgrade(&request_context);
+        let runtime_for_render = Arc::clone(&runtime);
+        let context_for_render = Arc::clone(&request_context);
+        let (started_sender, started_receiver) = tokio::sync::oneshot::channel();
+
+        let render = tokio::spawn(async move {
+            runtime_for_render
+                .execute_with_request_context(context_for_render, async move {
+                    let _ = started_sender.send(());
+                    std::future::pending::<Result<(), crate::error::RariError>>().await
+                })
+                .await
+        });
+
+        started_receiver.await.unwrap();
+        render.abort();
+        let _ = render.await;
+
+        let replacement = Arc::new(RequestContext::new("/replacement".to_string()));
+        runtime.set_request_context(Arc::clone(&replacement)).await.unwrap();
+        drop(request_context);
+
+        assert!(request_context_weak.upgrade().is_none());
     }
 }

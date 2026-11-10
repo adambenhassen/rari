@@ -4,7 +4,7 @@ use axum::http::HeaderMap;
 use bytes::Bytes;
 use dashmap::DashMap;
 use lru::LruCache;
-use parking_lot::Mutex;
+use parking_lot::{Mutex, MutexGuard};
 use rustc_hash::{FxHashMap, FxHashSet};
 use serde_json::Value as JsonValue;
 use std::num::NonZeroUsize;
@@ -81,6 +81,11 @@ pub struct RequestContext {
     pub function_cache: Arc<DashMap<String, JsonValue>>,
 }
 
+#[must_use = "hold this guard until the cache insertion is complete"]
+pub struct ResponseCacheWriteGuard<'a> {
+    _unavailable_after: MutexGuard<'a, Option<u64>>,
+}
+
 impl RequestContext {
     pub fn new(route_path: String) -> Self {
         Self {
@@ -123,13 +128,15 @@ impl RequestContext {
         self.response_unavailable_after().is_none()
     }
 
-    /// Run a synchronous cache insertion only while this request remains cacheable.
-    /// The marker lock stays held through the insertion so the decision cannot
-    /// go stale between checking the marker and storing the response.
-    pub fn with_response_cache_allowed(&self, insert: impl FnOnce()) {
+    /// Hold the marker state while a response cache insertion is committed.
+    /// This avoids running an arbitrary closure while holding the non-reentrant
+    /// marker lock.
+    pub fn response_cache_write_guard(&self) -> Option<ResponseCacheWriteGuard<'_>> {
         let unavailable_after = self.response_unavailable_after.lock();
         if unavailable_after.is_none() {
-            insert();
+            Some(ResponseCacheWriteGuard { _unavailable_after: unavailable_after })
+        } else {
+            None
         }
     }
 
@@ -348,14 +355,13 @@ mod tests {
     }
 
     #[test]
-    fn does_not_run_cache_insertion_after_unavailable_mark() {
+    fn response_cache_write_guard_tracks_unavailable_mark() {
         let ctx = RequestContext::new("/test".to_string());
+        assert!(ctx.response_cache_write_guard().is_some());
+
         ctx.mark_response_unavailable(23);
 
-        let mut inserted = false;
-        ctx.with_response_cache_allowed(|| inserted = true);
-
-        assert!(!inserted);
+        assert!(ctx.response_cache_write_guard().is_none());
     }
 
     #[test]

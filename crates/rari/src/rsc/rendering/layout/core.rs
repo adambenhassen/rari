@@ -83,7 +83,9 @@ impl LayoutHtmlCache {
         html: String,
         request_context: &crate::server::middleware::request_context::RequestContext,
     ) {
-        request_context.with_response_cache_allowed(|| self.insert(key, html));
+        if let Some(_cache_guard) = request_context.response_cache_write_guard() {
+            self.insert(key, html);
+        }
     }
 
     pub fn clear(&self) {

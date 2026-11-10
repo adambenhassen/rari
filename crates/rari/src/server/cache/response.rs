@@ -294,9 +294,13 @@ impl ResponseCache {
             return;
         }
 
-        if request_context.is_some_and(|context| !context.response_cache_allowed()) {
-            return;
-        }
+        let _cache_guard = match request_context {
+            Some(context) => match context.response_cache_write_guard() {
+                Some(guard) => Some(guard),
+                None => return,
+            },
+            None => None,
+        };
 
         // Replace any existing entry up front so byte accounting and the tag
         // index have a single source of truth for this key.
@@ -342,11 +346,7 @@ impl ResponseCache {
             self.update_entry_count();
         };
 
-        if let Some(request_context) = request_context {
-            request_context.with_response_cache_allowed(insert);
-        } else {
-            insert();
-        }
+        insert();
     }
 
     pub async fn update_in_place(&self, key: &str, response: CachedResponse) {

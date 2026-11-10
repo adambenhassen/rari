@@ -1,42 +1,37 @@
 use crate::server::http_client::get_http_client;
+use crate::server::middleware::request_context::RequestContext;
 use deno_core::{OpDecl, OpState, op2};
 use deno_error::JsErrorBox;
 use rustc_hash::FxHashMap;
 use serde::Deserialize;
 use std::cell::RefCell;
 use std::rc::Rc;
-use std::sync::Arc;
+use std::sync::{Arc, Weak};
 use tokio::sync::mpsc;
 use tracing::error;
 
 #[derive(Default)]
-pub struct RequestContextRegistry {
-    contexts: FxHashMap<String, Arc<crate::server::middleware::request_context::RequestContext>>,
+pub(crate) struct RequestContextRegistry {
+    contexts: FxHashMap<String, Weak<RequestContext>>,
 }
 
 impl RequestContextRegistry {
-    pub fn insert(
-        &mut self,
-        request_context: Arc<crate::server::middleware::request_context::RequestContext>,
-    ) {
-        self.contexts.insert(request_context.request_id().to_string(), request_context);
+    pub(crate) fn insert(&mut self, request_context: Arc<RequestContext>) {
+        self.contexts.retain(|_, context| context.strong_count() > 0);
+        self.contexts
+            .insert(request_context.request_id().to_string(), Arc::downgrade(&request_context));
     }
 
-    pub fn get(
-        &self,
-        request_id: &str,
-    ) -> Option<&Arc<crate::server::middleware::request_context::RequestContext>> {
-        self.contexts.get(request_id)
+    pub(crate) fn get(&self, request_id: &str) -> Option<Arc<RequestContext>> {
+        self.contexts.get(request_id).and_then(Weak::upgrade)
     }
 
-    pub fn remove_if_matches(
-        &mut self,
-        expected: &Arc<crate::server::middleware::request_context::RequestContext>,
-    ) {
+    pub(crate) fn remove_if_matches(&mut self, expected: &Arc<RequestContext>) {
         if self
             .contexts
             .get(expected.request_id())
-            .is_some_and(|current| Arc::ptr_eq(current, expected))
+            .and_then(Weak::upgrade)
+            .is_some_and(|current| Arc::ptr_eq(&current, expected))
         {
             self.contexts.remove(expected.request_id());
         }
