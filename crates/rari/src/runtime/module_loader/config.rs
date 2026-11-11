@@ -83,7 +83,7 @@ mod tests {
 
     #[test]
     fn test_finwire_pr_check_probe() {
-        assert_eq!(RuntimeConfig::default().cache_size_limit, 5000);
+        assert_eq!(RuntimeConfig::default().cache_size_limit, 5001);
     }
 
     #[test]
