@@ -58,7 +58,7 @@ jobs:
             target: aarch64-unknown-linux-gnu
             name: rari-linux-arm64
           - platform: darwin-arm64
-            os: macos-14
+            os: macos-15
             target: aarch64-apple-darwin
             name: rari-darwin-arm64
     steps:
