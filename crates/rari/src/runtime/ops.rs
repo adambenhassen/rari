@@ -360,12 +360,33 @@ pub fn get_streaming_ops() -> Vec<OpDecl> {
         op_stream_promise_settled(),
         op_internal_log(),
         op_sanitize_html(),
+        op_mark_response_unavailable(),
         op_get_cookies(),
         op_get_request_headers(),
         op_get_csp_nonce(),
         op_set_cookie(),
         op_delete_cookie(),
     ]
+}
+
+#[allow(clippy::allow_attributes, clippy::needless_pass_by_value)]
+#[op2(fast)]
+pub fn op_mark_response_unavailable(
+    state: Rc<RefCell<OpState>>,
+    #[string] retry_after_seconds: String,
+    #[string] request_id: String,
+) -> Result<(), JsErrorBox> {
+    let retry_after_seconds = retry_after_seconds
+        .parse::<u64>()
+        .map_err(|_| JsErrorBox::type_error("retry-after must be a non-negative integer"))?;
+    let op_state_ref = state.borrow();
+    let request_context = resolve_request_context(&op_state_ref, Some(request_id.as_str()))
+        .ok_or_else(|| {
+            JsErrorBox::generic("markResponseUnavailable can only be called during a server render")
+        })?;
+
+    request_context.mark_response_unavailable(retry_after_seconds);
+    Ok(())
 }
 
 /// Sync try-send for Fizz chunks. Returns: `0` sent, `1` full (use async op), `2` disconnected.

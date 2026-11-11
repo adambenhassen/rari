@@ -93,6 +93,8 @@ declare module 'react-server-dom-webpack/server' {
 }
 
 declare global {
+  var markResponseUnavailable: (retryAfterSeconds?: number) => void
+
   interface RequestInit {
     rari?: {
       revalidate?: number | false

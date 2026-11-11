@@ -18,7 +18,7 @@ use tokio::{
     time::{self, Duration},
 };
 
-use super::cache::rsc_vary_header;
+use super::{cache::rsc_vary_header, response_unavailable};
 use crate::{
     rendering::{
         html_shell::RscHtmlRenderer,
@@ -370,6 +370,7 @@ pub async fn render_rsc_navigation_streaming(
             chunks,
             is_not_found,
             accept_encoding,
+            &request_context,
         )),
         RenderResult::Chunked { content_type: ChunkedContentType::Html, .. } => {
             tracing::error!("HTML chunked render not supported in RSC-only mode");
@@ -378,6 +379,14 @@ pub async fn render_rsc_navigation_streaming(
             )))
         }
         RenderResult::Static(rsc_flight_protocol) => {
+            if let Some(retry_after) = request_context.response_unavailable_after() {
+                return Ok(response_unavailable(
+                    Body::from(rsc_flight_protocol),
+                    "text/x-component",
+                    retry_after,
+                ));
+            }
+
             let status_code = if is_not_found { StatusCode::NOT_FOUND } else { StatusCode::OK };
 
             let sorted_flight_protocol = sort_flight_protocol(&rsc_flight_protocol);
@@ -412,6 +421,14 @@ pub async fn render_rsc_navigation_streaming(
             Ok(response_builder.body(Body::from(final_payload)).expect("Valid RSC response"))
         }
         RenderResult::StaticBinary(binary_payload) => {
+            if let Some(retry_after) = request_context.response_unavailable_after() {
+                return Ok(response_unavailable(
+                    Body::from(binary_payload),
+                    "text/x-component",
+                    retry_after,
+                ));
+            }
+
             let status_code = if is_not_found { StatusCode::NOT_FOUND } else { StatusCode::OK };
 
             let router_state_sensitive =
@@ -450,6 +467,7 @@ fn render_chunked_response(
     mut chunks: Receiver<Result<Vec<u8>, RariError>>,
     is_not_found: bool,
     accept_encoding: Option<&str>,
+    request_context: &RequestContext,
 ) -> http::Response<Body> {
     let stall_timeout = Duration::from_millis(chunked_stream_stall_timeout_ms());
 
@@ -631,8 +649,19 @@ fn render_chunked_response(
         }
     };
 
-    let status_code = if is_not_found { StatusCode::NOT_FOUND } else { StatusCode::OK };
-    let cache_control = state.config.get_cache_control_for_route(&context.pathname);
+    let unavailable_after = request_context.response_unavailable_after();
+    let status_code = if unavailable_after.is_some() {
+        StatusCode::SERVICE_UNAVAILABLE
+    } else if is_not_found {
+        StatusCode::NOT_FOUND
+    } else {
+        StatusCode::OK
+    };
+    let cache_control = if unavailable_after.is_some() {
+        "no-store"
+    } else {
+        state.config.get_cache_control_for_route(&context.pathname)
+    };
 
     let mut response_builder = Response::builder()
         .status(status_code)
@@ -641,6 +670,10 @@ fn render_chunked_response(
         .header("cache-control", cache_control)
         .header("vary", vary)
         .header("x-content-type-options", "nosniff");
+
+    if let Some(retry_after) = unavailable_after {
+        response_builder = response_builder.header("retry-after", retry_after.to_string());
+    }
 
     match content_type {
         ChunkedContentType::Html => {
@@ -718,7 +751,7 @@ pub async fn render_synchronous(
                     .render_route_with_streaming(
                         &route_match,
                         &context,
-                        Some(request_context),
+                        Some(Arc::clone(&request_context)),
                         false,
                         None,
                     )
@@ -763,6 +796,14 @@ pub async fn render_synchronous(
 
             let final_html = wrap_html_with_metadata(html_with_assets, &state);
 
+            if let Some(retry_after) = request_context.response_unavailable_after() {
+                return Ok(response_unavailable(
+                    Body::from(final_html),
+                    "text/html; charset=utf-8",
+                    retry_after,
+                ));
+            }
+
             let status_code = if is_not_found { StatusCode::NOT_FOUND } else { StatusCode::OK };
             let cache_control = state.config.get_cache_control_for_route(&context.pathname);
 
@@ -793,9 +834,17 @@ pub async fn render_synchronous(
             chunks,
             is_not_found,
             accept_encoding,
+            &request_context,
         )),
         RenderResult::StaticBinary(bytes) => {
             let html_content = String::from_utf8_lossy(&bytes).into_owned();
+            if let Some(retry_after) = request_context.response_unavailable_after() {
+                return Ok(response_unavailable(
+                    Body::from(html_content),
+                    "text/html; charset=utf-8",
+                    retry_after,
+                ));
+            }
             let status_code = if is_not_found { StatusCode::NOT_FOUND } else { StatusCode::OK };
             #[expect(
                 clippy::expect_used,
@@ -893,6 +942,7 @@ pub async fn render_streaming_with_layout(
             chunks,
             is_not_found,
             accept_encoding,
+            &request_context,
         )),
         RenderResult::Static(html) => {
             use crate::server::compression::compress_body;
@@ -906,6 +956,14 @@ pub async fn render_streaming_with_layout(
             };
 
             let final_html = wrap_html_with_metadata(html_with_assets, &state);
+
+            if let Some(retry_after) = request_context.response_unavailable_after() {
+                return Ok(response_unavailable(
+                    Body::from(final_html),
+                    "text/html; charset=utf-8",
+                    retry_after,
+                ));
+            }
 
             let status_code = if is_not_found { StatusCode::NOT_FOUND } else { StatusCode::OK };
             let cache_control = state.config.get_cache_control_for_route(&context.pathname);

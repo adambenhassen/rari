@@ -25,6 +25,7 @@ use super::{
         render_rsc_navigation_streaming, render_with_fallback, resolve_not_found_entry,
         should_use_streaming, wrap_html_with_metadata,
     },
+    response_unavailable,
 };
 #[cfg(feature = "jemalloc")]
 use crate::server::metrics_http::{RequestTimer, route_label};
@@ -351,6 +352,14 @@ pub async fn handle_app_route(
                 }
             };
 
+            if let Some(retry_after) = request_context.response_unavailable_after() {
+                return Ok(response_unavailable(
+                    Body::from(rsc_flight_protocol),
+                    "text/x-component",
+                    retry_after,
+                ));
+            }
+
             {
                 let status_code = if route_match.not_found.is_some() {
                     StatusCode::NOT_FOUND
@@ -407,7 +416,10 @@ pub async fn handle_app_route(
                         compressed_gzip: None,
                     };
 
-                    state.response_cache.set(cache_key, cached_response).await;
+                    state
+                        .response_cache
+                        .set_for_request(cache_key, cached_response, &request_context)
+                        .await;
                 }
 
                 #[expect(
@@ -634,7 +646,10 @@ pub async fn handle_app_route(
                             compressed_gzip,
                         };
 
-                        state.response_cache.set(cache_key.clone(), cached_response).await;
+                        state
+                            .response_cache
+                            .set_for_request(cache_key.clone(), cached_response, &request_context)
+                            .await;
 
                         let merged_vary = static_html_vary_header(cookie_header);
 
@@ -805,6 +820,14 @@ pub async fn handle_app_route(
             // in full for the cache and again for the body.
             let final_html = Bytes::from(final_html);
 
+            if let Some(retry_after) = request_context.response_unavailable_after() {
+                return Ok(response_unavailable(
+                    Body::from(final_html),
+                    "text/html; charset=utf-8",
+                    retry_after,
+                ));
+            }
+
             if for_response_cache {
                 let response_cache_tags =
                     merge_page_cache_tags(&state, cache_policy.tags.clone()).await;
@@ -852,7 +875,10 @@ pub async fn handle_app_route(
                     compressed_gzip,
                 };
 
-                state.response_cache.set(cache_key, cached_response).await;
+                state
+                    .response_cache
+                    .set_for_request(cache_key, cached_response, &request_context)
+                    .await;
             }
 
             {

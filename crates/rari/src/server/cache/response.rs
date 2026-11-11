@@ -16,6 +16,7 @@ use crate::server::{
     cache::handler::{CacheHandler, MemoryCacheHandler, MemoryConfig},
     compression::CompressionEncoding,
     config::CacheLayerConfig,
+    middleware::request_context::RequestContext,
 };
 
 #[derive(Clone)]
@@ -555,6 +556,22 @@ impl ResponseCache {
                     self.resync_entry_count();
                 }
             }
+        }
+    }
+
+    pub async fn set_for_request(
+        &self,
+        key: String,
+        response: CachedResponse,
+        request_context: &RequestContext,
+    ) {
+        if !request_context.response_cache_allowed() {
+            return;
+        }
+
+        self.set(key.clone(), response).await;
+        if !request_context.response_cache_allowed() {
+            self.invalidate(&key).await;
         }
     }
 
