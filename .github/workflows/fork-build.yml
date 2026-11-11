@@ -1,4 +1,5 @@
 name: Fork Build
+run-name: fork-build ${{ inputs.version }} ${{ inputs.issue }}
 
 # Fork-only workflow: builds the patched rari binary on GitHub-hosted runners and
 # publishes a prerelease on this fork's Releases page with the platform binaries
@@ -12,6 +13,10 @@ on:
         description: 'Prerelease version for the packed npm tarballs (semver)'
         required: true
         default: '0.14.13-cachefix.1'
+      issue:
+        description: 'Issue key to route this build run to (for example MAIN-3668)'
+        required: false
+        type: string
 
 permissions:
   contents: write
