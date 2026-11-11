@@ -2,7 +2,11 @@ import type { LayoutProps, Metadata } from 'rari'
 import { SiteNav } from './site-nav'
 import './globals.css'
 
-export default function Layout({ children }: LayoutProps) {
+export default function Layout({ children, pathname }: LayoutProps) {
+  if (pathname === '/stale-render/failure') {
+    throw new Error('Intentional root layout composition failure')
+  }
+
   return (
     <html lang="en">
       <head />
