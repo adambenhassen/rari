@@ -8,6 +8,10 @@ on:
         required: true
         default: 0.17.9-finwire.0
         type: string
+      issue:
+        description: Issue key to route this build run to (for example MAIN-3724)
+        required: false
+        type: string
 
 permissions: {}
 
