@@ -1,4 +1,5 @@
 name: Fork Build
+run-name: fork-build ${{ inputs.version }} ${{ inputs.issue }}
 
 # Fork-only workflow: builds the patched rari binary on GitHub-hosted runners and
 # publishes a prerelease on this fork's Releases page with the platform binaries
