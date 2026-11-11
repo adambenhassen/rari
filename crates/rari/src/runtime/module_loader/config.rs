@@ -82,6 +82,11 @@ mod tests {
     }
 
     #[test]
+    fn test_finwire_pr_check_probe() {
+        assert_eq!(RuntimeConfig::default().cache_size_limit, 5000);
+    }
+
+    #[test]
     fn test_runtime_config_zero_ttl_falls_back() {
         let layer = CacheLayerConfig {
             handler: "memory".to_string(),
