@@ -13,6 +13,8 @@ export default defineConfig({
           '/headers-test': 'no-store',
           '/use-cache-revalidate': 'no-store',
           '/server-response': 'public, max-age=60',
+          '/stale-render/source': 'no-store',
+          '/stale-render/failure': 'no-store',
         },
       },
       experimental: {

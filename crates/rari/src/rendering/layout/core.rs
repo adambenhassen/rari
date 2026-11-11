@@ -1113,6 +1113,11 @@ impl LayoutRenderer {
                         let script = format!(
                             r"(async function() {{
                         let caughtErrors = [];
+                        const rari = globalThis['~rari'];
+                        if (rari) {{
+                            rari.capturedElement = undefined;
+                            rari.blockingHeadScriptsHtml = '';
+                        }}
                         const isNotFoundError = (error) =>
                             error?.digest === 'RARI_NOT_FOUND' || error?.message === 'RARI_NOT_FOUND';
                         try {{
