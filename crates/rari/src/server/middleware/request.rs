@@ -42,7 +42,12 @@ const REFERRER_STRICT_ORIGIN: &str = "strict-origin-when-cross-origin";
 const PERMISSIONS_RESTRICTIVE: &str = "geolocation=(), microphone=(), camera=(), payment=()";
 
 fn apply_error_cache_control(headers: &mut HeaderMap, status: StatusCode) {
-    if status.is_client_error() || status.is_server_error() {
+    let already_no_store =
+        headers.get(CACHE_CONTROL).and_then(|value| value.to_str().ok()).is_some_and(|value| {
+            value.split(',').any(|directive| directive.trim().eq_ignore_ascii_case("no-store"))
+        });
+
+    if (status.is_client_error() || status.is_server_error()) && !already_no_store {
         headers
             .insert(CACHE_CONTROL, HeaderValue::from_static("no-cache, no-store, must-revalidate"));
     }

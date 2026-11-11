@@ -2,6 +2,8 @@
 /// <reference path="../../types.d.ts" />
 
 declare global {
+  var markResponseUnavailable: (retryAfterSeconds?: number) => void
+
   interface GlobalThis {
     '~rsc'?: {
       modules?: Record<string, { default?: unknown; [key: string]: unknown }>
@@ -310,6 +312,7 @@ declare global {
   namespace Deno {
     namespace core {
       namespace ops {
+        function op_mark_response_unavailable(retryAfterSeconds: string, requestId: string): void
         function op_get_cookies(requestId?: string): string
         function op_get_request_headers(requestId?: string): string
         function op_get_csp_nonce(requestId: string): string
