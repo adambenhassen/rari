@@ -197,6 +197,7 @@ pub struct RequestContext {
     request_id: String,
     start_time: Instant,
     route_path: String,
+    response_unavailable_after: Mutex<Option<u64>>,
     pub cookie_header: Option<String>,
     pub request_headers: FxHashMap<String, String>,
     pub skip_layout_html_cache: bool,
@@ -214,6 +215,7 @@ impl RequestContext {
             request_id: Uuid::new_v4().to_string(),
             start_time: Instant::now(),
             route_path,
+            response_unavailable_after: Mutex::new(None),
             cookie_header: None,
             request_headers: FxHashMap::default(),
             skip_layout_html_cache: false,
@@ -262,6 +264,18 @@ impl RequestContext {
 
     pub fn route_path(&self) -> &str {
         &self.route_path
+    }
+
+    pub fn mark_response_unavailable(&self, retry_after_seconds: u64) {
+        self.response_unavailable_after.lock().get_or_insert(retry_after_seconds);
+    }
+
+    pub fn response_unavailable_after(&self) -> Option<u64> {
+        *self.response_unavailable_after.lock()
+    }
+
+    pub fn response_cache_allowed(&self) -> bool {
+        self.response_unavailable_after().is_none()
     }
 
     pub fn start_time(&self) -> Instant {
@@ -455,6 +469,18 @@ mod tests {
         assert_eq!(ctx.route_path(), "/test");
         assert_ne!(ctx.request_id(), "");
         assert!(ctx.elapsed().as_millis() < 100);
+    }
+
+    #[test]
+    fn unavailable_response_uses_first_retry_after_and_disables_caching() {
+        let ctx = RequestContext::new("/maintenance".to_string());
+
+        assert!(ctx.response_cache_allowed());
+        ctx.mark_response_unavailable(17);
+        ctx.mark_response_unavailable(60);
+
+        assert_eq!(ctx.response_unavailable_after(), Some(17));
+        assert!(!ctx.response_cache_allowed());
     }
 
     #[test]

@@ -12,6 +12,7 @@ export default defineConfig({
         routes: {
           '/headers-test': 'no-store',
           '/use-cache-revalidate': 'no-store',
+          '/server-response': 'public, max-age=60',
         },
       },
       experimental: {

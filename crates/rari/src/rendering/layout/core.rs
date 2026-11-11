@@ -1271,8 +1271,8 @@ impl LayoutRenderer {
                     }
                 };
 
-                if let Some(ctx) = request_context {
-                    runtime.with_request_context(ctx, render_static).await?
+                if let Some(ctx) = request_context.as_ref() {
+                    runtime.with_request_context(Arc::clone(ctx), render_static).await?
                 } else {
                     let handle = runtime.pick_runtime().await?;
                     render_static(Arc::clone(handle.runtime())).await?
@@ -1281,7 +1281,11 @@ impl LayoutRenderer {
 
             let (html, is_dynamic_render, page_cache_tags) = html;
 
-            if layout_cache_enabled && route_match.not_found.is_none() && !is_dynamic_render {
+            if layout_cache_enabled
+                && route_match.not_found.is_none()
+                && !is_dynamic_render
+                && request_context.as_deref().is_none_or(RequestContext::response_cache_allowed)
+            {
                 let mut layout_cache_tags = page_cache_tags;
                 let route_path = route_match.route.path.clone();
                 if !layout_cache_tags.iter().any(|tag| tag == &route_path) {

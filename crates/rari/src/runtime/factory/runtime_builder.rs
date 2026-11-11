@@ -22,6 +22,7 @@ use crate::runtime::{
 
 const NODE_CONSOLE_SCOPE_SPECIFIER: &str = "ext:runtime/98_global_scope_shared.js";
 const NODE_CONSOLE_SCOPE_SOURCE: &str = include_str!("../ext/runtime/node_console_scope.ts");
+const RESPONSE_AVAILABILITY_INIT_SCRIPT: &str = include_str!("js/response_availability_helper.js");
 
 fn residual_lazy_esm_sources() -> &'static [(&'static str, &'static str)] {
     static SOURCES: LazyLock<Vec<(&'static str, &'static str)>> = LazyLock::new(|| {
@@ -98,6 +99,17 @@ pub fn build_js_runtime(
     runtime.execute_script("node_bootstrap.js", NODE_BOOTSTRAP_SCRIPT.to_string()).map_err(
         |err| RariError::js_runtime(format!("Failed to stash node bootstrap args: {err}")),
     )?;
+
+    runtime
+        .execute_script(
+            "response_availability_init.js",
+            RESPONSE_AVAILABILITY_INIT_SCRIPT.to_string(),
+        )
+        .map_err(|err| {
+            RariError::js_runtime(format!(
+                "Failed to initialize response availability helper: {err}"
+            ))
+        })?;
 
     if let Some(env_vars) = env_vars {
         let env_script = ENV_INJECTION_SCRIPT.cow_replace(
