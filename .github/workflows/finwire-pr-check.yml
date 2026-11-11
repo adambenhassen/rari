@@ -1,0 +1,96 @@
+name: Finwire PR check
+
+on:
+  pull_request:
+    branches:
+      - finwire/main
+
+permissions: {}
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+jobs:
+  check:
+    name: rari checks
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    permissions:
+      contents: read
+    env:
+      NODE_OPTIONS: --max-old-space-size=6144
+      PNPM_CONFIG_WORKSPACE_CONCURRENCY: 1
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Install pnpm
+        uses: pnpm/action-setup@ea17c68df8912ef543352723c149a84f56e3d413 # v6.1.0
+
+      - name: Install Node.js
+        uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: 24.21.0
+          cache: pnpm
+
+      - name: Install JavaScript dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Bundle React ESM vendor files
+        run: pnpm --filter @rari/bundle-react-esm bundle
+
+      - name: Build JavaScript packages
+        run: |
+          pnpm --filter=@rari/lint run build
+          pnpm --filter=@rari/use-cache run build
+          pnpm --filter=@rari/logger run build
+          pnpm --filter=@rari/deploy run build
+          pnpm --filter=rari run build
+          pnpm --filter=create-rari-app run build
+
+      - name: Lint JavaScript
+        run: pnpm lint
+
+      - name: Typecheck JavaScript
+        run: pnpm typecheck
+
+      - name: Test JavaScript
+        run: pnpm test:unit:run
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@02cb101ec7c40f2c49e1d9714d64511d8e1b74de # v1
+        with:
+          toolchain: nightly
+          components: clippy, rustfmt
+
+      - name: Install Rust build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y pkg-config libfontconfig1-dev mold
+
+      - name: Cache Rust
+        uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
+        with:
+          shared-key: finwire-main-pr-check
+
+      - name: Create snapshot placeholder
+        run: |
+          mkdir -p crates/rari/snapshots
+          touch crates/rari/snapshots/RARI_SNAPSHOT.bin
+          echo 'pub static RESIDUAL_LAZY_ESM_SOURCES: &[(&str, &str)] = &[];' > crates/rari/snapshots/residual_lazy_sources.rs
+          echo 'pub static RESIDUAL_LAZY_JS_SOURCES: &[(&str, &str)] = &[];' >> crates/rari/snapshots/residual_lazy_sources.rs
+
+      - name: Generate V8 snapshot
+        run: cargo run --manifest-path tools/snapshot/Cargo.toml -- crates/rari/snapshots
+
+      - name: Check Rust formatting
+        run: cargo fmt --all -- --check
+
+      - name: Run Rust clippy
+        run: cargo clippy -p rari --all-targets --all-features -- -D warnings
+
+      - name: Test Rust
+        run: cargo test -p rari --all-features

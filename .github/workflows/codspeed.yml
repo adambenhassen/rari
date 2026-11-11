@@ -4,7 +4,9 @@ on:
   push:
     branches:
       - main
-  pull_request: # `workflow_dispatch` allows CodSpeed to trigger backtest
+  pull_request:
+    branches-ignore:
+      - finwire/main # this fork is not registered with the upstream CodSpeed project
 
   # performance analysis in order to generate initial data.
   workflow_dispatch:
