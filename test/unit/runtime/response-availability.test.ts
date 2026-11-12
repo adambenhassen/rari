@@ -24,10 +24,11 @@ describe('markResponseUnavailable', () => {
   it('rejects a mark when the runtime op is unavailable', () => {
     vi.stubGlobal('Deno', { core: { ops: { op_mark_response_unavailable: undefined } } })
     vi.stubGlobal('~rari', { currentRequestId: () => 'request-id' })
+    const mark = () => {
+      markResponseUnavailable()
+    }
 
-    expect(() => markResponseUnavailable()).toThrow(TypeError)
-    expect(() => markResponseUnavailable()).toThrow(
-      'markResponseUnavailable can only be called during a server render',
-    )
+    expect(mark).toThrow(TypeError)
+    expect(mark).toThrow('markResponseUnavailable can only be called during a server render')
   })
 })
