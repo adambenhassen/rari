@@ -1,8 +1,11 @@
 import type { PageProps } from 'rari'
 
-export default function ServerResponsePage({ searchParams }: PageProps) {
+export default async function ServerResponsePage({ searchParams }: PageProps) {
   const mode = String(searchParams.mode)
-  if (mode === 'unavailable') globalThis.markResponseUnavailable()
+  if (mode === 'unavailable') {
+    await Promise.resolve()
+    globalThis.markResponseUnavailable()
+  }
 
   return (
     <main>

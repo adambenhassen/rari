@@ -7,8 +7,8 @@ use std::{
 
 use axum::{
     extract::State,
-    http::{HeaderMap, StatusCode, header},
-    response::IntoResponse,
+    http::{HeaderMap, HeaderValue, StatusCode, header},
+    response::{IntoResponse, Response},
 };
 use base64::{Engine, engine::general_purpose::STANDARD};
 use tikv_jemalloc_ctl::{epoch, stats};
@@ -247,19 +247,23 @@ pub async fn heap_dump_handler(headers: HeaderMap) -> impl IntoResponse {
                 .and_then(|value| value.to_str().ok())
                 .unwrap_or_default();
             if provided.as_bytes() != token.as_bytes() {
-                return (StatusCode::UNAUTHORIZED, "invalid profiling token").into_response();
+                return no_store(
+                    (StatusCode::UNAUTHORIZED, "invalid profiling token").into_response(),
+                );
             }
         }
         _ => {
-            return (
-                StatusCode::FORBIDDEN,
-                "heap dump disabled: set RARI_PROFILING_TOKEN and enable jemalloc profiling",
-            )
-                .into_response();
+            return no_store(
+                (
+                    StatusCode::FORBIDDEN,
+                    "heap dump disabled: set RARI_PROFILING_TOKEN and enable jemalloc profiling",
+                )
+                    .into_response(),
+            );
         }
     }
 
-    match dump_heap_pprof().await {
+    no_store(match dump_heap_pprof().await {
         Ok(pprof) => (
             StatusCode::OK,
             [
@@ -270,7 +274,12 @@ pub async fn heap_dump_handler(headers: HeaderMap) -> impl IntoResponse {
         )
             .into_response(),
         Err(error) => (error.status(), error.message()).into_response(),
-    }
+    })
+}
+
+fn no_store(mut response: Response) -> Response {
+    response.headers_mut().insert(header::CACHE_CONTROL, HeaderValue::from_static("no-store"));
+    response
 }
 
 pub async fn metrics_handler(State(state): State<ServerState>) -> impl IntoResponse {

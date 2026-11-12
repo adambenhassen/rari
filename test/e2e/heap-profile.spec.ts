@@ -7,5 +7,6 @@ test('returns a jemalloc heap profile as pprof bytes', async ({ request }) => {
 
   expect(response.status()).toBe(200)
   expect(response.headers()['content-type']).toBe('application/octet-stream')
+  expect(response.headers()['cache-control']).toBe('no-store')
   expect((await response.body()).byteLength).toBeGreaterThan(0)
 })
