@@ -9,7 +9,7 @@ pub use constants::*;
 pub use core::{LayoutHtmlCache, LayoutRenderer};
 pub use route_composer::{LayoutInfo, RouteComposer};
 pub use types::*;
-pub use utils::create_layout_context;
+pub use utils::{create_layout_context, create_page_props};
 
 #[cfg(test)]
 #[allow(clippy::disallowed_methods)]
@@ -56,6 +56,7 @@ mod tests {
             search_params: search_params.clone(),
             headers: FxHashMap::default(),
             pathname: "/test".to_string(),
+            page_data_props: None,
             metadata: None,
         };
 
@@ -173,6 +174,7 @@ mod tests {
             search_params: FxHashMap::default(),
             headers: FxHashMap::default(),
             pathname: "/test".to_string(),
+            page_data_props: None,
             metadata: None,
         };
 
@@ -217,6 +219,7 @@ mod tests {
             search_params: FxHashMap::default(),
             headers: FxHashMap::default(),
             pathname: "/test".to_string(),
+            page_data_props: None,
             metadata: None,
         };
 
@@ -340,6 +343,7 @@ mod tests {
             search_params: FxHashMap::default(),
             headers: FxHashMap::default(),
             pathname: "/test".to_string(),
+            page_data_props: None,
             metadata: None,
         };
 
@@ -382,6 +386,7 @@ mod tests {
             search_params: FxHashMap::default(),
             headers: FxHashMap::default(),
             pathname: "/test".to_string(),
+            page_data_props: None,
             metadata: None,
         };
 
@@ -428,6 +433,7 @@ mod tests {
             search_params: FxHashMap::default(),
             headers: FxHashMap::default(),
             pathname: "/test".to_string(),
+            page_data_props: None,
             metadata: None,
         };
 
@@ -474,6 +480,7 @@ mod tests {
             search_params: FxHashMap::default(),
             headers: FxHashMap::default(),
             pathname: "/test".to_string(),
+            page_data_props: None,
             metadata: None,
         };
 
@@ -526,6 +533,7 @@ mod tests {
             search_params: FxHashMap::default(),
             headers: FxHashMap::default(),
             pathname: "/test".to_string(),
+            page_data_props: None,
             metadata: None,
         };
 
@@ -580,6 +588,7 @@ mod tests {
             search_params: FxHashMap::default(),
             headers: FxHashMap::default(),
             pathname: "/test".to_string(),
+            page_data_props: None,
             metadata: None,
         };
 
@@ -625,6 +634,7 @@ mod tests {
             search_params: FxHashMap::default(),
             headers: FxHashMap::default(),
             pathname: "/test".to_string(),
+            page_data_props: None,
             metadata: None,
         };
 
@@ -676,6 +686,7 @@ mod tests {
             search_params: FxHashMap::default(),
             headers: FxHashMap::default(),
             pathname: "/test".to_string(),
+            page_data_props: None,
             metadata: None,
         };
 
@@ -722,6 +733,7 @@ mod tests {
             search_params: FxHashMap::default(),
             headers: FxHashMap::default(),
             pathname: "/test".to_string(),
+            page_data_props: None,
             metadata: None,
         };
 

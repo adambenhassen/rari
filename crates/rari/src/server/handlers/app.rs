@@ -1,6 +1,6 @@
 use crate::rsc::rendering::html::{RscHtmlRenderer, RscToHtmlConverter};
 use crate::rsc::rendering::layout::types::PageMetadata;
-use crate::rsc::rendering::layout::{LayoutRenderContext, LayoutRenderer};
+use crate::rsc::rendering::layout::{LayoutRenderContext, LayoutRenderer, create_page_props};
 use crate::server::ServerState;
 use crate::server::cache::response;
 use crate::server::compression::CompressionEncoding;
@@ -232,6 +232,14 @@ async fn collect_page_metadata(
     let runtime = renderer.runtime.clone();
     drop(renderer);
 
+    let page_props = match create_page_props(route_match, context) {
+        Ok(props) => props,
+        Err(e) => {
+            error!("Failed to create page props for metadata collection: {}", e);
+            return None;
+        }
+    };
+
     match runtime
         .collect_metadata(
             request_context,
@@ -239,6 +247,7 @@ async fn collect_page_metadata(
             page_path.clone(),
             context.params.clone(),
             context.search_params.clone(),
+            page_props,
         )
         .await
     {
@@ -1049,13 +1058,18 @@ pub async fn handle_app_route(
         LayoutRenderer::with_shared_cache(state.renderer.clone(), state.layout_html_cache.clone());
 
     if route_match.not_found.is_none() && route_match.route.is_dynamic {
-        match layout_renderer.check_page_not_found(&route_match, &context).await {
-            Ok(true) => {
-                if let Some(not_found_entry) = app_router.find_not_found(&route_match.route.path) {
-                    route_match.not_found = Some(not_found_entry);
+        match layout_renderer.get_page_data(&route_match, &context).await {
+            Ok(page_data) => {
+                if page_data.not_found {
+                    if let Some(not_found_entry) =
+                        app_router.find_not_found(&route_match.route.path)
+                    {
+                        route_match.not_found = Some(not_found_entry);
+                    }
+                } else {
+                    context.page_data_props = page_data.props;
                 }
             }
-            Ok(false) => {}
             Err(e) => {
                 error!("Failed to check if page is not found: {}", e);
             }

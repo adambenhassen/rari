@@ -127,6 +127,7 @@ fn create_warmup_context(
         search_params: FxHashMap::default(),
         headers: FxHashMap::default(),
         pathname: route_match.pathname.clone(),
+        page_data_props: None,
         metadata: None,
     }
 }

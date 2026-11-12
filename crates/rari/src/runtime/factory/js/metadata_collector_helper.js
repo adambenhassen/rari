@@ -5,10 +5,11 @@ const FILE_URL_REGEX = /^file:\/\/.*\/app\//
 const JS_EXTENSION_REGEX = /\.js$/
 
 globalThis['~rari'].metadataCollector = {
-  async collect(layoutPaths, pagePath, params, searchParams) {
+  async collect(layoutPaths, pagePath, params, searchParams, pageProps) {
     const metadataList = []
+    const routeProps = { params, searchParams }
 
-    async function extractMetadata(modulePath, params, searchParams) {
+    async function extractMetadata(modulePath, props) {
       try {
         if (globalThis['~rsc'] && typeof globalThis['~rsc'].modules !== 'undefined') {
           const moduleKey = modulePath.replace(FILE_URL_REGEX, 'app/').replace(JS_EXTENSION_REGEX, '')
@@ -17,7 +18,7 @@ globalThis['~rari'].metadataCollector = {
 
           if (module) {
             if (typeof module.generateMetadata === 'function') {
-              const result = await module.generateMetadata({ params, searchParams })
+              const result = await module.generateMetadata(props)
               if (result && typeof result === 'object')
                 return result
             }
@@ -30,7 +31,7 @@ globalThis['~rari'].metadataCollector = {
         const module = await import(modulePath)
 
         if (typeof module.generateMetadata === 'function') {
-          const result = await module.generateMetadata({ params, searchParams })
+          const result = await module.generateMetadata(props)
           if (result && typeof result === 'object')
             return result
         }
@@ -48,11 +49,11 @@ globalThis['~rari'].metadataCollector = {
 
     const validLayoutPaths = Array.isArray(layoutPaths) ? layoutPaths : []
     for (const layoutPath of validLayoutPaths) {
-      const layoutMetadata = await extractMetadata(layoutPath, params, searchParams)
+      const layoutMetadata = await extractMetadata(layoutPath, routeProps)
       metadataList.push(layoutMetadata)
     }
 
-    const pageMetadata = await extractMetadata(pagePath, params, searchParams)
+    const pageMetadata = await extractMetadata(pagePath, pageProps || routeProps)
     metadataList.push(pageMetadata)
 
     return metadataList

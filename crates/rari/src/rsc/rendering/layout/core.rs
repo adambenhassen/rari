@@ -253,11 +253,11 @@ impl LayoutRenderer {
         Ok(RenderResult::Static(html))
     }
 
-    pub async fn check_page_not_found(
+    pub async fn get_page_data(
         &self,
         route_match: &AppRouteMatch,
         context: &LayoutRenderContext,
-    ) -> Result<bool, RariError> {
+    ) -> Result<PageDataResult, RariError> {
         let page_props = utils::create_page_props(route_match, context)?;
         let page_props_json = serde_json::to_string(&page_props)?;
 
@@ -304,7 +304,7 @@ impl LayoutRenderer {
 
         let base_path = match dist_server_path {
             Some(path) => path,
-            None => return Ok(false),
+            None => return Ok(PageDataResult { not_found: false, props: None }),
         };
 
         let page_file_path = component_dist_path(
@@ -314,7 +314,7 @@ impl LayoutRenderer {
         );
 
         if !page_file_path.exists() {
-            return Ok(false);
+            return Ok(PageDataResult { not_found: false, props: None });
         }
 
         let page_path = path_to_file_url(&page_file_path);
@@ -328,13 +328,17 @@ impl LayoutRenderer {
                     if (typeof module.getData === 'function') {{
                         const pageProps = {};
                         const result = await module.getData(pageProps);
-                        return {{ notFound: result?.notFound === true }};
+                        const props = result?.props;
+                        return {{
+                            notFound: result?.notFound === true,
+                            props: props && typeof props === 'object' && !Array.isArray(props) ? props : null
+                        }};
                     }}
 
-                    return {{ notFound: false }};
+                    return {{ notFound: false, props: null }};
                 }} catch (error) {{
-                    console.error('[check_page_not_found] Error:', error);
-                    return {{ notFound: false }};
+                    console.error('[get_page_data] Error:', error);
+                    return {{ notFound: false, props: null }};
                 }}
             }})()
             "#,
@@ -345,11 +349,12 @@ impl LayoutRenderer {
         let runtime = renderer.runtime.clone();
         drop(renderer);
 
-        let result = runtime.execute_script("check_not_found".to_string(), check_script).await?;
+        let result = runtime.execute_script("get_page_data".to_string(), check_script).await?;
 
         let not_found = result.get("notFound").and_then(|v| v.as_bool()).unwrap_or(false);
+        let props = result.get("props").filter(|props| props.is_object()).cloned();
 
-        Ok(not_found)
+        Ok(PageDataResult { not_found, props })
     }
 
     pub async fn render_route(
