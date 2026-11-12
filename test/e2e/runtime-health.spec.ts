@@ -12,7 +12,9 @@ test('runtime health checks execute the JavaScript runtime', async ({ request })
 
 test('runtime health reports unavailable when the executor is occupied', async ({ request }) => {
   const blocker = request.get('/runtime-health-blocker?block=1')
-  await new Promise(resolve => setTimeout(resolve, 200))
+  await new Promise<void>(resolve => {
+    setTimeout(resolve, 200)
+  })
 
   const response = await request.get('/_rari/health/runtime?timeout_ms=100')
 
