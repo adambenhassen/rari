@@ -387,13 +387,13 @@ fn mark_response_unavailable_for_request(
     retry_after_seconds: u64,
     request_id: &str,
 ) -> Result<(), JsErrorBox> {
-    let request_context = resolve_request_context(
-        op_state,
-        (!request_id.is_empty()).then_some(request_id),
-    )
-    .ok_or_else(|| {
-        JsErrorBox::generic("markResponseUnavailable can only be called during a server render")
-    })?;
+    let request_context =
+        resolve_request_context(op_state, (!request_id.is_empty()).then_some(request_id))
+            .ok_or_else(|| {
+                JsErrorBox::generic(
+                    "markResponseUnavailable can only be called during a server render",
+                )
+            })?;
 
     request_context.mark_response_unavailable(retry_after_seconds);
     Ok(())
