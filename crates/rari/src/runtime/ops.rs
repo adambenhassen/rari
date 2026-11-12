@@ -387,13 +387,11 @@ fn mark_response_unavailable_for_request(
     retry_after_seconds: u64,
     request_id: &str,
 ) -> Result<(), JsErrorBox> {
-    if request_id.is_empty() {
-        return Err(JsErrorBox::generic(
-            "markResponseUnavailable can only be called during a server render",
-        ));
-    }
-
-    let request_context = resolve_request_context(op_state, Some(request_id)).ok_or_else(|| {
+    let request_context = resolve_request_context(
+        op_state,
+        (!request_id.is_empty()).then_some(request_id),
+    )
+    .ok_or_else(|| {
         JsErrorBox::generic("markResponseUnavailable can only be called during a server render")
     })?;
 
@@ -970,15 +968,34 @@ mod tests {
     }
 
     #[test]
-    fn mark_response_unavailable_rejects_missing_request_id() {
+    fn mark_response_unavailable_rejects_missing_request_context() {
+        let op_state = OpState::new(None);
+        let result = mark_response_unavailable_for_request(&op_state, 17, "");
+
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn mark_response_unavailable_uses_active_context_without_request_id() {
         let runtime_context = Arc::new(RequestContext::new("/runtime".to_string()));
         let mut op_state = OpState::new(None);
         op_state.put(Arc::clone(&runtime_context));
 
         let result = mark_response_unavailable_for_request(&op_state, 17, "");
 
+        assert!(result.is_ok());
+        assert_eq!(runtime_context.response_unavailable_after(), Some(17));
+    }
+
+    #[test]
+    fn mark_response_unavailable_rejects_unknown_request_id() {
+        let runtime_context = Arc::new(RequestContext::new("/runtime".to_string()));
+        let mut op_state = OpState::new(None);
+        op_state.put(runtime_context);
+
+        let result = mark_response_unavailable_for_request(&op_state, 17, "unknown-request-id");
+
         assert!(result.is_err());
-        assert_eq!(runtime_context.response_unavailable_after(), None);
     }
 
     #[test]
