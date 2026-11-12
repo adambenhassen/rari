@@ -12,7 +12,11 @@ Object.defineProperty(globalThis, 'markResponseUnavailable', {
     /** @type {unknown} */
     const maybeRari = Reflect.get(globalThis, '~rari')
     const rari = hasCurrentRequestId(maybeRari) ? maybeRari : undefined
-    const requestId = rari?.currentRequestId() ?? ''
+    const requestId = rari?.currentRequestId()
+    if (!requestId) {
+      throw new Error('markResponseUnavailable can only be called during a server render')
+    }
+
     globalThis.Deno.core.ops.op_mark_response_unavailable(String(retryAfterSeconds), requestId)
   },
 })
