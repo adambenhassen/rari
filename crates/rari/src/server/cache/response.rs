@@ -836,6 +836,34 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn set_for_request_skips_marked_responses_and_stores_unmarked() {
+        let config =
+            CacheConfig { max_entries: 10, default_ttl: 60, enabled: true, ..Default::default() };
+        let cache = ResponseCache::new(config);
+
+        let marked_context = RequestContext::new("/maintenance".to_string());
+        marked_context.mark_response_unavailable(17);
+        cache
+            .set_for_request(
+                "marked-key".to_string(),
+                create_test_response("unavailable", 60),
+                &marked_context,
+            )
+            .await;
+        assert!(cache.get("marked-key").await.is_none());
+
+        let unmarked_context = RequestContext::new("/available".to_string());
+        cache
+            .set_for_request(
+                "unmarked-key".to_string(),
+                create_test_response("available", 60),
+                &unmarked_context,
+            )
+            .await;
+        assert!(cache.get("unmarked-key").await.is_some());
+    }
+
+    #[tokio::test]
     async fn test_cache_metrics_track_entries_hits_misses_and_bytes() {
         let config =
             CacheConfig { max_entries: 10, default_ttl: 60, enabled: true, ..Default::default() };
