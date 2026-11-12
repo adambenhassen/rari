@@ -130,6 +130,10 @@ impl RequestContext {
         self.response_cache_state.lock().writes_enabled = false;
     }
 
+    pub fn must_send_no_store(&self) -> bool {
+        !self.response_cache_state.lock().writes_enabled
+    }
+
     pub fn response_unavailable_after(&self) -> Option<u64> {
         self.response_cache_state.lock().unavailable_after
     }
@@ -379,8 +383,10 @@ mod tests {
     fn failed_request_disables_caching_without_marking_unavailable() {
         let ctx = RequestContext::new("/test".to_string());
 
+        assert!(!ctx.must_send_no_store());
         ctx.disable_cache_writes();
 
+        assert!(ctx.must_send_no_store());
         assert!(!ctx.response_cache_allowed());
         assert!(ctx.response_cache_write_guard().is_none());
         assert_eq!(ctx.response_unavailable_after(), None);

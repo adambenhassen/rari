@@ -85,10 +85,16 @@ test.describe('Dynamic Routes', () => {
 
         expect(firstResponse.status()).toBe(200)
         expect(secondResponse.status()).toBe(200)
+        expect(firstResponse.headers()['cache-control']).toBe('no-store')
+        expect(secondResponse.headers()['cache-control']).toBe('no-store')
         expect(firstResponse.headers()['x-cache']).not.toBe('HIT')
         expect(secondResponse.headers()['x-cache']).not.toBe('HIT')
         expect(firstBody.match(/data-testid="request-data-id">\d+</)).toBeNull()
         expect(secondBody.match(/data-testid="request-data-id">\d+</)).toBeNull()
+
+        const rscResponse = await request.get(url, { headers: { Accept: 'text/x-component' } })
+        expect(rscResponse.status()).toBe(200)
+        expect(rscResponse.headers()['cache-control']).toBe('no-store')
       }
     })
 

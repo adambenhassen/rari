@@ -950,6 +950,19 @@ pub async fn render_fallback_html(
         .expect("Valid HTML response"))
 }
 
+fn apply_request_no_store(
+    mut response: Response,
+    request_context: &crate::server::middleware::request_context::RequestContext,
+) -> Response {
+    if request_context.must_send_no_store() {
+        response.headers_mut().insert(
+            axum::http::header::CACHE_CONTROL,
+            axum::http::HeaderValue::from_static("no-store"),
+        );
+    }
+    response
+}
+
 #[axum::debug_handler]
 pub async fn handle_app_route(
     State(state): State<ServerState>,
@@ -1106,7 +1119,7 @@ pub async fn handle_app_route(
                     accept_encoding,
                 )
                 .await;
-                return result;
+                return result.map(|response| apply_request_no_store(response, &request_context));
             }
             let cache_key = response::ResponseCache::generate_cache_key_with_mode(
                 path,
@@ -1214,9 +1227,12 @@ pub async fn handle_app_route(
                             .await;
                     }
 
-                    Ok(response_builder
-                        .body(Body::from(rsc_wire_format))
-                        .expect("Valid RSC response"))
+                    Ok(apply_request_no_store(
+                        response_builder
+                            .body(Body::from(rsc_wire_format))
+                            .expect("Valid RSC response"),
+                        &request_context,
+                    ))
                 }
                 Err(e) => {
                     error!("Failed to render RSC: {}", e);
@@ -1327,14 +1343,17 @@ pub async fn handle_app_route(
             let use_streaming = should_use_streaming(&route_match, &state.config);
 
             if use_streaming {
-                let response = render_with_fallback(
-                    Arc::new(state.clone()),
-                    route_match.clone(),
-                    context.clone(),
-                    request_context.clone(),
-                    accept_encoding,
-                )
-                .await?;
+                let response = apply_request_no_store(
+                    render_with_fallback(
+                        Arc::new(state.clone()),
+                        route_match.clone(),
+                        context.clone(),
+                        request_context.clone(),
+                        accept_encoding,
+                    )
+                    .await?,
+                    &request_context,
+                );
 
                 if (response.status() == StatusCode::OK
                     || response.status() == StatusCode::NOT_FOUND)
@@ -1466,7 +1485,8 @@ pub async fn handle_app_route(
                 Err(e) => {
                     error!("Direct HTML rendering failed: {}, falling back to shell", e);
                     return render_fallback_html(&state, path, route_match.not_found.is_some())
-                        .await;
+                        .await
+                        .map(|response| apply_request_no_store(response, &request_context));
                 }
             };
 
@@ -1564,7 +1584,10 @@ pub async fn handle_app_route(
                                     path,
                                     route_match.not_found.is_some(),
                                 )
-                                .await;
+                                .await
+                                .map(|response| {
+                                    apply_request_no_store(response, &request_context)
+                                });
                             }
                         }
                     }
@@ -1631,7 +1654,10 @@ pub async fn handle_app_route(
                     .await;
             }
 
-            Ok(response_builder.body(Body::from(body_bytes)).expect("Valid HTML response"))
+            Ok(apply_request_no_store(
+                response_builder.body(Body::from(body_bytes)).expect("Valid HTML response"),
+                &request_context,
+            ))
         }
     }
 }
