@@ -90,5 +90,7 @@ jobs:
       - name: Install Playwright
         run: pnpm playwright install chromium --with-deps
 
-      - name: Test server response availability
-        run: pnpm exec playwright test test/e2e/server-response.spec.ts --project='Desktop Chrome' --workers=1
+      - name: Test response caching and getData props
+        run: |
+          pnpm exec playwright test test/e2e/server-response.spec.ts --project='Desktop Chrome' --workers=1
+          pnpm exec playwright test test/e2e/dynamic-routes.spec.ts --grep='getData props|does not cache a getData throw or invalid props|serves a cached response when getData fails' --project='Desktop Chrome' --workers=1

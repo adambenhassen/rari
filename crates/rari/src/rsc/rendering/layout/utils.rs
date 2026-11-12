@@ -89,12 +89,14 @@ pub fn create_page_props(
         serde_json::to_value(&context.search_params)?
     };
 
-    #[allow(clippy::disallowed_methods)]
-    let result = serde_json::json!({
-        "params": params_value,
-        "searchParams": search_params_value
-    });
-    Ok(result)
+    let mut props = serde_json::Map::new();
+    if let Some(Value::Object(data_props)) = &context.page_data_props {
+        props.extend(data_props.clone());
+    }
+    props.insert("params".to_string(), params_value);
+    props.insert("searchParams".to_string(), search_params_value);
+
+    Ok(Value::Object(props))
 }
 
 pub fn create_layout_context(
@@ -103,5 +105,12 @@ pub fn create_layout_context(
     headers: FxHashMap<String, String>,
     pathname: String,
 ) -> LayoutRenderContext {
-    LayoutRenderContext { params, search_params, headers, pathname, metadata: None }
+    LayoutRenderContext {
+        params,
+        search_params,
+        headers,
+        pathname,
+        page_data_props: None,
+        metadata: None,
+    }
 }

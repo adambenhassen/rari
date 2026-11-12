@@ -1,0 +1,31 @@
+import type { Metadata, PageProps } from 'rari'
+
+type DataPageProps = PageProps & { n: number }
+
+let nextId = 0
+const callsByCase = new Map<string, number>()
+
+export function getData({ searchParams }: PageProps) {
+  const failure = String(searchParams.getDataFailure)
+  if (failure === 'throw')
+    throw new Error('getData failed')
+  if (failure === 'array')
+    return { props: ['invalid'] }
+  if (failure === 'second-call') {
+    const caseKey = String(searchParams.case)
+    const callCount = callsByCase.get(caseKey) ?? 0
+    callsByCase.set(caseKey, callCount + 1)
+    if (callCount === 1) throw new Error('getData failed on second call')
+  }
+
+  return { props: { n: ++nextId } }
+}
+
+export async function generateMetadata({ n }: DataPageProps): Promise<Metadata> {
+  await new Promise(resolve => setTimeout(resolve, 25))
+  return { title: `Request data ${n}` }
+}
+
+export default function GetDataPropsPage({ n }: DataPageProps) {
+  return <p data-testid="request-data-id">{n}</p>
+}

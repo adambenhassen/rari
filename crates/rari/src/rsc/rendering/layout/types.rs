@@ -1,6 +1,7 @@
 use crate::rsc::rendering::streaming::RscStream;
 use crate::server::routing::types::ParamValue;
 use rustc_hash::FxHashMap;
+use serde_json::Value;
 
 #[derive(Debug, Clone)]
 pub struct LayoutRenderContext {
@@ -8,7 +9,15 @@ pub struct LayoutRenderContext {
     pub search_params: FxHashMap<String, Vec<String>>,
     pub headers: FxHashMap<String, String>,
     pub pathname: String,
+    pub page_data_props: Option<Value>,
     pub metadata: Option<PageMetadata>,
+}
+
+#[derive(Debug, Clone)]
+pub struct PageDataResult {
+    pub not_found: bool,
+    pub failed: bool,
+    pub props: Option<Value>,
 }
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]

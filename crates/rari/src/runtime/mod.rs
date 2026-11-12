@@ -142,6 +142,7 @@ impl JsExecutionRuntime {
         page_path: String,
         params: rustc_hash::FxHashMap<String, crate::server::routing::types::ParamValue>,
         search_params: rustc_hash::FxHashMap<String, Vec<String>>,
+        page_props: Value,
     ) -> Result<Value, RariError> {
         #[allow(clippy::disallowed_methods)]
         let data = json!({
@@ -149,6 +150,7 @@ impl JsExecutionRuntime {
             "pagePath": page_path,
             "params": params,
             "searchParams": search_params,
+            "pageProps": page_props,
         });
 
         let data_json =
@@ -165,7 +167,8 @@ impl JsExecutionRuntime {
                         data.layoutPaths,
                         data.pagePath,
                         data.params,
-                        data.searchParams
+                        data.searchParams,
+                        data.pageProps
                     )
                 );
             }})()"#,

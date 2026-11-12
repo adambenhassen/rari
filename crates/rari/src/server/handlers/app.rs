@@ -1,6 +1,6 @@
 use crate::rsc::rendering::html::{RscHtmlRenderer, RscToHtmlConverter};
 use crate::rsc::rendering::layout::types::PageMetadata;
-use crate::rsc::rendering::layout::{LayoutRenderContext, LayoutRenderer};
+use crate::rsc::rendering::layout::{LayoutRenderContext, LayoutRenderer, create_page_props};
 use crate::server::ServerState;
 use crate::server::cache::response;
 use crate::server::compression::CompressionEncoding;
@@ -232,6 +232,14 @@ async fn collect_page_metadata(
     let runtime = renderer.runtime.clone();
     drop(renderer);
 
+    let page_props = match create_page_props(route_match, context) {
+        Ok(props) => props,
+        Err(e) => {
+            error!("Failed to create page props for metadata collection: {}", e);
+            return None;
+        }
+    };
+
     match runtime
         .collect_metadata(
             request_context,
@@ -239,6 +247,7 @@ async fn collect_page_metadata(
             page_path.clone(),
             context.params.clone(),
             context.search_params.clone(),
+            page_props,
         )
         .await
     {
@@ -941,6 +950,19 @@ pub async fn render_fallback_html(
         .expect("Valid HTML response"))
 }
 
+fn apply_request_no_store(
+    mut response: Response,
+    request_context: &crate::server::middleware::request_context::RequestContext,
+) -> Response {
+    if request_context.must_send_no_store() {
+        response.headers_mut().insert(
+            axum::http::header::CACHE_CONTROL,
+            axum::http::HeaderValue::from_static("no-store"),
+        );
+    }
+    response
+}
+
 #[axum::debug_handler]
 pub async fn handle_app_route(
     State(state): State<ServerState>,
@@ -1049,15 +1071,29 @@ pub async fn handle_app_route(
         LayoutRenderer::with_shared_cache(state.renderer.clone(), state.layout_html_cache.clone());
 
     if route_match.not_found.is_none() && route_match.route.is_dynamic {
-        match layout_renderer.check_page_not_found(&route_match, &context).await {
-            Ok(true) => {
-                if let Some(not_found_entry) = app_router.find_not_found(&route_match.route.path) {
-                    route_match.not_found = Some(not_found_entry);
+        match layout_renderer.get_page_data(&route_match, &context).await {
+            Ok(page_data) => {
+                if page_data.failed {
+                    request_context.disable_cache_writes();
+                    error!(
+                        "getData failed for route '{}'; skipping render cache writes",
+                        route_match.route.path
+                    );
+                }
+
+                if page_data.not_found {
+                    if let Some(not_found_entry) =
+                        app_router.find_not_found(&route_match.route.path)
+                    {
+                        route_match.not_found = Some(not_found_entry);
+                    }
+                } else if !page_data.failed {
+                    context.page_data_props = page_data.props;
                 }
             }
-            Ok(false) => {}
             Err(e) => {
-                error!("Failed to check if page is not found: {}", e);
+                request_context.disable_cache_writes();
+                error!("Failed to get page data for route '{}': {}", route_match.route.path, e);
             }
         }
     }
@@ -1083,7 +1119,7 @@ pub async fn handle_app_route(
                     accept_encoding,
                 )
                 .await;
-                return result;
+                return result.map(|response| apply_request_no_store(response, &request_context));
             }
             let cache_key = response::ResponseCache::generate_cache_key_with_mode(
                 path,
@@ -1095,7 +1131,9 @@ pub async fn handle_app_route(
                 Some("rsc"),
             );
 
-            if let Some(cached) = state.response_cache.get(&cache_key).await {
+            if request_context.response_unavailable_after().is_none()
+                && let Some(cached) = state.response_cache.get(&cache_key).await
+            {
                 let status_code = if route_match.not_found.is_some() {
                     StatusCode::NOT_FOUND
                 } else {
@@ -1189,9 +1227,12 @@ pub async fn handle_app_route(
                             .await;
                     }
 
-                    Ok(response_builder
-                        .body(Body::from(rsc_wire_format))
-                        .expect("Valid RSC response"))
+                    Ok(apply_request_no_store(
+                        response_builder
+                            .body(Body::from(rsc_wire_format))
+                            .expect("Valid RSC response"),
+                        &request_context,
+                    ))
                 }
                 Err(e) => {
                     error!("Failed to render RSC: {}", e);
@@ -1211,7 +1252,9 @@ pub async fn handle_app_route(
 
             let client_etag = headers.get("if-none-match").and_then(|v| v.to_str().ok());
 
-            if let Some(cached) = state.response_cache.get(&cache_key).await {
+            if request_context.response_unavailable_after().is_none()
+                && let Some(cached) = state.response_cache.get(&cache_key).await
+            {
                 if let (Some(cached_etag), Some(client_etag)) = (&cached.metadata.etag, client_etag)
                     && cached_etag == client_etag
                 {
@@ -1300,14 +1343,17 @@ pub async fn handle_app_route(
             let use_streaming = should_use_streaming(&route_match, &state.config);
 
             if use_streaming {
-                let response = render_with_fallback(
-                    Arc::new(state.clone()),
-                    route_match.clone(),
-                    context.clone(),
-                    request_context.clone(),
-                    accept_encoding,
-                )
-                .await?;
+                let response = apply_request_no_store(
+                    render_with_fallback(
+                        Arc::new(state.clone()),
+                        route_match.clone(),
+                        context.clone(),
+                        request_context.clone(),
+                        accept_encoding,
+                    )
+                    .await?,
+                    &request_context,
+                );
 
                 if (response.status() == StatusCode::OK
                     || response.status() == StatusCode::NOT_FOUND)
@@ -1439,7 +1485,8 @@ pub async fn handle_app_route(
                 Err(e) => {
                     error!("Direct HTML rendering failed: {}, falling back to shell", e);
                     return render_fallback_html(&state, path, route_match.not_found.is_some())
-                        .await;
+                        .await
+                        .map(|response| apply_request_no_store(response, &request_context));
                 }
             };
 
@@ -1537,7 +1584,10 @@ pub async fn handle_app_route(
                                     path,
                                     route_match.not_found.is_some(),
                                 )
-                                .await;
+                                .await
+                                .map(|response| {
+                                    apply_request_no_store(response, &request_context)
+                                });
                             }
                         }
                     }
@@ -1604,7 +1654,10 @@ pub async fn handle_app_route(
                     .await;
             }
 
-            Ok(response_builder.body(Body::from(body_bytes)).expect("Valid HTML response"))
+            Ok(apply_request_no_store(
+                response_builder.body(Body::from(body_bytes)).expect("Valid HTML response"),
+                &request_context,
+            ))
         }
     }
 }

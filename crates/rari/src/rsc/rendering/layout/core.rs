@@ -214,7 +214,7 @@ impl LayoutRenderer {
         route_match: &AppRouteMatch,
         return_rsc_on_fallback: bool,
         request_context: Option<Arc<crate::server::middleware::request_context::RequestContext>>,
-        cache_key: u64,
+        cache_key: Option<u64>,
     ) -> Result<RenderResult, RariError> {
         let request_context_id = request_context.as_ref().map(|ctx| ctx.request_id());
         let rsc_wire_format =
@@ -243,7 +243,9 @@ impl LayoutRenderer {
         }
 
         // TTL 0 (max-age=0 route): the entry would be born expired; skip the write.
-        if !layout_cache_ttl(&route_match.pathname).is_zero() {
+        if let Some(cache_key) = cache_key
+            && !layout_cache_ttl(&route_match.pathname).is_zero()
+        {
             if let Some(request_context) = request_context.as_ref() {
                 self.html_cache.insert_for_request(cache_key, html.clone(), request_context);
             } else {
@@ -253,11 +255,11 @@ impl LayoutRenderer {
         Ok(RenderResult::Static(html))
     }
 
-    pub async fn check_page_not_found(
+    pub async fn get_page_data(
         &self,
         route_match: &AppRouteMatch,
         context: &LayoutRenderContext,
-    ) -> Result<bool, RariError> {
+    ) -> Result<PageDataResult, RariError> {
         let page_props = utils::create_page_props(route_match, context)?;
         let page_props_json = serde_json::to_string(&page_props)?;
 
@@ -304,7 +306,7 @@ impl LayoutRenderer {
 
         let base_path = match dist_server_path {
             Some(path) => path,
-            None => return Ok(false),
+            None => return Ok(PageDataResult { not_found: false, failed: false, props: None }),
         };
 
         let page_file_path = component_dist_path(
@@ -314,7 +316,7 @@ impl LayoutRenderer {
         );
 
         if !page_file_path.exists() {
-            return Ok(false);
+            return Ok(PageDataResult { not_found: false, failed: false, props: None });
         }
 
         let page_path = path_to_file_url(&page_file_path);
@@ -328,13 +330,24 @@ impl LayoutRenderer {
                     if (typeof module.getData === 'function') {{
                         const pageProps = {};
                         const result = await module.getData(pageProps);
-                        return {{ notFound: result?.notFound === true }};
+                        const props = result?.props;
+                        const propsInvalid = props != null &&
+                            (typeof props !== 'object' || Array.isArray(props));
+                        if (propsInvalid) {{
+                            console.warn('[get_page_data] Ignoring non-object or array getData props');
+                        }}
+                        return {{
+                            notFound: result?.notFound === true,
+                            props: propsInvalid ? null : (props ?? null),
+                            propsInvalid,
+                            failed: propsInvalid
+                        }};
                     }}
 
-                    return {{ notFound: false }};
+                    return {{ notFound: false, props: null, propsInvalid: false, failed: false }};
                 }} catch (error) {{
-                    console.error('[check_page_not_found] Error:', error);
-                    return {{ notFound: false }};
+                    console.error('[get_page_data] Error:', error);
+                    return {{ notFound: false, props: null, propsInvalid: false, failed: true }};
                 }}
             }})()
             "#,
@@ -345,11 +358,20 @@ impl LayoutRenderer {
         let runtime = renderer.runtime.clone();
         drop(renderer);
 
-        let result = runtime.execute_script("check_not_found".to_string(), check_script).await?;
+        let result = runtime.execute_script("get_page_data".to_string(), check_script).await?;
 
         let not_found = result.get("notFound").and_then(|v| v.as_bool()).unwrap_or(false);
+        let props_invalid = result.get("propsInvalid").and_then(|v| v.as_bool()).unwrap_or(false);
+        if props_invalid {
+            tracing::warn!(
+                "getData for route '{}' returned non-object props; ignoring them",
+                route_match.route.path
+            );
+        }
+        let failed = result.get("failed").and_then(|v| v.as_bool()).unwrap_or(false);
+        let props = result.get("props").filter(|props| props.is_object()).cloned();
 
-        Ok(not_found)
+        Ok(PageDataResult { not_found, failed, props })
     }
 
     pub async fn render_route(
@@ -438,11 +460,13 @@ impl LayoutRenderer {
         return_rsc_on_fallback: bool,
     ) -> Result<RenderResult, RariError> {
         let cache_key = utils::generate_cache_key(route_match, context);
+        let cache_html = context.page_data_props.is_none();
         let request_context_for_cache = request_context.clone();
         let response_is_cacheable =
             request_context_for_cache.as_ref().is_none_or(|ctx| ctx.response_cache_allowed());
 
-        if !return_rsc_on_fallback
+        if cache_html
+            && !return_rsc_on_fallback
             && response_is_cacheable
             && let Some(cached_html) =
                 self.html_cache.get(cache_key, layout_cache_ttl(&route_match.pathname))
@@ -513,7 +537,9 @@ if (typeof window !== 'undefined') {
                 format!("{}{}\n{}", html, payload_script, completion_script)
             };
 
-            if route_match.not_found.is_none() && !layout_cache_ttl(&route_match.pathname).is_zero()
+            if cache_html
+                && route_match.not_found.is_none()
+                && !layout_cache_ttl(&route_match.pathname).is_zero()
             {
                 if let Some(request_context) = request_context_for_cache.as_ref() {
                     self.html_cache.insert_for_request(cache_key, html.clone(), request_context);
@@ -637,7 +663,7 @@ if (typeof window !== 'undefined') {
                             route_match,
                             return_rsc_on_fallback,
                             Some(Arc::clone(&ctx)),
-                            cache_key,
+                            cache_html.then_some(cache_key),
                         )
                         .await
                     }
@@ -733,7 +759,7 @@ if (typeof window !== 'undefined') {
                                 route_match,
                                 return_rsc_on_fallback,
                                 request_context_for_cache.clone(),
-                                cache_key,
+                                cache_html.then_some(cache_key),
                             )
                             .await;
 
@@ -1109,10 +1135,10 @@ if (typeof window !== 'undefined') {
             JS_PAGE_RENDER_WITH_LOADING
                 .cow_replace("{page_component_id}", &page_component_id)
                 .cow_replace("{loading_id}", loading_id)
-                .cow_replace("{page_props_json}", &page_props_json)
                 .cow_replace("{use_suspense}", if use_suspense { "true" } else { "false" })
                 .cow_replace("{route_file_path}", &route_match.route.file_path)
                 .cow_replace("{loading_file_path}", loading_file_path)
+                .cow_replace("{page_props_json}", &page_props_json)
                 .into_owned()
         } else {
             JS_PAGE_RENDER_SIMPLE

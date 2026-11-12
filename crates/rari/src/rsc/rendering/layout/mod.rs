@@ -9,7 +9,7 @@ pub use constants::*;
 pub use core::{LayoutHtmlCache, LayoutRenderer};
 pub use route_composer::{LayoutInfo, RouteComposer};
 pub use types::*;
-pub use utils::create_layout_context;
+pub use utils::{create_layout_context, create_page_props};
 
 #[cfg(test)]
 #[allow(clippy::disallowed_methods)]
@@ -56,6 +56,7 @@ mod tests {
             search_params: search_params.clone(),
             headers: FxHashMap::default(),
             pathname: "/test".to_string(),
+            page_data_props: None,
             metadata: None,
         };
 
@@ -82,6 +83,53 @@ mod tests {
         let props = utils::create_page_props(&route_match, &context).unwrap();
         assert!(props.get("params").is_some());
         assert!(props.get("searchParams").is_some());
+    }
+
+    #[test]
+    fn test_create_page_props_keeps_route_values_over_data_props() {
+        let route_params = FxHashMap::from_iter([(
+            "id".to_string(),
+            ParamValue::Single("route-value".to_string()),
+        )]);
+        let search_params =
+            FxHashMap::from_iter([("q".to_string(), vec!["route-query".to_string()])]);
+        let context = LayoutRenderContext {
+            params: route_params.clone(),
+            search_params,
+            headers: FxHashMap::default(),
+            pathname: "/test/route-value".to_string(),
+            page_data_props: Some(serde_json::json!({
+                "params": "getData-value",
+                "searchParams": "getData-query",
+                "n": 1,
+            })),
+            metadata: None,
+        };
+        let route_match = AppRouteMatch {
+            route: crate::server::routing::app_router::AppRouteEntry {
+                path: "/test/[id]".to_string(),
+                file_path: "app/test/[id]/page.tsx".to_string(),
+                component_id: None,
+                css: vec![],
+                segments: vec![],
+                params: vec!["id".to_string()],
+                is_dynamic: true,
+                static_params: None,
+            },
+            params: route_params,
+            layouts: vec![],
+            loading: None,
+            error: None,
+            not_found: None,
+            templates: vec![],
+            pathname: "/test/route-value".to_string(),
+        };
+
+        let props = utils::create_page_props(&route_match, &context).unwrap();
+
+        assert_eq!(props["params"]["id"], "route-value");
+        assert_eq!(props["searchParams"]["q"][0], "route-query");
+        assert_eq!(props["n"], 1);
     }
 
     #[test]
@@ -173,6 +221,9 @@ mod tests {
             search_params: FxHashMap::default(),
             headers: FxHashMap::default(),
             pathname: "/test".to_string(),
+            page_data_props: Some(serde_json::json!({
+                "literal": "{use_suspense} {route_file_path} {loading_file_path}"
+            })),
             metadata: None,
         };
 
@@ -181,6 +232,9 @@ mod tests {
             .unwrap();
 
         assert!(script.contains("const useSuspense = true"));
+        assert!(
+            script.contains(r#""literal":"{use_suspense} {route_file_path} {loading_file_path}""#)
+        );
         assert!(
             script.contains("const isAsync = PageComponent.constructor.name === 'AsyncFunction'")
         );
@@ -217,6 +271,7 @@ mod tests {
             search_params: FxHashMap::default(),
             headers: FxHashMap::default(),
             pathname: "/test".to_string(),
+            page_data_props: None,
             metadata: None,
         };
 
@@ -340,6 +395,7 @@ mod tests {
             search_params: FxHashMap::default(),
             headers: FxHashMap::default(),
             pathname: "/test".to_string(),
+            page_data_props: None,
             metadata: None,
         };
 
@@ -382,6 +438,7 @@ mod tests {
             search_params: FxHashMap::default(),
             headers: FxHashMap::default(),
             pathname: "/test".to_string(),
+            page_data_props: None,
             metadata: None,
         };
 
@@ -428,6 +485,7 @@ mod tests {
             search_params: FxHashMap::default(),
             headers: FxHashMap::default(),
             pathname: "/test".to_string(),
+            page_data_props: None,
             metadata: None,
         };
 
@@ -474,6 +532,7 @@ mod tests {
             search_params: FxHashMap::default(),
             headers: FxHashMap::default(),
             pathname: "/test".to_string(),
+            page_data_props: None,
             metadata: None,
         };
 
@@ -526,6 +585,7 @@ mod tests {
             search_params: FxHashMap::default(),
             headers: FxHashMap::default(),
             pathname: "/test".to_string(),
+            page_data_props: None,
             metadata: None,
         };
 
@@ -580,6 +640,7 @@ mod tests {
             search_params: FxHashMap::default(),
             headers: FxHashMap::default(),
             pathname: "/test".to_string(),
+            page_data_props: None,
             metadata: None,
         };
 
@@ -625,6 +686,7 @@ mod tests {
             search_params: FxHashMap::default(),
             headers: FxHashMap::default(),
             pathname: "/test".to_string(),
+            page_data_props: None,
             metadata: None,
         };
 
@@ -676,6 +738,7 @@ mod tests {
             search_params: FxHashMap::default(),
             headers: FxHashMap::default(),
             pathname: "/test".to_string(),
+            page_data_props: None,
             metadata: None,
         };
 
@@ -722,6 +785,7 @@ mod tests {
             search_params: FxHashMap::default(),
             headers: FxHashMap::default(),
             pathname: "/test".to_string(),
+            page_data_props: None,
             metadata: None,
         };
 
