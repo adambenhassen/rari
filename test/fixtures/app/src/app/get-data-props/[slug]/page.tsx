@@ -3,12 +3,20 @@ import type { Metadata, PageProps } from 'rari'
 type DataPageProps = PageProps & { n: number }
 
 let nextId = 0
+const callsByCase = new Map<string, number>()
 
 export function getData({ searchParams }: PageProps) {
-  if (String(searchParams.getDataFailure) === 'throw')
+  const failure = String(searchParams.getDataFailure)
+  if (failure === 'throw')
     throw new Error('getData failed')
-  if (String(searchParams.getDataFailure) === 'array')
+  if (failure === 'array')
     return { props: ['invalid'] }
+  if (failure === 'second-call') {
+    const caseKey = String(searchParams.case)
+    const callCount = callsByCase.get(caseKey) ?? 0
+    callsByCase.set(caseKey, callCount + 1)
+    if (callCount === 1) throw new Error('getData failed on second call')
+  }
 
   return { props: { n: ++nextId } }
 }

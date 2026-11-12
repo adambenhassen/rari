@@ -98,6 +98,22 @@ test.describe('Dynamic Routes', () => {
       }
     })
 
+    test('serves a cached response when getData fails on the next request', async ({ request }) => {
+      const cacheCase = `second-call-${Date.now()}-${Math.random()}`
+      const url = `/get-data-props/article?getDataFailure=second-call&case=${cacheCase}`
+      const firstResponse = await request.get(url)
+      const firstBody = await firstResponse.text()
+      const secondResponse = await request.get(url)
+      const secondBody = await secondResponse.text()
+
+      expect(firstResponse.status()).toBe(200)
+      expect(firstResponse.headers()['x-cache']).toBe('MISS')
+      expect(firstBody.match(/data-testid="request-data-id">\d+</)).not.toBeNull()
+      expect(secondResponse.status()).toBe(200)
+      expect(secondResponse.headers()['x-cache']).toBe('HIT')
+      expect(secondBody).toBe(firstBody)
+    })
+
     test('should render dynamic route with slug parameter', async ({ page }) => {
       await page.goto('/blog/hello-world')
 

@@ -1131,7 +1131,7 @@ pub async fn handle_app_route(
                 Some("rsc"),
             );
 
-            if request_context.response_cache_allowed()
+            if request_context.response_unavailable_after().is_none()
                 && let Some(cached) = state.response_cache.get(&cache_key).await
             {
                 let status_code = if route_match.not_found.is_some() {
@@ -1252,7 +1252,7 @@ pub async fn handle_app_route(
 
             let client_etag = headers.get("if-none-match").and_then(|v| v.to_str().ok());
 
-            if request_context.response_cache_allowed()
+            if request_context.response_unavailable_after().is_none()
                 && let Some(cached) = state.response_cache.get(&cache_key).await
             {
                 if let (Some(cached_etag), Some(client_etag)) = (&cached.metadata.etag, client_etag)
