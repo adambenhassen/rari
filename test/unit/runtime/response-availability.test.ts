@@ -11,14 +11,23 @@ afterEach(() => {
 })
 
 describe('markResponseUnavailable', () => {
-  it('rejects a mark when no current request id is available', () => {
+  it('passes an empty request id to the runtime context resolver', () => {
     const op = vi.fn()
     vi.stubGlobal('Deno', { core: { ops: { op_mark_response_unavailable: op } } })
     vi.stubGlobal('~rari', { currentRequestId: () => '' })
 
-    expect(() => {
-      markResponseUnavailable()
-    }).toThrow('markResponseUnavailable can only be called during a server render')
-    expect(op).not.toHaveBeenCalled()
+    markResponseUnavailable()
+
+    expect(op).toHaveBeenCalledWith('60', '')
+  })
+
+  it('rejects a mark when the runtime op is unavailable', () => {
+    vi.stubGlobal('Deno', { core: { ops: { op_mark_response_unavailable: undefined } } })
+    vi.stubGlobal('~rari', { currentRequestId: () => 'request-id' })
+
+    expect(() => markResponseUnavailable()).toThrow(TypeError)
+    expect(() => markResponseUnavailable()).toThrow(
+      'markResponseUnavailable can only be called during a server render',
+    )
   })
 })
