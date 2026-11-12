@@ -348,7 +348,7 @@ pub async fn metrics_handler(State(state): State<ServerState>) -> impl IntoRespo
 mod tests {
     use super::*;
 
-    fn assert_denied(response: Response, status: StatusCode) {
+    fn assert_denied(response: &Response, status: StatusCode) {
         assert_eq!(response.status(), status);
         assert!(
             response.headers().get(header::CACHE_CONTROL).is_some_and(|value| value == "no-store")
@@ -360,7 +360,7 @@ mod tests {
         let response = heap_dump_authorization_error(&HeaderMap::new(), None)
             .expect("missing profiling token denies access");
 
-        assert_denied(response, StatusCode::FORBIDDEN);
+        assert_denied(&response, StatusCode::FORBIDDEN);
     }
 
     #[test]
@@ -368,13 +368,13 @@ mod tests {
         let token = "test-token";
         let missing = heap_dump_authorization_error(&HeaderMap::new(), Some(token))
             .expect("missing request token denies access");
-        assert_denied(missing, StatusCode::UNAUTHORIZED);
+        assert_denied(&missing, StatusCode::UNAUTHORIZED);
 
         let mut headers = HeaderMap::new();
         headers.insert("x-rari-profiling-token", HeaderValue::from_static("wrong-token"));
         let invalid = heap_dump_authorization_error(&headers, Some(token))
             .expect("invalid request token denies access");
-        assert_denied(invalid, StatusCode::UNAUTHORIZED);
+        assert_denied(&invalid, StatusCode::UNAUTHORIZED);
 
         headers.insert("x-rari-profiling-token", HeaderValue::from_static(token));
         assert!(heap_dump_authorization_error(&headers, Some(token)).is_none());
