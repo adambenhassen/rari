@@ -272,12 +272,12 @@ fn heap_dump_authorization_error(headers: &HeaderMap, token: Option<&str>) -> Op
                 .get("x-rari-profiling-token")
                 .and_then(|value| value.to_str().ok())
                 .unwrap_or_default();
-            if provided.as_bytes() != token.as_bytes() {
+            if provided.as_bytes() == token.as_bytes() {
+                None
+            } else {
                 Some(no_store(
                     (StatusCode::UNAUTHORIZED, "invalid profiling token").into_response(),
                 ))
-            } else {
-                None
             }
         }
         _ => Some(no_store(
