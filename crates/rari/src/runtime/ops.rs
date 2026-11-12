@@ -379,6 +379,12 @@ pub fn op_mark_response_unavailable(
     let retry_after_seconds = retry_after_seconds
         .parse::<u64>()
         .map_err(|_| JsErrorBox::type_error("retry-after must be a non-negative integer"))?;
+    if request_id.is_empty() {
+        return Err(JsErrorBox::generic(
+            "markResponseUnavailable can only be called during a server render",
+        ));
+    }
+
     let op_state_ref = state.borrow();
     let request_context = resolve_request_context(&op_state_ref, Some(request_id.as_str()))
         .ok_or_else(|| {
@@ -955,6 +961,19 @@ mod tests {
         assert!(stream_state.get_sender(stream_id).is_some());
         assert!(stream_state.take_sender(stream_id).is_some());
         assert!(stream_state.get_sender(stream_id).is_none());
+    }
+
+    #[test]
+    fn mark_response_unavailable_rejects_missing_request_id() {
+        let runtime_context = Arc::new(RequestContext::new("/runtime".to_string()));
+        let mut op_state = OpState::new(None);
+        op_state.put(Arc::clone(&runtime_context));
+        let state = Rc::new(RefCell::new(op_state));
+
+        let result = op_mark_response_unavailable(state, "17".to_string(), String::new());
+
+        assert!(result.is_err());
+        assert_eq!(runtime_context.response_unavailable_after(), None);
     }
 
     #[test]
