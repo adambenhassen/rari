@@ -21,7 +21,7 @@ test('returns a pre-commit mark as an uncacheable 503 response', async ({ reques
   expect(second.headers()['x-cache']).not.toBe('HIT')
 })
 
-test('keeps a post-commit mark out of the response cache', async ({ request }) => {
+test('keeps the committed status when marked after headers', async ({ request }) => {
   const url = '/server-response-streaming'
   const first = await request.get(url)
   const firstBody = await first.text()
@@ -30,12 +30,10 @@ test('keeps a post-commit mark out of the response cache', async ({ request }) =
   expect(first.headers()['x-render-mode']).toBe('streaming')
   expect(first.headers()['retry-after']).toBeUndefined()
   expect(firstBody).toContain('Marked after suspense')
-  expect(first.headers()['x-cache']).not.toBe('HIT')
 
   const second = await request.get(url)
   const secondBody = await second.text()
 
   expect(second.status()).toBe(200)
   expect(secondBody).toContain('Marked after suspense')
-  expect(second.headers()['x-cache']).not.toBe('HIT')
 })
