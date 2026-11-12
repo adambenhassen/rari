@@ -306,7 +306,7 @@ impl LayoutRenderer {
 
         let base_path = match dist_server_path {
             Some(path) => path,
-            None => return Ok(PageDataResult { not_found: false, props: None }),
+            None => return Ok(PageDataResult { not_found: false, failed: false, props: None }),
         };
 
         let page_file_path = component_dist_path(
@@ -316,7 +316,7 @@ impl LayoutRenderer {
         );
 
         if !page_file_path.exists() {
-            return Ok(PageDataResult { not_found: false, props: None });
+            return Ok(PageDataResult { not_found: false, failed: false, props: None });
         }
 
         let page_path = path_to_file_url(&page_file_path);
@@ -331,16 +331,23 @@ impl LayoutRenderer {
                         const pageProps = {};
                         const result = await module.getData(pageProps);
                         const props = result?.props;
+                        const propsInvalid = props != null &&
+                            (typeof props !== 'object' || Array.isArray(props));
+                        if (propsInvalid) {{
+                            console.warn('[get_page_data] Ignoring non-object or array getData props');
+                        }}
                         return {{
                             notFound: result?.notFound === true,
-                            props: props && typeof props === 'object' && !Array.isArray(props) ? props : null
+                            props: propsInvalid ? null : (props ?? null),
+                            propsInvalid,
+                            failed: propsInvalid
                         }};
                     }}
 
-                    return {{ notFound: false, props: null }};
+                    return {{ notFound: false, props: null, propsInvalid: false, failed: false }};
                 }} catch (error) {{
                     console.error('[get_page_data] Error:', error);
-                    return {{ notFound: false, props: null }};
+                    return {{ notFound: false, props: null, propsInvalid: false, failed: true }};
                 }}
             }})()
             "#,
@@ -354,9 +361,17 @@ impl LayoutRenderer {
         let result = runtime.execute_script("get_page_data".to_string(), check_script).await?;
 
         let not_found = result.get("notFound").and_then(|v| v.as_bool()).unwrap_or(false);
+        let props_invalid = result.get("propsInvalid").and_then(|v| v.as_bool()).unwrap_or(false);
+        if props_invalid {
+            tracing::warn!(
+                "getData for route '{}' returned non-object props; ignoring them",
+                route_match.route.path
+            );
+        }
+        let failed = result.get("failed").and_then(|v| v.as_bool()).unwrap_or(false);
         let props = result.get("props").filter(|props| props.is_object()).cloned();
 
-        Ok(PageDataResult { not_found, props })
+        Ok(PageDataResult { not_found, failed, props })
     }
 
     pub async fn render_route(
@@ -1120,10 +1135,10 @@ if (typeof window !== 'undefined') {
             JS_PAGE_RENDER_WITH_LOADING
                 .cow_replace("{page_component_id}", &page_component_id)
                 .cow_replace("{loading_id}", loading_id)
-                .cow_replace("{page_props_json}", &page_props_json)
                 .cow_replace("{use_suspense}", if use_suspense { "true" } else { "false" })
                 .cow_replace("{route_file_path}", &route_match.route.file_path)
                 .cow_replace("{loading_file_path}", loading_file_path)
+                .cow_replace("{page_props_json}", &page_props_json)
                 .into_owned()
         } else {
             JS_PAGE_RENDER_SIMPLE

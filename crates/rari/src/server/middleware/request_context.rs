@@ -75,7 +75,7 @@ pub struct RequestContext {
     request_id: String,
     start_time: Instant,
     route_path: String,
-    response_unavailable_after: Mutex<Option<u64>>,
+    response_cache_state: Mutex<ResponseCacheState>,
     pub cookie_header: Option<String>,
     pub pending_cookies: Arc<DashMap<PendingCookieKey, PendingCookie>>,
     pub function_cache: Arc<DashMap<String, JsonValue>>,
@@ -83,7 +83,12 @@ pub struct RequestContext {
 
 #[must_use = "hold this guard until the cache insertion is complete"]
 pub struct ResponseCacheWriteGuard<'a> {
-    _unavailable_after: MutexGuard<'a, Option<u64>>,
+    _state: MutexGuard<'a, ResponseCacheState>,
+}
+
+struct ResponseCacheState {
+    writes_enabled: bool,
+    unavailable_after: Option<u64>,
 }
 
 impl RequestContext {
@@ -94,7 +99,10 @@ impl RequestContext {
             request_id: Uuid::new_v4().to_string(),
             start_time: Instant::now(),
             route_path,
-            response_unavailable_after: Mutex::new(None),
+            response_cache_state: Mutex::new(ResponseCacheState {
+                writes_enabled: true,
+                unavailable_after: None,
+            }),
             cookie_header: None,
             pending_cookies: Arc::new(DashMap::new()),
             function_cache: Arc::new(DashMap::new()),
@@ -115,26 +123,29 @@ impl RequestContext {
     }
 
     pub fn mark_response_unavailable(&self, retry_after_seconds: u64) {
-        self.response_unavailable_after.lock().get_or_insert(retry_after_seconds);
+        self.response_cache_state.lock().unavailable_after.get_or_insert(retry_after_seconds);
+    }
+
+    pub fn disable_cache_writes(&self) {
+        self.response_cache_state.lock().writes_enabled = false;
     }
 
     pub fn response_unavailable_after(&self) -> Option<u64> {
-        *self.response_unavailable_after.lock()
+        self.response_cache_state.lock().unavailable_after
     }
 
-    /// Marked renders must not enter a response cache, even when a deferred
-    /// Suspense render marks the request after the response status is chosen.
+    /// Unavailable or failed requests must not read or write render caches.
     pub fn response_cache_allowed(&self) -> bool {
-        self.response_unavailable_after().is_none()
+        let state = self.response_cache_state.lock();
+        state.writes_enabled && state.unavailable_after.is_none()
     }
 
-    /// Hold the marker state while a response cache insertion is committed.
-    /// This avoids running an arbitrary closure while holding the non-reentrant
-    /// marker lock.
+    /// Hold the cache state while an insertion is committed so a request
+    /// cannot become uncacheable between validation and insertion.
     pub fn response_cache_write_guard(&self) -> Option<ResponseCacheWriteGuard<'_>> {
-        let unavailable_after = self.response_unavailable_after.lock();
-        if unavailable_after.is_none() {
-            Some(ResponseCacheWriteGuard { _unavailable_after: unavailable_after })
+        let state = self.response_cache_state.lock();
+        if state.writes_enabled && state.unavailable_after.is_none() {
+            Some(ResponseCacheWriteGuard { _state: state })
         } else {
             None
         }
@@ -362,6 +373,17 @@ mod tests {
         ctx.mark_response_unavailable(23);
 
         assert!(ctx.response_cache_write_guard().is_none());
+    }
+
+    #[test]
+    fn failed_request_disables_caching_without_marking_unavailable() {
+        let ctx = RequestContext::new("/test".to_string());
+
+        ctx.disable_cache_writes();
+
+        assert!(!ctx.response_cache_allowed());
+        assert!(ctx.response_cache_write_guard().is_none());
+        assert_eq!(ctx.response_unavailable_after(), None);
     }
 
     #[test]

@@ -4,7 +4,12 @@ type DataPageProps = PageProps & { n: number }
 
 let nextId = 0
 
-export function getData() {
+export function getData({ searchParams }: PageProps) {
+  if (String(searchParams.getDataFailure) === 'throw')
+    throw new Error('getData failed')
+  if (String(searchParams.getDataFailure) === 'array')
+    return { props: ['invalid'] }
+
   return { props: { n: ++nextId } }
 }
 

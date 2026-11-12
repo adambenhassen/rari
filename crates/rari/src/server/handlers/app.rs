@@ -1060,18 +1060,27 @@ pub async fn handle_app_route(
     if route_match.not_found.is_none() && route_match.route.is_dynamic {
         match layout_renderer.get_page_data(&route_match, &context).await {
             Ok(page_data) => {
+                if page_data.failed {
+                    request_context.disable_cache_writes();
+                    error!(
+                        "getData failed for route '{}'; skipping render cache writes",
+                        route_match.route.path
+                    );
+                }
+
                 if page_data.not_found {
                     if let Some(not_found_entry) =
                         app_router.find_not_found(&route_match.route.path)
                     {
                         route_match.not_found = Some(not_found_entry);
                     }
-                } else {
+                } else if !page_data.failed {
                     context.page_data_props = page_data.props;
                 }
             }
             Err(e) => {
-                error!("Failed to check if page is not found: {}", e);
+                request_context.disable_cache_writes();
+                error!("Failed to get page data for route '{}': {}", route_match.route.path, e);
             }
         }
     }
@@ -1109,7 +1118,9 @@ pub async fn handle_app_route(
                 Some("rsc"),
             );
 
-            if let Some(cached) = state.response_cache.get(&cache_key).await {
+            if request_context.response_cache_allowed()
+                && let Some(cached) = state.response_cache.get(&cache_key).await
+            {
                 let status_code = if route_match.not_found.is_some() {
                     StatusCode::NOT_FOUND
                 } else {
@@ -1225,7 +1236,9 @@ pub async fn handle_app_route(
 
             let client_etag = headers.get("if-none-match").and_then(|v| v.to_str().ok());
 
-            if let Some(cached) = state.response_cache.get(&cache_key).await {
+            if request_context.response_cache_allowed()
+                && let Some(cached) = state.response_cache.get(&cache_key).await
+            {
                 if let (Some(cached_etag), Some(client_etag)) = (&cached.metadata.etag, client_etag)
                     && cached_etag == client_etag
                 {

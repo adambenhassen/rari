@@ -16,6 +16,7 @@ pub struct LayoutRenderContext {
 #[derive(Debug, Clone)]
 pub struct PageDataResult {
     pub not_found: bool,
+    pub failed: bool,
     pub props: Option<Value>,
 }
 

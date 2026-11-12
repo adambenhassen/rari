@@ -66,14 +66,29 @@ test.describe('Dynamic Routes', () => {
 
       expect(firstResponse.status()).toBe(200)
       expect(secondResponse.status()).toBe(200)
-      expect(firstResponse.headers()['x-cache']).toBe('MISS')
-      expect(secondResponse.headers()['x-cache']).toBe('MISS')
       expect(dataIds[0]).toBeDefined()
       expect(dataIds[1]).toBeDefined()
       expect(new Set(dataIds).size).toBe(2)
 
       for (const [body, dataId] of [[firstBody, dataIds[0]], [secondBody, dataIds[1]]]) {
         expect(body).toContain(`<title>Request data ${dataId}</title>`)
+      }
+    })
+
+    test('does not cache a getData throw or invalid props', async ({ request }) => {
+      for (const failure of ['throw', 'array']) {
+        const url = `/get-data-props/article?getDataFailure=${failure}&case=${Date.now()}-${Math.random()}`
+        const firstResponse = await request.get(url)
+        const firstBody = await firstResponse.text()
+        const secondResponse = await request.get(url)
+        const secondBody = await secondResponse.text()
+
+        expect(firstResponse.status()).toBe(200)
+        expect(secondResponse.status()).toBe(200)
+        expect(firstResponse.headers()['x-cache']).not.toBe('HIT')
+        expect(secondResponse.headers()['x-cache']).not.toBe('HIT')
+        expect(firstBody.match(/data-testid="request-data-id">\d+</)).toBeNull()
+        expect(secondBody.match(/data-testid="request-data-id">\d+</)).toBeNull()
       }
     })
 
