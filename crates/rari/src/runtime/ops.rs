@@ -379,17 +379,23 @@ pub fn op_mark_response_unavailable(
     let retry_after_seconds = retry_after_seconds
         .parse::<u64>()
         .map_err(|_| JsErrorBox::type_error("retry-after must be a non-negative integer"))?;
+    mark_response_unavailable_for_request(&state.borrow(), retry_after_seconds, &request_id)
+}
+
+fn mark_response_unavailable_for_request(
+    op_state: &OpState,
+    retry_after_seconds: u64,
+    request_id: &str,
+) -> Result<(), JsErrorBox> {
     if request_id.is_empty() {
         return Err(JsErrorBox::generic(
             "markResponseUnavailable can only be called during a server render",
         ));
     }
 
-    let op_state_ref = state.borrow();
-    let request_context = resolve_request_context(&op_state_ref, Some(request_id.as_str()))
-        .ok_or_else(|| {
-            JsErrorBox::generic("markResponseUnavailable can only be called during a server render")
-        })?;
+    let request_context = resolve_request_context(op_state, Some(request_id)).ok_or_else(|| {
+        JsErrorBox::generic("markResponseUnavailable can only be called during a server render")
+    })?;
 
     request_context.mark_response_unavailable(retry_after_seconds);
     Ok(())
@@ -968,9 +974,8 @@ mod tests {
         let runtime_context = Arc::new(RequestContext::new("/runtime".to_string()));
         let mut op_state = OpState::new(None);
         op_state.put(Arc::clone(&runtime_context));
-        let state = Rc::new(RefCell::new(op_state));
 
-        let result = op_mark_response_unavailable(state, "17".to_string(), String::new());
+        let result = mark_response_unavailable_for_request(&op_state, 17, "");
 
         assert!(result.is_err());
         assert_eq!(runtime_context.response_unavailable_after(), None);
