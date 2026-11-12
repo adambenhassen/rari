@@ -455,7 +455,7 @@ mod tests {
             let db_get = Arc::clone(&db);
             let db_set = Arc::clone(&db);
             let barrier_get = Arc::clone(&barrier);
-            let barrier_set = Arc::clone(&barrier);
+            let barrier_set = barrier;
             let key_get = key.clone();
             let key_set = key.clone();
 
