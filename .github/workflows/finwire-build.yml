@@ -128,13 +128,13 @@ jobs:
 
       - name: Build binary (Linux)
         if: runner.os == 'Linux'
-        run: cargo build --release --target ${{ matrix.target }} --bin rari --features ext-full
+        run: cargo build --release --target ${{ matrix.target }} --bin rari --features ext-full,jemalloc
         env:
           RUSTFLAGS: -C link-arg=-fuse-ld=mold -Cforce-frame-pointers=yes
 
       - name: Build binary (macOS)
         if: runner.os == 'macOS'
-        run: cargo build --release --target ${{ matrix.target }} --bin rari --features ext-full
+        run: cargo build --release --target ${{ matrix.target }} --bin rari --features ext-full,jemalloc
         env:
           RUSTFLAGS: -Cforce-frame-pointers=yes
 
