@@ -1,10 +1,9 @@
 import { afterEach, describe, expect, it, vi } from 'vite-plus/test'
 import '../../../crates/rari/src/runtime/factory/js/response_availability_helper.js'
 
-const markResponseUnavailable = Reflect.get(
-  globalThis,
-  'markResponseUnavailable',
-) as (retryAfterSeconds?: number) => void
+const markResponseUnavailable = Reflect.get(globalThis, 'markResponseUnavailable') as (
+  retryAfterSeconds?: number,
+) => void
 
 afterEach(() => {
   vi.unstubAllGlobals()
