@@ -240,27 +240,10 @@ async fn dump_heap_pprof() -> Result<Vec<u8>, HeapDumpError> {
 
 /// `GET /_rari/debug/heap` — return a symbolized pprof heap profile.
 pub async fn heap_dump_handler(headers: HeaderMap) -> impl IntoResponse {
-    match env::var("RARI_PROFILING_TOKEN") {
-        Ok(token) if !token.is_empty() => {
-            let provided = headers
-                .get("x-rari-profiling-token")
-                .and_then(|value| value.to_str().ok())
-                .unwrap_or_default();
-            if provided.as_bytes() != token.as_bytes() {
-                return no_store(
-                    (StatusCode::UNAUTHORIZED, "invalid profiling token").into_response(),
-                );
-            }
-        }
-        _ => {
-            return no_store(
-                (
-                    StatusCode::FORBIDDEN,
-                    "heap dump disabled: set RARI_PROFILING_TOKEN and enable jemalloc profiling",
-                )
-                    .into_response(),
-            );
-        }
+    if let Some(response) =
+        heap_dump_authorization_error(&headers, env::var("RARI_PROFILING_TOKEN").ok().as_deref())
+    {
+        return response;
     }
 
     no_store(match dump_heap_pprof().await {
@@ -280,6 +263,31 @@ pub async fn heap_dump_handler(headers: HeaderMap) -> impl IntoResponse {
 fn no_store(mut response: Response) -> Response {
     response.headers_mut().insert(header::CACHE_CONTROL, HeaderValue::from_static("no-store"));
     response
+}
+
+fn heap_dump_authorization_error(headers: &HeaderMap, token: Option<&str>) -> Option<Response> {
+    match token {
+        Some(token) if !token.is_empty() => {
+            let provided = headers
+                .get("x-rari-profiling-token")
+                .and_then(|value| value.to_str().ok())
+                .unwrap_or_default();
+            if provided.as_bytes() != token.as_bytes() {
+                Some(no_store(
+                    (StatusCode::UNAUTHORIZED, "invalid profiling token").into_response(),
+                ))
+            } else {
+                None
+            }
+        }
+        _ => Some(no_store(
+            (
+                StatusCode::FORBIDDEN,
+                "heap dump disabled: set RARI_PROFILING_TOKEN and enable jemalloc profiling",
+            )
+                .into_response(),
+        )),
+    }
 }
 
 pub async fn metrics_handler(State(state): State<ServerState>) -> impl IntoResponse {
@@ -333,4 +341,42 @@ pub async fn metrics_handler(State(state): State<ServerState>) -> impl IntoRespo
     render_prometheus(&mut body);
 
     (StatusCode::OK, [(header::CONTENT_TYPE, "text/plain; version=0.0.4")], body).into_response()
+}
+
+#[cfg(test)]
+#[expect(clippy::expect_used)]
+mod tests {
+    use super::*;
+
+    fn assert_denied(response: Response, status: StatusCode) {
+        assert_eq!(response.status(), status);
+        assert!(
+            response.headers().get(header::CACHE_CONTROL).is_some_and(|value| value == "no-store")
+        );
+    }
+
+    #[test]
+    fn heap_dump_requires_profiling_to_be_enabled() {
+        let response = heap_dump_authorization_error(&HeaderMap::new(), None)
+            .expect("missing profiling token denies access");
+
+        assert_denied(response, StatusCode::FORBIDDEN);
+    }
+
+    #[test]
+    fn heap_dump_rejects_missing_or_invalid_profiling_tokens() {
+        let token = "test-token";
+        let missing = heap_dump_authorization_error(&HeaderMap::new(), Some(token))
+            .expect("missing request token denies access");
+        assert_denied(missing, StatusCode::UNAUTHORIZED);
+
+        let mut headers = HeaderMap::new();
+        headers.insert("x-rari-profiling-token", HeaderValue::from_static("wrong-token"));
+        let invalid = heap_dump_authorization_error(&headers, Some(token))
+            .expect("invalid request token denies access");
+        assert_denied(invalid, StatusCode::UNAUTHORIZED);
+
+        headers.insert("x-rari-profiling-token", HeaderValue::from_static(token));
+        assert!(heap_dump_authorization_error(&headers, Some(token)).is_none());
+    }
 }
