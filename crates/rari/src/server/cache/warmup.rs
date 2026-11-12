@@ -32,6 +32,19 @@ use crate::{
 
 const WARMUP_CONCURRENCY: usize = 10;
 
+struct WarmupHtmlCacheEntry {
+    path: String,
+    key: String,
+    prebuilt: Arc<response::PrebuiltResponse>,
+    response: response::CachedResponse,
+    max_entries: usize,
+}
+
+struct WarmupResponseCacheEntry {
+    key: String,
+    response: response::CachedResponse,
+}
+
 fn is_warmup_interrupted(error: &RariError) -> bool {
     error.get_property("cancelled") == Some("true")
 }
@@ -175,56 +188,61 @@ async fn warm_route(
     let html = wrap_html_with_metadata(html, state);
     let etag = response::ResponseCache::generate_etag(html.as_bytes());
 
-    if for_response_cache {
+    let html_cache_entry = if for_response_cache {
         let merged_tags = super::merge_page_cache_tags(state, cache_policy.tags.clone()).await;
         let body_bytes = bytes::Bytes::from(html);
 
         let (compressed_gzip, compressed_zstd, compressed_br) =
             compress_all_encodings(body_bytes.clone()).await;
 
-        response::insert_static_fast_cache(
-            &state.static_fast_cache,
-            path,
-            Arc::new(response::PrebuiltResponse {
-                identity: body_bytes.clone(),
-                gzip: compressed_gzip.clone(),
-                br: compressed_br.clone(),
-                zstd: compressed_zstd.clone(),
-                etag: etag.clone(),
-                content_type: "text/html; charset=utf-8".to_string(),
-                cache_control: cache_control.to_string(),
-                is_not_found: false,
-                cached_at: Instant::now(),
-                route: None,
-            }),
-            state.response_cache.config.max_entries,
-        );
+        let prebuilt = Arc::new(response::PrebuiltResponse {
+            identity: body_bytes.clone(),
+            gzip: compressed_gzip.clone(),
+            br: compressed_br.clone(),
+            zstd: compressed_zstd.clone(),
+            etag: etag.clone(),
+            content_type: "text/html; charset=utf-8".to_string(),
+            cache_control: cache_control.to_string(),
+            is_not_found: false,
+            cached_at: Instant::now(),
+            route: None,
+        });
 
-        let cached_response = response::CachedResponse {
-            body: body_bytes,
-            headers: HeaderMap::new(),
-            metadata: response::CacheMetadata {
-                cached_at: Instant::now(),
-                ttl: cache_policy.ttl,
-                etag: Some(etag),
-                tags: merged_tags.clone(),
+        Some(WarmupHtmlCacheEntry {
+            path: path.to_string(),
+            key: html_cache_key,
+            prebuilt,
+            response: response::CachedResponse {
+                body: body_bytes,
+                headers: HeaderMap::new(),
+                metadata: response::CacheMetadata {
+                    cached_at: Instant::now(),
+                    ttl: cache_policy.ttl,
+                    etag: Some(etag),
+                    tags: merged_tags,
+                },
+                compressed_zstd,
+                compressed_br,
+                compressed_gzip,
             },
-            compressed_zstd,
-            compressed_br,
-            compressed_gzip,
-        };
+            max_entries: state.response_cache.config.max_entries,
+        })
+    } else {
+        None
+    };
 
-        state.response_cache.set(html_cache_key, cached_response).await;
-    }
+    let rsc_result = layout_renderer
+        .render_route(&route_match, &context, Some(Arc::clone(&request_context)))
+        .await;
 
-    let rsc_result =
-        layout_renderer.render_route(&route_match, &context, Some(request_context)).await;
-
-    if let Ok(rsc_flight_protocol) = rsc_result {
-        let rsc_cache_key =
-            response::ResponseCache::generate_cache_key_with_mode(path, None, Some("rsc"), None);
-
-        if for_response_cache {
+    let rsc_cache_entry = if for_response_cache {
+        if let Ok(rsc_flight_protocol) = rsc_result {
+            let rsc_cache_key = response::ResponseCache::generate_cache_key_with_mode(
+                path,
+                None,
+                Some("rsc"),
+                None,
+            );
             let merged_tags = super::merge_page_cache_tags(state, cache_policy.tags.clone()).await;
             let mut cache_headers = HeaderMap::new();
 
@@ -237,25 +255,71 @@ async fn warm_route(
                 }
             }
 
-            let cached_response = response::CachedResponse {
-                body: bytes::Bytes::from(rsc_flight_protocol),
-                headers: cache_headers,
-                metadata: response::CacheMetadata {
-                    cached_at: Instant::now(),
-                    ttl: cache_policy.ttl,
-                    etag: None,
-                    tags: merged_tags,
+            Some(WarmupResponseCacheEntry {
+                key: rsc_cache_key,
+                response: response::CachedResponse {
+                    body: bytes::Bytes::from(rsc_flight_protocol),
+                    headers: cache_headers,
+                    metadata: response::CacheMetadata {
+                        cached_at: Instant::now(),
+                        ttl: cache_policy.ttl,
+                        etag: None,
+                        tags: merged_tags,
+                    },
+                    compressed_zstd: None,
+                    compressed_br: None,
+                    compressed_gzip: None,
                 },
-                compressed_zstd: None,
-                compressed_br: None,
-                compressed_gzip: None,
-            };
-
-            state.response_cache.set(rsc_cache_key, cached_response).await;
+            })
+        } else {
+            None
         }
+    } else {
+        None
+    };
+
+    if let Some(html_cache_entry) = html_cache_entry {
+        store_warmed_render(
+            &state.static_fast_cache,
+            &state.response_cache,
+            &request_context,
+            html_cache_entry,
+            rsc_cache_entry,
+        )
+        .await;
     }
 
     Ok(())
+}
+
+async fn store_warmed_render(
+    static_fast_cache: &response::StaticFastCache,
+    response_cache: &response::ResponseCache,
+    request_context: &RequestContext,
+    html: WarmupHtmlCacheEntry,
+    rsc: Option<WarmupResponseCacheEntry>,
+) {
+    if !request_context.response_cache_allowed() {
+        return;
+    }
+
+    response_cache.set_for_request(html.key, html.response, request_context).await;
+    if !request_context.response_cache_allowed() {
+        return;
+    }
+
+    if let Some(rsc) = rsc {
+        response_cache.set_for_request(rsc.key, rsc.response, request_context).await;
+    }
+
+    if request_context.response_cache_allowed() {
+        response::insert_static_fast_cache(
+            static_fast_cache,
+            &html.path,
+            html.prebuilt,
+            html.max_entries,
+        );
+    }
 }
 
 fn create_warmup_context(route_match: &AppRouteMatch) -> LayoutRenderContext {
@@ -273,5 +337,83 @@ fn create_warmup_context(route_match: &AppRouteMatch) -> LayoutRenderContext {
         template_navigation_id: None,
         metadata: None,
         reuse_layout_paths: Vec::new(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::{sync::Arc, time::Instant};
+
+    use axum::http::HeaderMap;
+    use bytes::Bytes;
+
+    use super::{WarmupHtmlCacheEntry, WarmupResponseCacheEntry, store_warmed_render};
+    use crate::server::{
+        cache::response::{
+            CacheConfig, CacheMetadata, CachedResponse, PrebuiltResponse, ResponseCache,
+            StaticFastCache,
+        },
+        middleware::request_context::RequestContext,
+    };
+
+    fn test_cached_response(body: &str) -> CachedResponse {
+        CachedResponse {
+            body: Bytes::from(body.to_string()),
+            headers: HeaderMap::new(),
+            metadata: CacheMetadata {
+                cached_at: Instant::now(),
+                ttl: 60,
+                etag: None,
+                tags: Vec::new(),
+            },
+            compressed_zstd: None,
+            compressed_br: None,
+            compressed_gzip: None,
+        }
+    }
+
+    fn test_prebuilt_response() -> Arc<PrebuiltResponse> {
+        Arc::new(PrebuiltResponse {
+            identity: Bytes::from_static(b"warm html"),
+            gzip: None,
+            br: None,
+            zstd: None,
+            etag: "W/\"warm\"".to_string(),
+            content_type: "text/html; charset=utf-8".to_string(),
+            cache_control: "public, max-age=60".to_string(),
+            is_not_found: false,
+            cached_at: Instant::now(),
+            route: None,
+        })
+    }
+
+    #[tokio::test]
+    async fn marked_warmup_render_skips_all_cache_writes() {
+        let static_fast_cache = StaticFastCache::new();
+        let response_cache = ResponseCache::new(CacheConfig::default());
+        let request_context = RequestContext::new("/maintenance".to_string());
+        request_context.mark_response_unavailable(17);
+
+        store_warmed_render(
+            &static_fast_cache,
+            &response_cache,
+            &request_context,
+            WarmupHtmlCacheEntry {
+                path: "/maintenance".to_string(),
+                key: "html-key".to_string(),
+                prebuilt: test_prebuilt_response(),
+                response: test_cached_response("maintenance html"),
+                max_entries: 10,
+            },
+            Some(WarmupResponseCacheEntry {
+                key: "rsc-key".to_string(),
+                response: test_cached_response("maintenance rsc"),
+            }),
+        )
+        .await;
+
+        assert!(!static_fast_cache.contains_key("/maintenance"));
+        assert!(response_cache.get("html-key").await.is_none());
+        assert!(response_cache.get("rsc-key").await.is_none());
     }
 }
