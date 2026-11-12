@@ -26,6 +26,37 @@ test.describe('Server response status', () => {
     expect(custom.headers()['retry-after']).toBe('17')
   })
 
+  test('marks metadata collection as unavailable for only its request', async ({ request }) => {
+    const unavailableUrl = '/server-response-metadata?mode=unavailable&case=metadata'
+    const first = await request.get(unavailableUrl)
+    const second = await request.get(unavailableUrl)
+    const secondBody = await second.text()
+
+    for (const response of [first, second]) {
+      expect(response.status()).toBe(503)
+      expect(response.headers()['cache-control']).toBe('no-store')
+      expect(response.headers()['retry-after']).toBe('60')
+      expect(response.headers()['x-cache']).not.toBe('HIT')
+    }
+    expect(await first.text()).toContain('<h1>Metadata server response state</h1>')
+    expect(secondBody).toContain('<h1>Metadata server response state</h1>')
+
+    const healthyUrl = '/server-response-metadata?mode=healthy&case=metadata'
+    const [healthy, unavailableAgain] = await Promise.all([
+      request.get(healthyUrl),
+      request.get('/server-response-metadata?mode=unavailable&case=metadata-concurrent'),
+    ])
+
+    expect(unavailableAgain.status()).toBe(503)
+    expect(healthy.status()).toBe(200)
+    expect(healthy.headers()['cache-control']).toBe('public, max-age=60')
+    expect(healthy.headers()['x-cache']).toBe('MISS')
+
+    const cachedHealthy = await request.get(healthyUrl)
+    expect(cachedHealthy.status()).toBe(200)
+    expect(cachedHealthy.headers()['x-cache']).toBe('HIT')
+  })
+
   test('recovers at the same URL and caches the first healthy response', async ({ request }) => {
     const url = '/server-response-recovery?case=recovery'
     const unavailableFirst = await request.get(url)

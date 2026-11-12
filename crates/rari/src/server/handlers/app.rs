@@ -155,6 +155,7 @@ async fn collect_page_metadata(
     state: &ServerState,
     route_match: &AppRouteMatch,
     context: &LayoutRenderContext,
+    request_context: Arc<crate::server::middleware::request_context::RequestContext>,
 ) -> Option<PageMetadata> {
     let dist_server_path = std::env::current_dir()
         .ok()
@@ -233,6 +234,7 @@ async fn collect_page_metadata(
 
     match runtime
         .collect_metadata(
+            request_context,
             layout_paths,
             page_path.clone(),
             context.params.clone(),
@@ -1065,7 +1067,13 @@ pub async fn handle_app_route(
             let use_streaming = should_use_streaming(&route_match, &state.config);
 
             if use_streaming {
-                context.metadata = collect_page_metadata(&state, &route_match, &context).await;
+                context.metadata = collect_page_metadata(
+                    &state,
+                    &route_match,
+                    &context,
+                    Arc::clone(&request_context),
+                )
+                .await;
 
                 let result = render_rsc_navigation_streaming(
                     Arc::new(state),
@@ -1113,7 +1121,9 @@ pub async fn handle_app_route(
                     .expect("Valid cached RSC response"));
             }
 
-            context.metadata = collect_page_metadata(&state, &route_match, &context).await;
+            context.metadata =
+                collect_page_metadata(&state, &route_match, &context, Arc::clone(&request_context))
+                    .await;
 
             match layout_renderer
                 .render_route_by_mode(&route_match, &context, Some(request_context.clone()))
@@ -1283,7 +1293,9 @@ pub async fn handle_app_route(
                     .expect("Valid cached response"));
             }
 
-            context.metadata = collect_page_metadata(&state, &route_match, &context).await;
+            context.metadata =
+                collect_page_metadata(&state, &route_match, &context, Arc::clone(&request_context))
+                    .await;
 
             let use_streaming = should_use_streaming(&route_match, &state.config);
 

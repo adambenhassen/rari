@@ -9,6 +9,7 @@ export default defineConfig({
       cacheControl: {
         routes: {
           '/server-response': 'public, max-age=60',
+          '/server-response-metadata': 'public, max-age=60',
           '/server-response-recovery': 'public, max-age=60',
           '/server-response-delayed': 'public, max-age=60',
           '/server-response-streaming': 'public, max-age=60',

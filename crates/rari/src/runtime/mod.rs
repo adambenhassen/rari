@@ -137,6 +137,7 @@ impl JsExecutionRuntime {
 
     pub async fn collect_metadata(
         &self,
+        request_context: Arc<crate::server::middleware::request_context::RequestContext>,
         layout_paths: Vec<String>,
         page_path: String,
         params: rustc_hash::FxHashMap<String, crate::server::routing::types::ParamValue>,
@@ -152,21 +153,31 @@ impl JsExecutionRuntime {
 
         let data_json =
             serde_json::to_string(&data).map_err(|e| RariError::serialization(e.to_string()))?;
+        let request_context_id = serde_json::to_string(request_context.request_id())
+            .map_err(|e| RariError::serialization(e.to_string()))?;
 
         let script = format!(
             r#"(function() {{
                 const data = {};
-                return globalThis['~rari'].metadataCollector.collect(
-                    data.layoutPaths,
-                    data.pagePath,
-                    data.params,
-                    data.searchParams
+                return globalThis['~rari'].withResponseAvailabilityContext(
+                    {},
+                    () => globalThis['~rari'].metadataCollector.collect(
+                        data.layoutPaths,
+                        data.pagePath,
+                        data.params,
+                        data.searchParams
+                    )
                 );
             }})()"#,
-            data_json
+            data_json, request_context_id
         );
 
-        let metadata_list = self.execute_script("collect_metadata".to_string(), script).await?;
+        let metadata_list = self
+            .execute_with_request_context(
+                request_context,
+                self.execute_script("collect_metadata".to_string(), script),
+            )
+            .await?;
 
         let metadata_array = metadata_list.as_array().ok_or_else(|| {
             RariError::serialization("Expected metadata list to be an array".to_string())
@@ -713,6 +724,25 @@ mod response_availability_tests {
     use super::JsExecutionRuntime;
     use crate::server::middleware::request_context::RequestContext;
     use std::sync::Arc;
+
+    #[tokio::test]
+    async fn mark_response_unavailable_is_rejected_outside_a_request() {
+        let runtime = JsExecutionRuntime::new(None);
+
+        let result = runtime
+            .execute_script(
+                "response_unavailable_without_request".to_string(),
+                "globalThis.markResponseUnavailable()".to_string(),
+            )
+            .await;
+
+        assert!(
+            result
+                .unwrap_err()
+                .to_string()
+                .contains("markResponseUnavailable can only be called during a server render")
+        );
+    }
 
     #[tokio::test]
     async fn concurrent_async_renders_mark_only_their_own_request_context() {
