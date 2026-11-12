@@ -267,7 +267,22 @@ impl RequestContext {
     }
 
     pub fn mark_response_unavailable(&self, retry_after_seconds: u64) {
-        self.response_unavailable_after.lock().get_or_insert(retry_after_seconds);
+        let newly_marked = {
+            let mut unavailable_after = self.response_unavailable_after.lock();
+            if unavailable_after.is_none() {
+                *unavailable_after = Some(retry_after_seconds);
+                true
+            } else {
+                false
+            }
+        };
+        if newly_marked {
+            tracing::info!(
+                route = %self.route_path,
+                retry_after_seconds,
+                "Page marked response unavailable"
+            );
+        }
     }
 
     pub fn response_unavailable_after(&self) -> Option<u64> {

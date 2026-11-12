@@ -982,6 +982,24 @@ mod tests {
     }
 
     #[test]
+    fn mark_response_unavailable_rejects_a_request_without_context() {
+        let op_state = OpState::new(None);
+
+        let result = mark_response_unavailable_for_request(&op_state, 17, "missing-request");
+
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn mark_response_unavailable_rejects_an_invalid_retry_after() {
+        let state = Rc::new(RefCell::new(OpState::new(None)));
+
+        let result = op_mark_response_unavailable(state, "-1".to_string(), String::new());
+
+        assert!(result.is_err());
+    }
+
+    #[test]
     fn test_operation_creation() {
         let module_op = create_module_operation("0", "Button", &["chunk1", "chunk2"], "default");
         assert!(module_op.contains("\"type\":\"module\""));

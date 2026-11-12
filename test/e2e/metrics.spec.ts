@@ -21,3 +21,23 @@ test('exposes allocator, cache, and per-route SSR metrics', async ({ request }) 
     /rari_ssr_request_duration_seconds_bucket\{route="__not_found__",le="\+Inf"\}/,
   )
 })
+
+test('increments response cache hits after a repeated request', async ({ request }) => {
+  await request.get('/')
+  const before = await request.get('/_rari/metrics')
+  const beforeMetrics = await before.text()
+  const beforeMatch = /^rari_response_cache_hits_total (\d+)$/m.exec(beforeMetrics)
+  expect(beforeMatch).not.toBeNull()
+  const beforeHits = Number(beforeMatch?.[1])
+
+  const repeated = await request.get('/')
+  expect(repeated.status()).toBe(200)
+
+  const after = await request.get('/_rari/metrics')
+  const afterMetrics = await after.text()
+  const afterMatch = /^rari_response_cache_hits_total (\d+)$/m.exec(afterMetrics)
+  expect(afterMatch).not.toBeNull()
+  const afterHits = Number(afterMatch?.[1])
+
+  expect(afterHits).toBeGreaterThan(beforeHits)
+})

@@ -12,12 +12,27 @@ test('runtime health checks execute the JavaScript runtime', async ({ request })
 
 test('runtime health reports unavailable when the executor is occupied', async ({ request }) => {
   const blocker = request.get('/runtime-health-blocker?block=1')
-  await new Promise<void>(resolve => {
-    setTimeout(resolve, 200)
-  })
+  await expect
+    .poll(
+      async () => {
+        const response = await request.get('/_rari/health/runtime?timeout_ms=100')
+        return response.status()
+      },
+      { message: 'runtime health detects the occupied executor', timeout: 1500 },
+    )
+    .toBe(503)
 
-  const response = await request.get('/_rari/health/runtime?timeout_ms=100')
-
-  expect(response.status()).toBe(503)
   expect((await blocker).status()).toBe(200)
+})
+
+test('runtime health rejects an unparseable timeout', async ({ request }) => {
+  const response = await request.get('/_rari/health/runtime?timeout_ms=invalid')
+
+  expect(response.status()).toBe(400)
+})
+
+test('runtime health rejects a zero timeout', async ({ request }) => {
+  const response = await request.get('/_rari/health/runtime?timeout_ms=0')
+
+  expect(response.status()).toBe(400)
 })

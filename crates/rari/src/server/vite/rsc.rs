@@ -464,14 +464,16 @@ pub async fn runtime_health_check(
     State(state): State<ServerState>,
     Query(params): Query<rustc_hash::FxHashMap<String, String>>,
 ) -> Result<Json<Value>, StatusCode> {
-    let timeout_ms = params
-        .get("timeout_ms")
-        .and_then(|value| value.parse::<u64>().ok())
-        .unwrap_or(5_000)
-        .min(30_000);
-    if timeout_ms == 0 {
-        return Err(StatusCode::SERVICE_UNAVAILABLE);
-    }
+    let timeout_ms = match params.get("timeout_ms") {
+        Some(value) => {
+            let timeout_ms = value.parse::<u64>().map_err(|_| StatusCode::BAD_REQUEST)?;
+            if timeout_ms == 0 {
+                return Err(StatusCode::BAD_REQUEST);
+            }
+            timeout_ms.min(30_000)
+        }
+        None => 5_000,
+    };
     let started = Instant::now();
     let probe = state.js_runtime.execute_script("runtime_health_probe".into(), "1 + 1".into());
 

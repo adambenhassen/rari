@@ -1,6 +1,23 @@
+import { existsSync, readFileSync, statSync } from 'node:fs'
 import { expect, test } from '@playwright/test'
+import { getRariLogPath } from './shared/helpers'
+
+const LOG_FILE = getRariLogPath()
+
+function unavailableLog(offset: number): string {
+  if (!existsSync(LOG_FILE)) return ''
+
+  return (
+    readFileSync(LOG_FILE, 'utf8')
+      .slice(offset)
+      .split('\n')
+      .find(line => line.includes('/server-response') && line.includes('retry_after_seconds=60')) ??
+    ''
+  )
+}
 
 test('returns a pre-commit mark as an uncacheable 503 response', async ({ request }) => {
+  const logOffset = existsSync(LOG_FILE) ? statSync(LOG_FILE).size : 0
   const url = '/server-response?mode=unavailable'
   const first = await request.get(url)
   const firstBody = await first.text()
@@ -19,6 +36,8 @@ test('returns a pre-commit mark as an uncacheable 503 response', async ({ reques
   expect(second.headers()['retry-after']).toBe('60')
   expect(secondBody).toContain('<h1>Server response state</h1>')
   expect(second.headers()['x-cache']).not.toBe('HIT')
+
+  await expect.poll(() => unavailableLog(logOffset)).not.toBe('')
 })
 
 test('keeps the committed status when marked after headers', async ({ request }) => {

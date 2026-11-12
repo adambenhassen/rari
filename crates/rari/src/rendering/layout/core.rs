@@ -147,9 +147,9 @@ impl LayoutHtmlCache {
         Self { handler, default_ttl_secs }
     }
 
-    pub fn get_metrics(&self) -> (usize, usize) {
+    pub fn get_metrics(&self) -> (usize, Option<usize>) {
         let (entries, bytes) = self.handler.prefix_stats(LAYOUT_KEY_PREFIX);
-        (entries, bytes.unwrap_or_else(|| entries.saturating_mul(10_000)))
+        (entries, bytes)
     }
 
     fn namespaced(key: u64) -> String {
@@ -1128,7 +1128,13 @@ impl LayoutRenderer {
                                 if (isNotFoundError(e)) {{
                                     return {{ ok: false, notFound: true }};
                                 }}
-                                console.error('[rari] Composition error in static:', e);
+                                console.error(
+                                    '[rari] Composition error in static:',
+                                    e,
+                                    'Check the layout composition and thrown error.',
+                                );
+                                if (rari) rari.capturedElement = undefined;
+                                return {{ ok: false, error: String(e?.message || e) }};
                             }}
                             if (compositionResult?.notFound === true) {{
                                 return {{ ok: false, notFound: true }};
@@ -1229,6 +1235,10 @@ impl LayoutRenderer {
                                     .get("error")
                                     .and_then(|v| v.as_str())
                                     .unwrap_or("unknown");
+                                tracing::error!(
+                                    error = err,
+                                    "Static document render failed; inspect the layout composition error"
+                                );
                                 return Err(RariError::internal(format!(
                                     "Static document render failed: {err}"
                                 )));
@@ -1578,7 +1588,59 @@ impl LayoutRenderer {
 #[expect(clippy::expect_used)]
 mod tests {
     use super::*;
-    use crate::server::cache::handler::NoOpCacheHandler;
+    use crate::server::cache::handler::{NoOpCacheHandler, SetOutcome};
+
+    #[derive(Debug)]
+    struct UnmeasuredCacheHandler;
+
+    #[async_trait::async_trait]
+    impl CacheHandler for UnmeasuredCacheHandler {
+        async fn get(&self, _key: &str) -> Result<Option<Vec<u8>>, CacheError> {
+            Ok(None)
+        }
+
+        async fn set(
+            &self,
+            _key: &str,
+            _value: Vec<u8>,
+            _ttl_secs: u64,
+        ) -> Result<SetOutcome, CacheError> {
+            Ok(SetOutcome::default())
+        }
+
+        async fn set_with_tags(
+            &self,
+            _key: &str,
+            _value: Vec<u8>,
+            _ttl_secs: u64,
+            _tags: &[String],
+        ) -> Result<SetOutcome, CacheError> {
+            Ok(SetOutcome::default())
+        }
+
+        async fn invalidate(&self, _key: &str) -> Result<bool, CacheError> {
+            Ok(false)
+        }
+
+        async fn invalidate_by_tag(&self, _tag: &str) -> Result<(), CacheError> {
+            Ok(())
+        }
+
+        async fn clear(&self) -> Result<(), CacheError> {
+            Ok(())
+        }
+
+        fn get_all_keys(&self) -> Vec<String> {
+            vec![format!("{LAYOUT_KEY_PREFIX}cached")]
+        }
+    }
+
+    #[test]
+    fn layout_cache_omits_bytes_when_the_handler_cannot_measure_them() {
+        let cache = LayoutHtmlCache::with_handler(Arc::new(UnmeasuredCacheHandler));
+
+        assert_eq!(cache.get_metrics(), (1, None));
+    }
 
     #[tokio::test]
     async fn test_layout_handler_round_trip() {
