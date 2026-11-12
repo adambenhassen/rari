@@ -7,11 +7,20 @@ const PRODUCTS_BOOKS_NOVEL_URL = /\/products\/books\/novel-456$/
 
 test.describe('Dynamic Routes', () => {
   test.describe('Single Dynamic Segment [slug]', () => {
-    test('shares getData props with metadata and render for each concurrent request', async ({ request }) => {
-      const concurrentUrl = `/get-data-props/article?case=${Date.now()}-${Math.random()}`
+    test('does not share cached layout HTML between concurrent requests with getData props', async ({ request }) => {
+      const cacheCase = `layout-cache-${Date.now()}-${Math.random()}`
+      const primeUrl = `/get-data-props/article?case=${cacheCase}`
+      const primeResponse = await request.get(primeUrl)
+      const primeBody = await primeResponse.text()
+      const primeDataId = primeBody.match(/data-testid="request-data-id">(\d+)</)?.[1]
+      expect(primeResponse.status()).toBe(200)
+      expect(primeResponse.headers()['x-cache']).toBe('MISS')
+      expect(primeDataId).toBeDefined()
+      expect(primeBody).toContain(`<title>Request data ${primeDataId}</title>`)
+
       const [firstResponse, secondResponse] = await Promise.all([
-        request.get(concurrentUrl),
-        request.get(concurrentUrl),
+        request.get(`/get-data-props/%61rticle?case=${cacheCase}`),
+        request.get(`/get-data-props/art%69cle?case=${cacheCase}`),
       ])
       const [firstBody, secondBody] = await Promise.all([
         firstResponse.text(),
@@ -33,16 +42,39 @@ test.describe('Dynamic Routes', () => {
         expect(body).toContain(`<title>Request data ${dataId}</title>`)
       }
 
-      const cacheUrl = `/get-data-props/article?case=cache-${Date.now()}-${Math.random()}`
-      const cacheMiss = await request.get(cacheUrl)
-      const cacheMissBody = await cacheMiss.text()
-      const cacheHit = await request.get(cacheUrl)
+      expect(dataIds).not.toContain(primeDataId)
 
-      expect(cacheMiss.status()).toBe(200)
+      const cacheHit = await request.get(primeUrl)
       expect(cacheHit.status()).toBe(200)
-      expect(cacheMiss.headers()['x-cache']).toBe('MISS')
       expect(cacheHit.headers()['x-cache']).toBe('HIT')
-      expect(await cacheHit.text()).toBe(cacheMissBody)
+      expect(await cacheHit.text()).toBe(primeBody)
+    })
+
+    test('shares getData props with metadata and render for concurrent requests to the same URL', async ({ request }) => {
+      const url = `/get-data-props/article?case=same-url-${Date.now()}-${Math.random()}`
+      const [firstResponse, secondResponse] = await Promise.all([
+        request.get(url),
+        request.get(url),
+      ])
+      const [firstBody, secondBody] = await Promise.all([
+        firstResponse.text(),
+        secondResponse.text(),
+      ])
+      const dataIds = [firstBody, secondBody].map(body =>
+        body.match(/data-testid="request-data-id">(\d+)</)?.[1],
+      )
+
+      expect(firstResponse.status()).toBe(200)
+      expect(secondResponse.status()).toBe(200)
+      expect(firstResponse.headers()['x-cache']).toBe('MISS')
+      expect(secondResponse.headers()['x-cache']).toBe('MISS')
+      expect(dataIds[0]).toBeDefined()
+      expect(dataIds[1]).toBeDefined()
+      expect(new Set(dataIds).size).toBe(2)
+
+      for (const [body, dataId] of [[firstBody, dataIds[0]], [secondBody, dataIds[1]]]) {
+        expect(body).toContain(`<title>Request data ${dataId}</title>`)
+      }
     })
 
     test('should render dynamic route with slug parameter', async ({ page }) => {

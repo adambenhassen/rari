@@ -214,7 +214,7 @@ impl LayoutRenderer {
         route_match: &AppRouteMatch,
         return_rsc_on_fallback: bool,
         request_context: Option<Arc<crate::server::middleware::request_context::RequestContext>>,
-        cache_key: u64,
+        cache_key: Option<u64>,
     ) -> Result<RenderResult, RariError> {
         let request_context_id = request_context.as_ref().map(|ctx| ctx.request_id());
         let rsc_wire_format =
@@ -243,7 +243,9 @@ impl LayoutRenderer {
         }
 
         // TTL 0 (max-age=0 route): the entry would be born expired; skip the write.
-        if !layout_cache_ttl(&route_match.pathname).is_zero() {
+        if let Some(cache_key) = cache_key
+            && !layout_cache_ttl(&route_match.pathname).is_zero()
+        {
             if let Some(request_context) = request_context.as_ref() {
                 self.html_cache.insert_for_request(cache_key, html.clone(), request_context);
             } else {
@@ -443,11 +445,13 @@ impl LayoutRenderer {
         return_rsc_on_fallback: bool,
     ) -> Result<RenderResult, RariError> {
         let cache_key = utils::generate_cache_key(route_match, context);
+        let cache_html = context.page_data_props.is_none();
         let request_context_for_cache = request_context.clone();
         let response_is_cacheable =
             request_context_for_cache.as_ref().is_none_or(|ctx| ctx.response_cache_allowed());
 
-        if !return_rsc_on_fallback
+        if cache_html
+            && !return_rsc_on_fallback
             && response_is_cacheable
             && let Some(cached_html) =
                 self.html_cache.get(cache_key, layout_cache_ttl(&route_match.pathname))
@@ -518,7 +522,9 @@ if (typeof window !== 'undefined') {
                 format!("{}{}\n{}", html, payload_script, completion_script)
             };
 
-            if route_match.not_found.is_none() && !layout_cache_ttl(&route_match.pathname).is_zero()
+            if cache_html
+                && route_match.not_found.is_none()
+                && !layout_cache_ttl(&route_match.pathname).is_zero()
             {
                 if let Some(request_context) = request_context_for_cache.as_ref() {
                     self.html_cache.insert_for_request(cache_key, html.clone(), request_context);
@@ -642,7 +648,7 @@ if (typeof window !== 'undefined') {
                             route_match,
                             return_rsc_on_fallback,
                             Some(Arc::clone(&ctx)),
-                            cache_key,
+                            cache_html.then_some(cache_key),
                         )
                         .await
                     }
@@ -738,7 +744,7 @@ if (typeof window !== 'undefined') {
                                 route_match,
                                 return_rsc_on_fallback,
                                 request_context_for_cache.clone(),
-                                cache_key,
+                                cache_html.then_some(cache_key),
                             )
                             .await;
 
