@@ -515,7 +515,10 @@ pub async fn metrics_handler(State(state): State<ServerState>) -> impl IntoRespo
 #[cfg(test)]
 #[expect(clippy::expect_used)]
 mod tests {
+    use std::thread;
+
     use futures::{SinkExt, StreamExt};
+    use tokio::{net::TcpListener, time::sleep};
     use tokio_tungstenite::{accept_async, tungstenite::Message};
 
     use super::*;
@@ -574,9 +577,9 @@ mod tests {
 
     #[tokio::test]
     async fn symbolized_heap_dump_runs_off_the_async_worker() {
-        let async_thread = std::thread::current().id();
+        let async_thread = thread::current().id();
 
-        let dump_thread = run_heap_dump_on_blocking_thread(|| std::thread::current().id())
+        let dump_thread = run_heap_dump_on_blocking_thread(|| thread::current().id())
             .await
             .expect("blocking task should complete");
 
@@ -587,14 +590,13 @@ mod tests {
     async fn pyroscope_client_times_out_a_stalled_push() {
         use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
-        let listener =
-            tokio::net::TcpListener::bind("127.0.0.1:0").await.expect("bind local HTTP server");
+        let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind local HTTP server");
         let address = listener.local_addr().expect("local address");
         let server = tokio::spawn(async move {
             let (mut stream, _) = listener.accept().await.expect("accept client");
             let mut request = [0; 1024];
             let _bytes_read = stream.read(&mut request).await.expect("read HTTP request");
-            tokio::time::sleep(Duration::from_millis(100)).await;
+            sleep(Duration::from_millis(100)).await;
             stream
                 .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 0\r\n\r\n")
                 .await
@@ -610,9 +612,7 @@ mod tests {
 
     #[tokio::test]
     async fn pprof_gateway_rejects_a_registration_reply_without_an_id() {
-        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
-            .await
-            .expect("bind local websocket server");
+        let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind local websocket server");
         let address = listener.local_addr().expect("local address");
         let server = tokio::spawn(async move {
             let (stream, _) = listener.accept().await.expect("accept gateway connection");
@@ -632,9 +632,7 @@ mod tests {
 
     #[tokio::test]
     async fn pprof_gateway_answers_malformed_requests_when_the_id_is_known() {
-        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
-            .await
-            .expect("bind local websocket server");
+        let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind local websocket server");
         let address = listener.local_addr().expect("local address");
         let server = tokio::spawn(async move {
             let (stream, _) = listener.accept().await.expect("accept gateway connection");
@@ -662,7 +660,7 @@ mod tests {
 
             assert_eq!(response["id"], "request-1");
             assert_eq!(response["status_code"], 400);
-            assert!(!response["error"].as_str().unwrap_or_default().is_empty());
+            assert_ne!(response["error"].as_str().unwrap_or_default(), "");
         });
 
         let _ = run_gateway_session(&format!("ws://{address}/connect"), "rari-test").await;
@@ -672,13 +670,11 @@ mod tests {
 
     #[tokio::test]
     async fn pprof_gateway_connection_handshake_times_out() {
-        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
-            .await
-            .expect("bind local websocket server");
+        let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind local websocket server");
         let address = listener.local_addr().expect("local address");
         let server = tokio::spawn(async move {
             let (_stream, _) = listener.accept().await.expect("accept gateway connection");
-            tokio::time::sleep(Duration::from_secs(10)).await;
+            sleep(Duration::from_secs(10)).await;
         });
 
         let result = timeout(
@@ -693,16 +689,14 @@ mod tests {
 
     #[tokio::test]
     async fn pprof_gateway_registration_reply_wait_times_out() {
-        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
-            .await
-            .expect("bind local websocket server");
+        let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind local websocket server");
         let address = listener.local_addr().expect("local address");
         let server = tokio::spawn(async move {
             let (stream, _) = listener.accept().await.expect("accept gateway connection");
             let mut ws = accept_async(stream).await.expect("accept websocket");
             let _registration =
                 ws.next().await.expect("registration request").expect("valid registration frame");
-            tokio::time::sleep(Duration::from_secs(10)).await;
+            sleep(Duration::from_secs(10)).await;
         });
 
         let result = timeout(
