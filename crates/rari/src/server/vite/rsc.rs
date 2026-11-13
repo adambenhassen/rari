@@ -456,6 +456,19 @@ pub async fn health_check() -> Result<Json<Value>, StatusCode> {
     })))
 }
 
+fn runtime_health_timeout_ms(timeout_ms: Option<&str>) -> Result<u64, StatusCode> {
+    match timeout_ms {
+        Some(value) => {
+            let timeout_ms = value.parse::<u64>().map_err(|_| StatusCode::BAD_REQUEST)?;
+            if timeout_ms == 0 {
+                return Err(StatusCode::BAD_REQUEST);
+            }
+            Ok(timeout_ms.min(30_000))
+        }
+        None => Ok(5_000),
+    }
+}
+
 /// Exercise the JavaScript event loop so liveness checks detect stuck runtimes.
 /// The optional timeout is capped to keep a misconfigured probe bounded.
 #[expect(clippy::implicit_hasher, reason = "FxHashMap is specific to query params")]
@@ -464,14 +477,7 @@ pub async fn runtime_health_check(
     State(state): State<ServerState>,
     Query(params): Query<rustc_hash::FxHashMap<String, String>>,
 ) -> Result<Json<Value>, StatusCode> {
-    let timeout_ms = params
-        .get("timeout_ms")
-        .and_then(|value| value.parse::<u64>().ok())
-        .unwrap_or(5_000)
-        .min(30_000);
-    if timeout_ms == 0 {
-        return Err(StatusCode::SERVICE_UNAVAILABLE);
-    }
+    let timeout_ms = runtime_health_timeout_ms(params.get("timeout_ms").map(String::as_str))?;
     let started = Instant::now();
     let probe = state.js_runtime.execute_script("runtime_health_probe".into(), "1 + 1".into());
 
@@ -492,5 +498,30 @@ pub async fn runtime_health_check(
             tracing::error!(timeout_ms, "Runtime health probe timed out");
             Err(StatusCode::SERVICE_UNAVAILABLE)
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn runtime_health_timeout_defaults_when_absent() {
+        assert_eq!(runtime_health_timeout_ms(None), Ok(5_000));
+    }
+
+    #[test]
+    fn runtime_health_timeout_rejects_invalid_values() {
+        assert_eq!(runtime_health_timeout_ms(Some("invalid")), Err(StatusCode::BAD_REQUEST));
+    }
+
+    #[test]
+    fn runtime_health_timeout_rejects_zero() {
+        assert_eq!(runtime_health_timeout_ms(Some("0")), Err(StatusCode::BAD_REQUEST));
+    }
+
+    #[test]
+    fn runtime_health_timeout_caps_values_above_thirty_seconds() {
+        assert_eq!(runtime_health_timeout_ms(Some("30001")), Ok(30_000));
     }
 }

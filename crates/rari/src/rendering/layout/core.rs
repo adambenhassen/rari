@@ -116,6 +116,13 @@ pub struct LayoutHtmlCache {
     default_ttl_secs: u64,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct LayoutCacheMetrics {
+    pub entries: usize,
+    pub bytes: Option<usize>,
+}
+
 impl Default for LayoutHtmlCache {
     fn default() -> Self {
         Self::new()
@@ -147,9 +154,9 @@ impl LayoutHtmlCache {
         Self { handler, default_ttl_secs }
     }
 
-    pub fn get_metrics(&self) -> (usize, usize) {
+    pub fn get_metrics(&self) -> LayoutCacheMetrics {
         let (entries, bytes) = self.handler.prefix_stats(LAYOUT_KEY_PREFIX);
-        (entries, bytes.unwrap_or_else(|| entries.saturating_mul(10_000)))
+        LayoutCacheMetrics { entries, bytes }
     }
 
     fn namespaced(key: u64) -> String {
@@ -420,6 +427,110 @@ async fn compose_then_queue_streaming_script(
 pub struct LayoutRenderer {
     renderer: Arc<Mutex<RscRenderer>>,
     html_cache: Arc<LayoutHtmlCache>,
+}
+
+fn static_document_render_script(composition_script: &str, head_content_json: &str) -> String {
+    format!(
+        r"(async function() {{
+            let caughtErrors = [];
+            const rari = globalThis['~rari'];
+            if (rari) {{
+                rari.capturedElement = undefined;
+                rari.blockingHeadScriptsHtml = '';
+            }}
+            const isNotFoundError = (error) =>
+                error?.digest === 'RARI_NOT_FOUND' || error?.message === 'RARI_NOT_FOUND';
+            try {{
+                let compositionResult;
+                try {{
+                    compositionResult = await ({composition_script});
+                }} catch(e) {{
+                    if (isNotFoundError(e)) {{
+                        return {{ ok: false, notFound: true }};
+                    }}
+                    console.error(
+                        '[rari] Composition error in static:',
+                        e,
+                        'Check the layout composition and thrown error.',
+                    );
+                    if (rari) rari.capturedElement = undefined;
+                    return {{ ok: false, error: String(e?.message || e) }};
+                }}
+                if (compositionResult?.notFound === true) {{
+                    return {{ ok: false, notFound: true }};
+                }}
+
+                const capturedElement = globalThis['~rari']?.capturedElement;
+                if (!capturedElement) {{
+                    return {{ ok: false, error: 'No captured element' }};
+                }}
+
+                const blockingHead = globalThis['~rari']?.blockingHeadScriptsHtml ?? '';
+                globalThis['~rari'].blockingHeadScriptsHtml = '';
+
+                const renderStatic = globalThis['~rari']?.renderStaticDocument;
+                if (typeof renderStatic !== 'function') {{
+                    return {{ ok: false, error: 'renderStaticDocument not loaded' }};
+                }}
+
+                const html = await renderStatic({{
+                    capturedElement,
+                    headContent: (typeof blockingHead === 'string' ? blockingHead : '') + {head_content_json},
+                    caughtErrors,
+                }});
+
+                if (caughtErrors.some(isNotFoundError)) {{
+                    return {{ ok: false, notFound: true }};
+                }}
+
+                const isDynamic = (globalThis['~rari']?.useCacheDynamicDepth ?? 0) > 0;
+                let pageCacheTags = [];
+                if (!isDynamic) {{
+                    const tags = new Set(
+                        globalThis['~rari']?.pageCacheTags ? [...globalThis['~rari'].pageCacheTags] : [],
+                    );
+                    const fromRegistry = globalThis.__rariGetActiveUseCacheTags?.() ?? [];
+                    for (const tag of fromRegistry)
+                        tags.add(tag);
+                    pageCacheTags = [...tags];
+                }}
+
+                return {{ ok: true, html, isDynamic, pageCacheTags }};
+            }} catch(e) {{
+                if (isNotFoundError(e) || caughtErrors.some(isNotFoundError)) {{
+                    return {{ ok: false, notFound: true }};
+                }}
+                return {{ ok: false, error: String(e?.message || e) }};
+            }}
+        }})()"
+    )
+}
+
+async fn execute_static_document_render(
+    runtime: &dyn JsRuntimeInterface,
+    script: String,
+) -> Result<Value, RariError> {
+    let result = runtime.execute_script("static_document_render".to_string(), script).await?;
+
+    static_document_render_result(result)
+}
+
+fn static_document_render_result(result: Value) -> Result<Value, RariError> {
+    if result.get("notFound").and_then(Value::as_bool).unwrap_or(false) {
+        return Err(RariError::not_found("RARI_NOT_FOUND"));
+    }
+
+    let ok = result.get("ok").and_then(Value::as_bool).unwrap_or(false);
+    if !ok {
+        let err = result.get("error").and_then(Value::as_str).unwrap_or("unknown");
+        tracing::error!(
+            error = err,
+            "Static document render failed; inspect the layout composition error"
+        );
+        return Err(RariError::internal(format!("Static document render failed: {err}")));
+    }
+
+    Ok(result)
 }
 
 impl LayoutRenderer {
@@ -1086,110 +1197,49 @@ impl LayoutRenderer {
 
                 let prepared = {
                     let composition_script = composition_script.clone();
-                    run_with_renderer_result(Arc::clone(&self.renderer), move |renderer| async move {
-                        renderer.ensure_streaming_pipeline().await?;
+                    run_with_renderer_result(
+                        Arc::clone(&self.renderer),
+                        move |renderer| async move {
+                            renderer.ensure_streaming_pipeline().await?;
 
-                        let runtime = Arc::clone(&renderer.runtime);
-                        let html_renderer = Arc::new(RscHtmlRenderer::with_public_dir(
-                            Arc::clone(&renderer.runtime),
-                            config.public_dir().clone(),
-                        ));
-                        let css_links = RscHtmlRenderer::css_links_for_route(&route_match);
-                        let cache_template = config.rsc_html.cache_template;
-                        let is_dev_mode = config.is_development();
-                        let vite_host = config.vite.host.clone();
-                        let vite_port = config.vite.port;
-                        let template = html_renderer
-                            .load_template(cache_template, is_dev_mode, &vite_host, vite_port)
-                            .await?;
-                        let template = inject_css_links(&template, &css_links);
+                            let runtime = Arc::clone(&renderer.runtime);
+                            let html_renderer = Arc::new(RscHtmlRenderer::with_public_dir(
+                                Arc::clone(&renderer.runtime),
+                                config.public_dir().clone(),
+                            ));
+                            let css_links = RscHtmlRenderer::css_links_for_route(&route_match);
+                            let cache_template = config.rsc_html.cache_template;
+                            let is_dev_mode = config.is_development();
+                            let vite_host = config.vite.host.clone();
+                            let vite_port = config.vite.port;
+                            let template = html_renderer
+                                .load_template(cache_template, is_dev_mode, &vite_host, vite_port)
+                                .await?;
+                            let template = inject_css_links(&template, &css_links);
 
-                        let head_content =
-                            RscHtmlRenderer::client_head_fragment(&template).to_string();
+                            let head_content =
+                                RscHtmlRenderer::client_head_fragment(&template).to_string();
 
-                        let head_content_json = serde_json::to_string(&head_content)
-                            .unwrap_or_else(|_| "\"\"".to_string());
+                            let head_content_json = serde_json::to_string(&head_content)
+                                .unwrap_or_else(|_| "\"\"".to_string());
 
-                        let script = format!(
-                            r"(async function() {{
-                        let caughtErrors = [];
-                        const rari = globalThis['~rari'];
-                        if (rari) {{
-                            rari.capturedElement = undefined;
-                            rari.blockingHeadScriptsHtml = '';
-                        }}
-                        const isNotFoundError = (error) =>
-                            error?.digest === 'RARI_NOT_FOUND' || error?.message === 'RARI_NOT_FOUND';
-                        try {{
-                            let compositionResult;
-                            try {{
-                                compositionResult = await ({composition_script});
-                            }} catch(e) {{
-                                if (isNotFoundError(e)) {{
-                                    return {{ ok: false, notFound: true }};
-                                }}
-                                console.error('[rari] Composition error in static:', e);
-                            }}
-                            if (compositionResult?.notFound === true) {{
-                                return {{ ok: false, notFound: true }};
-                            }}
+                            let script = static_document_render_script(
+                                &composition_script,
+                                &head_content_json,
+                            );
 
-                            const capturedElement = globalThis['~rari']?.capturedElement;
-                            if (!capturedElement) {{
-                                return {{ ok: false, error: 'No captured element' }};
-                            }}
-
-                            const blockingHead = globalThis['~rari']?.blockingHeadScriptsHtml ?? '';
-                            globalThis['~rari'].blockingHeadScriptsHtml = '';
-
-                            const renderStatic = globalThis['~rari']?.renderStaticDocument;
-                            if (typeof renderStatic !== 'function') {{
-                                return {{ ok: false, error: 'renderStaticDocument not loaded' }};
-                            }}
-
-                            const html = await renderStatic({{
-                                capturedElement,
-                                headContent: (typeof blockingHead === 'string' ? blockingHead : '') + {head_content_json},
-                                caughtErrors,
-                            }});
-
-                            if (caughtErrors.some(isNotFoundError)) {{
-                                return {{ ok: false, notFound: true }};
-                            }}
-
-                            const isDynamic = (globalThis['~rari']?.useCacheDynamicDepth ?? 0) > 0;
-                            let pageCacheTags = [];
-                            if (!isDynamic) {{
-                                const tags = new Set(
-                                    globalThis['~rari']?.pageCacheTags ? [...globalThis['~rari'].pageCacheTags] : [],
-                                );
-                                const fromRegistry = globalThis.__rariGetActiveUseCacheTags?.() ?? [];
-                                for (const tag of fromRegistry)
-                                    tags.add(tag);
-                                pageCacheTags = [...tags];
-                            }}
-
-                            return {{ ok: true, html, isDynamic, pageCacheTags }};
-                        }} catch(e) {{
-                            if (isNotFoundError(e) || caughtErrors.some(isNotFoundError)) {{
-                                return {{ ok: false, notFound: true }};
-                            }}
-                            return {{ ok: false, error: String(e?.message || e) }};
-                        }}
-                    }})()",
-                        );
-
-                        Ok((
-                            runtime,
-                            html_renderer,
-                            css_links,
-                            script,
-                            cache_template,
-                            is_dev_mode,
-                            vite_host,
-                            vite_port,
-                        ))
-                    })
+                            Ok((
+                                runtime,
+                                html_renderer,
+                                css_links,
+                                script,
+                                cache_template,
+                                is_dev_mode,
+                                vite_host,
+                                vite_port,
+                            ))
+                        },
+                    )
                     .await?
                 };
 
@@ -1215,24 +1265,8 @@ impl LayoutRenderer {
                         let css_links = css_links.clone();
                         let vite_host = vite_host.clone();
                         async move {
-                            let result = rt
-                                .execute_script("static_document_render".to_string(), script)
-                                .await?;
-
-                            if result.get("notFound").and_then(Value::as_bool).unwrap_or(false) {
-                                return Err(RariError::not_found("RARI_NOT_FOUND"));
-                            }
-
-                            let ok = result.get("ok").and_then(Value::as_bool).unwrap_or(false);
-                            if !ok {
-                                let err = result
-                                    .get("error")
-                                    .and_then(|v| v.as_str())
-                                    .unwrap_or("unknown");
-                                return Err(RariError::internal(format!(
-                                    "Static document render failed: {err}"
-                                )));
-                            }
+                            let result =
+                                execute_static_document_render(rt.as_ref(), script).await?;
 
                             let html = result
                                 .get("html")
@@ -1577,8 +1611,138 @@ impl LayoutRenderer {
 #[cfg(test)]
 #[expect(clippy::expect_used)]
 mod tests {
+    use deno_core::{JsRuntime, PollEventLoopOptions, RuntimeOptions, serde_v8, v8};
+
     use super::*;
-    use crate::server::cache::handler::NoOpCacheHandler;
+    use crate::server::cache::handler::{NoOpCacheHandler, SetOutcome};
+
+    fn v8_json_value(runtime: &mut JsRuntime, value: v8::Global<v8::Value>) -> Value {
+        let context = runtime.main_context();
+        v8::scope_with_context!(scope, runtime.v8_isolate(), context);
+        let local_value = v8::Local::new(scope, value);
+        serde_v8::from_v8(scope, local_value).expect("deserialize test JavaScript value")
+    }
+
+    fn evaluate_test_javascript(runtime: &mut JsRuntime, source: &str) -> Value {
+        let value = runtime
+            .execute_script("static_render_test_value", source.to_string())
+            .expect("evaluate static-render test JavaScript");
+        v8_json_value(runtime, value)
+    }
+
+    async fn run_static_render_script(runtime: &mut JsRuntime, script: String) -> Value {
+        runtime
+            .execute_script(
+                "start_static_render_test",
+                format!("globalThis.__rariStaticRenderPromise = {script};"),
+            )
+            .expect("start static-render test script");
+        runtime
+            .execute_script(
+                "observe_static_render_test",
+                "globalThis.__rariStaticRenderPromise.then((result) => { globalThis.__rariStaticRenderResult = result; });",
+            )
+            .expect("observe static-render test result");
+        runtime
+            .run_event_loop(PollEventLoopOptions::default())
+            .await
+            .expect("run static-render test event loop");
+
+        evaluate_test_javascript(runtime, "globalThis.__rariStaticRenderResult")
+    }
+
+    #[derive(Debug)]
+    struct UnmeasuredCacheHandler;
+
+    #[async_trait::async_trait]
+    impl CacheHandler for UnmeasuredCacheHandler {
+        async fn get(&self, _key: &str) -> Result<Option<Vec<u8>>, CacheError> {
+            Ok(None)
+        }
+
+        async fn set(
+            &self,
+            _key: &str,
+            _value: Vec<u8>,
+            _ttl_secs: u64,
+        ) -> Result<SetOutcome, CacheError> {
+            Ok(SetOutcome::default())
+        }
+
+        async fn set_with_tags(
+            &self,
+            _key: &str,
+            _value: Vec<u8>,
+            _ttl_secs: u64,
+            _tags: &[String],
+        ) -> Result<SetOutcome, CacheError> {
+            Ok(SetOutcome::default())
+        }
+
+        async fn invalidate(&self, _key: &str) -> Result<bool, CacheError> {
+            Ok(false)
+        }
+
+        async fn invalidate_by_tag(&self, _tag: &str) -> Result<(), CacheError> {
+            Ok(())
+        }
+
+        async fn clear(&self) -> Result<(), CacheError> {
+            Ok(())
+        }
+
+        fn get_all_keys(&self) -> Vec<String> {
+            vec![format!("{LAYOUT_KEY_PREFIX}cached")]
+        }
+    }
+
+    #[test]
+    fn layout_cache_omits_bytes_when_the_handler_cannot_measure_them() {
+        let cache = LayoutHtmlCache::with_handler(Arc::new(UnmeasuredCacheHandler));
+
+        assert_eq!(cache.get_metrics(), LayoutCacheMetrics { entries: 1, bytes: None });
+    }
+
+    #[tokio::test]
+    async fn static_composition_failure_keeps_its_error_and_clears_the_capture() {
+        let mut runtime = JsRuntime::new(RuntimeOptions::default());
+        runtime
+            .execute_script(
+                "init_static_render_test".to_string(),
+                "globalThis.console = { error() {} }; globalThis['~rari'] = { renderStaticDocument: async ({ capturedElement }) => capturedElement.id };".to_string(),
+            )
+            .expect("initialize static-render runtime");
+
+        let failed_result = run_static_render_script(
+            &mut runtime,
+            static_document_render_script(
+                "(() => { globalThis['~rari'].capturedElement = { id: 'stale' }; throw new Error('composition exploded'); })()",
+                "\"\"",
+            ),
+        )
+        .await;
+        let error = static_document_render_result(failed_result)
+            .expect_err("throwing composition should fail the static render");
+        assert!(error.to_string().contains("Static document render failed: composition exploded"));
+
+        let capture_is_clear = evaluate_test_javascript(
+            &mut runtime,
+            "globalThis['~rari'].capturedElement === undefined",
+        );
+        assert_eq!(capture_is_clear, Value::Bool(true));
+
+        let next_render_result = run_static_render_script(
+            &mut runtime,
+            static_document_render_script(
+                "(() => { globalThis['~rari'].capturedElement = { id: 'fresh' }; })()",
+                "\"\"",
+            ),
+        )
+        .await;
+        let next_render = static_document_render_result(next_render_result)
+            .expect("later composition should render successfully");
+        assert_eq!(next_render.get("html").and_then(Value::as_str), Some("fresh"));
+    }
 
     #[tokio::test]
     async fn test_layout_handler_round_trip() {

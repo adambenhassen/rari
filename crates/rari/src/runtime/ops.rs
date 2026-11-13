@@ -376,10 +376,14 @@ pub fn op_mark_response_unavailable(
     #[string] retry_after_seconds: String,
     #[string] request_id: String,
 ) -> Result<(), JsErrorBox> {
-    let retry_after_seconds = retry_after_seconds
-        .parse::<u64>()
-        .map_err(|_| JsErrorBox::type_error("retry-after must be a non-negative integer"))?;
+    let retry_after_seconds = parse_retry_after(&retry_after_seconds)?;
     mark_response_unavailable_for_request(&state.borrow(), retry_after_seconds, &request_id)
+}
+
+fn parse_retry_after(retry_after_seconds: &str) -> Result<u64, JsErrorBox> {
+    retry_after_seconds
+        .parse::<u64>()
+        .map_err(|_| JsErrorBox::type_error("retry-after must be a non-negative integer"))
 }
 
 fn mark_response_unavailable_for_request(
@@ -994,6 +998,22 @@ mod tests {
         op_state.put(runtime_context);
 
         let result = mark_response_unavailable_for_request(&op_state, 17, "unknown-request-id");
+
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn mark_response_unavailable_rejects_a_request_without_context() {
+        let op_state = OpState::new(None);
+
+        let result = mark_response_unavailable_for_request(&op_state, 17, "missing-request");
+
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn mark_response_unavailable_rejects_an_invalid_retry_after() {
+        let result = parse_retry_after("-1");
 
         assert!(result.is_err());
     }
