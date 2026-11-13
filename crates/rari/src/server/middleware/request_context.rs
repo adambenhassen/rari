@@ -475,7 +475,25 @@ impl RequestContext {
 
 #[cfg(test)]
 mod tests {
+    use std::io;
+
+    use tracing::subscriber;
+
     use super::*;
+
+    #[derive(Clone)]
+    struct SharedLogWriter(Arc<Mutex<Vec<u8>>>);
+
+    impl io::Write for SharedLogWriter {
+        fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
+            self.0.lock().extend_from_slice(bytes);
+            Ok(bytes.len())
+        }
+
+        fn flush(&mut self) -> io::Result<()> {
+            Ok(())
+        }
+    }
 
     #[test]
     fn test_request_context_creation() {
@@ -496,6 +514,28 @@ mod tests {
 
         assert_eq!(ctx.response_unavailable_after(), Some(17));
         assert!(!ctx.response_cache_allowed());
+    }
+
+    #[test]
+    fn unavailable_response_logs_route_and_retry_after_at_info_level() {
+        let output = Arc::new(Mutex::new(Vec::new()));
+        let output_for_writer = Arc::clone(&output);
+        let subscriber = tracing_subscriber::fmt()
+            .with_max_level(tracing::Level::INFO)
+            .with_ansi(false)
+            .with_writer(move || SharedLogWriter(Arc::clone(&output_for_writer)))
+            .finish();
+
+        subscriber::with_default(subscriber, || {
+            RequestContext::new("/maintenance".to_string()).mark_response_unavailable(60);
+        });
+
+        let bytes = output.lock().clone();
+        let log = String::from_utf8_lossy(&bytes);
+        assert!(log.contains(" INFO "));
+        assert!(log.contains("Page marked response unavailable"));
+        assert!(log.contains("route=/maintenance"));
+        assert!(log.contains("retry_after_seconds=60"));
     }
 
     #[test]
