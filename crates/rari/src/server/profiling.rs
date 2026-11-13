@@ -23,6 +23,7 @@ use tokio_tungstenite::{connect_async, tungstenite::Message};
 
 use crate::server::{host::types::ServerState, metrics_http::render_prometheus};
 
+#[derive(Debug)]
 enum HeapDumpError {
     Unavailable,
     Inactive,
@@ -56,6 +57,20 @@ async fn run_heap_dump_on_blocking_thread<T: Send + 'static>(
     dump: impl FnOnce() -> T + Send + 'static,
 ) -> Result<T, JoinError> {
     task::spawn_blocking(dump).await
+}
+
+async fn run_symbolized_heap_dump_on_blocking_thread<T: Send + 'static>(
+    dump: impl FnOnce() -> Result<T, HeapDumpError> + Send + 'static,
+) -> Result<T, HeapDumpError> {
+    run_heap_dump_on_blocking_thread(move || {
+        let result = dump();
+        if !matches!(&result, Err(HeapDumpError::Inactive)) {
+            backtrace::clear_symbol_cache();
+        }
+        result
+    })
+    .await
+    .map_err(|error| HeapDumpError::Failed(format!("blocking heap dump task failed: {error}")))?
 }
 
 impl HeapDumpError {
@@ -378,18 +393,14 @@ async fn dump_heap_pprof() -> Result<Vec<u8>, HeapDumpError> {
         return Err(HeapDumpError::Unavailable);
     };
     let prof_ctl = Arc::clone(prof_ctl);
-    run_heap_dump_on_blocking_thread(move || {
+    run_symbolized_heap_dump_on_blocking_thread(move || {
         let mut prof_ctl = prof_ctl.blocking_lock();
         if !prof_ctl.activated() {
             return Err(HeapDumpError::Inactive);
         }
-        let result =
-            prof_ctl.dump_pprof().map_err(|error| HeapDumpError::Failed(error.to_string()));
-        backtrace::clear_symbol_cache();
-        result
+        prof_ctl.dump_pprof().map_err(|error| HeapDumpError::Failed(error.to_string()))
     })
     .await
-    .map_err(|error| HeapDumpError::Failed(format!("blocking heap dump task failed: {error}")))?
 }
 
 /// `GET /_rari/debug/heap` — return a symbolized pprof heap profile.
@@ -495,12 +506,13 @@ pub async fn metrics_handler(State(state): State<ServerState>) -> impl IntoRespo
         response_cache.evictions,
     );
 
-    let (layout_entries, layout_bytes) = state.layout_html_cache.get_metrics();
+    let layout_metrics = state.layout_html_cache.get_metrics();
     let _ = writeln!(
         body,
-        "# TYPE rari_layout_cache_entries gauge\nrari_layout_cache_entries {layout_entries}"
+        "# TYPE rari_layout_cache_entries gauge\nrari_layout_cache_entries {}",
+        layout_metrics.entries,
     );
-    if let Some(layout_bytes) = layout_bytes {
+    if let Some(layout_bytes) = layout_metrics.bytes {
         let _ = writeln!(
             body,
             "# TYPE rari_layout_cache_bytes gauge\nrari_layout_cache_bytes {layout_bytes}"
@@ -579,9 +591,10 @@ mod tests {
     async fn symbolized_heap_dump_runs_off_the_async_worker() {
         let async_thread = thread::current().id();
 
-        let dump_thread = run_heap_dump_on_blocking_thread(|| thread::current().id())
-            .await
-            .expect("blocking task should complete");
+        let dump_thread =
+            run_symbolized_heap_dump_on_blocking_thread(|| Ok(thread::current().id()))
+                .await
+                .expect("symbolized heap dump should complete");
 
         assert_ne!(dump_thread, async_thread);
     }
