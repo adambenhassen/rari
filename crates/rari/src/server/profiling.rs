@@ -13,8 +13,13 @@ use axum::{
     response::{IntoResponse, Response},
 };
 use base64::{Engine, engine::general_purpose::STANDARD};
+use futures::{SinkExt, StreamExt};
 use tikv_jemalloc_ctl::{epoch, stats};
-use tokio::time::sleep;
+use tokio::{
+    task::{self, JoinError},
+    time::{sleep, timeout},
+};
+use tokio_tungstenite::{connect_async, tungstenite::Message};
 
 use crate::server::{host::types::ServerState, metrics_http::render_prometheus};
 
@@ -49,8 +54,8 @@ fn pyroscope_time_range(now: SystemTime) -> Result<(u64, u64), SystemTimeError> 
 
 async fn run_heap_dump_on_blocking_thread<T: Send + 'static>(
     dump: impl FnOnce() -> T + Send + 'static,
-) -> Result<T, tokio::task::JoinError> {
-    tokio::task::spawn_blocking(dump).await
+) -> Result<T, JoinError> {
+    task::spawn_blocking(dump).await
 }
 
 impl HeapDumpError {
@@ -198,7 +203,7 @@ pub fn spawn_pprof_gateway_client() {
             match run_gateway_session(&ws_url, &hostname).await {
                 Ok(()) => tracing::info!("pprof gateway session closed; reconnecting"),
                 Err(error) => {
-                    tracing::warn!(%error, "pprof gateway connection failed; check PPROF_GATEWAY_URL and gateway reachability before retrying")
+                    tracing::warn!(%error, "pprof gateway connection failed; check PPROF_GATEWAY_URL and gateway reachability before retrying");
                 }
             }
             sleep(Duration::from_secs(30)).await;
@@ -206,20 +211,19 @@ pub fn spawn_pprof_gateway_client() {
     });
 }
 
+#[expect(
+    clippy::too_many_lines,
+    reason = "The gateway session keeps registration and request correlation in one protocol flow"
+)]
 async fn run_gateway_session(
     ws_url: &str,
     hostname: &str,
 ) -> Result<(), Box<dyn Error + Send + Sync>> {
-    use futures::{SinkExt, StreamExt};
-    use tokio_tungstenite::tungstenite::Message;
-
     let (mut ws, _) =
-        tokio::time::timeout(PPROF_GATEWAY_TIMEOUT, tokio_tungstenite::connect_async(ws_url))
-            .await
-            .map_err(|_| {
-                io::Error::new(io::ErrorKind::TimedOut, "pprof gateway websocket connect timed out")
-            })??;
-    tokio::time::timeout(
+        timeout(PPROF_GATEWAY_TIMEOUT, connect_async(ws_url)).await.map_err(|_| {
+            io::Error::new(io::ErrorKind::TimedOut, "pprof gateway websocket connect timed out")
+        })??;
+    timeout(
         PPROF_GATEWAY_TIMEOUT,
         ws.send(Message::Text(
             serde_json::json!({"service": "frontend", "hostname": hostname}).to_string().into(),
@@ -229,7 +233,7 @@ async fn run_gateway_session(
     .map_err(|_| {
         io::Error::new(io::ErrorKind::TimedOut, "pprof gateway registration send timed out")
     })??;
-    let reply = tokio::time::timeout(PPROF_GATEWAY_TIMEOUT, ws.next())
+    let reply = timeout(PPROF_GATEWAY_TIMEOUT, ws.next())
         .await
         .map_err(|_| {
             io::Error::new(io::ErrorKind::TimedOut, "pprof gateway registration reply timed out")
@@ -282,7 +286,7 @@ async fn run_gateway_session(
         };
 
         if request.get("type").and_then(serde_json::Value::as_str) == Some("statsviz_start") {
-            tokio::time::timeout(
+            timeout(
                 PPROF_GATEWAY_TIMEOUT,
                 ws.send(Message::Text(
                     serde_json::json!({
@@ -303,7 +307,7 @@ async fn run_gateway_session(
 
         let Some(url) = request.get("url").and_then(serde_json::Value::as_str) else {
             tracing::warn!(request_id = %id, "Malformed pprof gateway request is missing a string url; provide a url to request a profile, replying with an error");
-            tokio::time::timeout(
+            timeout(
                 PPROF_GATEWAY_TIMEOUT,
                 ws.send(Message::Text(
                     serde_json::json!({
@@ -360,14 +364,11 @@ async fn run_gateway_session(
                 })
             }
         };
-        tokio::time::timeout(
-            PPROF_GATEWAY_TIMEOUT,
-            ws.send(Message::Text(response.to_string().into())),
-        )
-        .await
-        .map_err(|_| {
-            io::Error::new(io::ErrorKind::TimedOut, "pprof gateway response send timed out")
-        })??;
+        timeout(PPROF_GATEWAY_TIMEOUT, ws.send(Message::Text(response.to_string().into())))
+            .await
+            .map_err(|_| {
+                io::Error::new(io::ErrorKind::TimedOut, "pprof gateway response send timed out")
+            })??;
     }
     Ok(())
 }
@@ -647,7 +648,7 @@ mod tests {
                 .await
                 .expect("send malformed profile request");
 
-            let reply = tokio::time::timeout(Duration::from_secs(1), ws.next())
+            let reply = timeout(Duration::from_secs(1), ws.next())
                 .await
                 .expect("malformed request should receive an error reply")
                 .expect("gateway session should stay open")
@@ -680,7 +681,7 @@ mod tests {
             tokio::time::sleep(Duration::from_secs(10)).await;
         });
 
-        let result = tokio::time::timeout(
+        let result = timeout(
             Duration::from_secs(8),
             run_gateway_session(&format!("ws://{address}/connect"), "rari-test"),
         )
@@ -704,7 +705,7 @@ mod tests {
             tokio::time::sleep(Duration::from_secs(10)).await;
         });
 
-        let result = tokio::time::timeout(
+        let result = timeout(
             Duration::from_secs(8),
             run_gateway_session(&format!("ws://{address}/connect"), "rari-test"),
         )

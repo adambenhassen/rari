@@ -376,10 +376,14 @@ pub fn op_mark_response_unavailable(
     #[string] retry_after_seconds: String,
     #[string] request_id: String,
 ) -> Result<(), JsErrorBox> {
-    let retry_after_seconds = retry_after_seconds
-        .parse::<u64>()
-        .map_err(|_| JsErrorBox::type_error("retry-after must be a non-negative integer"))?;
+    let retry_after_seconds = parse_retry_after(&retry_after_seconds)?;
     mark_response_unavailable_for_request(&state.borrow(), retry_after_seconds, &request_id)
+}
+
+fn parse_retry_after(retry_after_seconds: &str) -> Result<u64, JsErrorBox> {
+    retry_after_seconds
+        .parse::<u64>()
+        .map_err(|_| JsErrorBox::type_error("retry-after must be a non-negative integer"))
 }
 
 fn mark_response_unavailable_for_request(
@@ -992,9 +996,7 @@ mod tests {
 
     #[test]
     fn mark_response_unavailable_rejects_an_invalid_retry_after() {
-        let state = Rc::new(RefCell::new(OpState::new(None)));
-
-        let result = op_mark_response_unavailable(state, "-1".to_string(), String::new());
+        let result = parse_retry_after("-1");
 
         assert!(result.is_err());
     }
