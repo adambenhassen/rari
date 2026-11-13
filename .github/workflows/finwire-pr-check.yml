@@ -94,3 +94,36 @@ jobs:
 
       - name: Test Rust
         run: cargo test -p rari --all-features
+
+      - name: Detect jemalloc feature
+        id: jemalloc
+        run: |
+          set -euo pipefail
+          cargo metadata --no-deps --format-version 1 > "$RUNNER_TEMP/cargo-metadata.json"
+          if jq -e '.packages[] | select(.name == "rari" and (.features | has("jemalloc")))' "$RUNNER_TEMP/cargo-metadata.json" >/dev/null; then
+            echo "enabled=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "enabled=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Build jemalloc E2E server
+        if: steps.jemalloc.outputs.enabled == 'true'
+        run: |
+          set -euo pipefail
+          cargo build -p rari --bin rari --features ext-full,jemalloc
+          install -D target/debug/rari packages/rari-linux-x64/bin/rari
+
+      - name: Install Playwright browser
+        if: steps.jemalloc.outputs.enabled == 'true'
+        run: pnpm exec playwright install chromium --with-deps
+
+      - name: Run jemalloc contract E2E
+        if: steps.jemalloc.outputs.enabled == 'true'
+        run: >-
+          pnpm exec playwright test
+          test/e2e/externalized-package-exports.spec.ts
+          test/e2e/heap-profile.spec.ts
+          test/e2e/metrics.spec.ts
+          test/e2e/runtime-health.spec.ts
+          test/e2e/server-response.spec.ts
+          test/e2e/stale-render.spec.ts
