@@ -47,12 +47,12 @@ jobs:
             os: ubuntu-24.04-arm
             target: aarch64-unknown-linux-gnu
             name: rari-linux-arm64
-          # darwin-arm64 disabled — local dev stays on cachefix.0; uncomment to build
-          # (also uncomment the darwin lines in the release job below):
-          # - platform: darwin-arm64
-          #   os: macos-14
-          #   target: aarch64-apple-darwin
-          #   name: rari-darwin-arm64
+          # Local development also needs the getData props handoff. Build without
+          # jemalloc on macOS; the production Linux binaries keep jemalloc enabled.
+          - platform: darwin-arm64
+            os: macos-14
+            target: aarch64-apple-darwin
+            name: rari-darwin-arm64
     steps:
       - name: Checkout
         uses: actions/checkout@v7
@@ -94,20 +94,27 @@ jobs:
           echo 'pub static RESIDUAL_LAZY_ESM_SOURCES: &[(&str, &str)] = &[];' > crates/rari/snapshots/residual_lazy_sources.rs
           echo 'pub static RESIDUAL_LAZY_JS_SOURCES: &[(&str, &str)] = &[];' >> crates/rari/snapshots/residual_lazy_sources.rs
           cargo run --release --manifest-path tools/snapshot/Cargo.toml -- crates/rari/snapshots
-          cargo build --release --target ${{ matrix.target }} --bin rari --features jemalloc
+          if [[ "${RUNNER_OS}" == "macOS" ]]; then
+            cargo build --release --target ${{ matrix.target }} --bin rari
+          else
+            cargo build --release --target ${{ matrix.target }} --bin rari --features jemalloc
+          fi
 
       - name: Prepare binary
-        # Ship the binary without DWARF (~150MB instead of ~460MB): the
-        # symtab stays, so Pyroscope keeps function names. Full line tables
-        # live on in the .debug sidecar (attached to the release) for
-        # offline file:line symbolization: `go tool pprof rari.debug <dump>`.
-        # The debuglink lets tooling find the sidecar by name.
+        # Linux binaries keep the symtab for Pyroscope and ship full line tables
+        # in a .debug sidecar for offline symbolization. macOS uses native strip
+        # and omits the separate debug sidecar.
         run: |
           mkdir -p binaries
           BIN=target/${{ matrix.target }}/release/rari
-          objcopy --only-keep-debug "$BIN" "binaries/${{ matrix.name }}.debug"
-          objcopy --strip-debug "$BIN" "binaries/${{ matrix.name }}"
-          objcopy --add-gnu-debuglink="binaries/${{ matrix.name }}.debug" "binaries/${{ matrix.name }}"
+          if [[ "${RUNNER_OS}" == "macOS" ]]; then
+            cp "$BIN" "binaries/${{ matrix.name }}"
+            strip -S "binaries/${{ matrix.name }}"
+          else
+            objcopy --only-keep-debug "$BIN" "binaries/${{ matrix.name }}.debug"
+            objcopy --strip-debug "$BIN" "binaries/${{ matrix.name }}"
+            objcopy --add-gnu-debuglink="binaries/${{ matrix.name }}.debug" "binaries/${{ matrix.name }}"
+          fi
           chmod +x binaries/${{ matrix.name }}
           ls -lh binaries/
 
@@ -178,7 +185,7 @@ jobs:
 
           build_platform linux-x64   linux  x64   "Linux x64 binary"   '"linux", "x64",'
           build_platform linux-arm64 linux  arm64 "Linux ARM64 binary" '"linux", "arm64",'
-          # build_platform darwin-arm64 darwin arm64 "macOS ARM64 binary" '"darwin", "arm64", "macos", "apple-silicon",'
+          build_platform darwin-arm64 darwin arm64 "macOS ARM64 binary" '"darwin", "arm64", "macos", "apple-silicon",'
 
           ls -la dist-tarballs
 
@@ -231,5 +238,5 @@ jobs:
             artifacts/rari-linux-x64/rari-linux-x64 \
             artifacts/rari-linux-x64/rari-linux-x64.debug \
             artifacts/rari-linux-arm64/rari-linux-arm64 \
-            artifacts/rari-linux-arm64/rari-linux-arm64.debug
-          # darwin: add artifacts/rari-darwin-arm64/rari-darwin-arm64 when re-enabled
+            artifacts/rari-linux-arm64/rari-linux-arm64.debug \
+            artifacts/rari-darwin-arm64/rari-darwin-arm64
