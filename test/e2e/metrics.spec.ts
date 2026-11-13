@@ -23,15 +23,17 @@ test('exposes allocator, cache, and per-route SSR metrics', async ({ request }) 
 })
 
 test('increments response cache hits after a repeated request', async ({ request }) => {
-  await request.get('/')
+  const rscRequest = { headers: { accept: 'text/x-component' } }
+  await request.get('/', rscRequest)
   const before = await request.get('/_rari/metrics')
   const beforeMetrics = await before.text()
   const beforeMatch = /^rari_response_cache_hits_total (\d+)$/m.exec(beforeMetrics)
   expect(beforeMatch).not.toBeNull()
   const beforeHits = Number(beforeMatch?.[1])
 
-  const repeated = await request.get('/')
+  const repeated = await request.get('/', rscRequest)
   expect(repeated.status()).toBe(200)
+  expect(repeated.headers()['x-cache']).toBe('HIT')
 
   const after = await request.get('/_rari/metrics')
   const afterMetrics = await after.text()

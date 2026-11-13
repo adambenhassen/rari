@@ -1,4 +1,4 @@
-import { existsSync, readFileSync, statSync } from 'node:fs'
+import { existsSync, readFileSync } from 'node:fs'
 import { expect, test } from '@playwright/test'
 import { getRariLogPath } from './shared/helpers'
 
@@ -17,7 +17,7 @@ function unavailableLog(offset: number): string {
 }
 
 test('returns a pre-commit mark as an uncacheable 503 response', async ({ request }) => {
-  const logOffset = existsSync(LOG_FILE) ? statSync(LOG_FILE).size : 0
+  const logOffset = existsSync(LOG_FILE) ? readFileSync(LOG_FILE, 'utf8').length : 0
   const url = '/server-response?mode=unavailable'
   const first = await request.get(url)
   const firstBody = await first.text()
