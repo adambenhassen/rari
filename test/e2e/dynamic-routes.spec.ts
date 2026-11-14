@@ -89,9 +89,11 @@ test.describe('Dynamic Routes', () => {
     test('retains getData props after an action refresh', async ({ page }) => {
       await page.goto('/get-data-props/action-refresh')
       const requestData = page.getByTestId('request-data-id')
+      const originalId = (await requestData.textContent()) ?? ''
 
-      await expect(requestData).toHaveText(/^\d+$/)
+      expect(originalId).toMatch(/^\d+$/)
       await submitAndWaitForAction(page, '[data-testid="refresh-get-data"]')
+      await expect(requestData).not.toHaveText(originalId)
       await expect(requestData).toHaveText(/^\d+$/)
     })
 
