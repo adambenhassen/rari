@@ -2,7 +2,23 @@ mod cache;
 mod render;
 mod route;
 
-use axum::{body::Body, http::StatusCode, response::Response};
+use axum::{
+    body::Body,
+    http::{HeaderValue, StatusCode, header::CACHE_CONTROL},
+    response::Response,
+};
+
+use crate::server::middleware::request_context::RequestContext;
+
+pub(super) fn apply_request_no_store(
+    mut response: Response,
+    request_context: &RequestContext,
+) -> Response {
+    if request_context.must_send_no_store() {
+        response.headers_mut().insert(CACHE_CONTROL, HeaderValue::from_static("no-store"));
+    }
+    response
+}
 
 pub(super) fn response_unavailable(
     body: Body,

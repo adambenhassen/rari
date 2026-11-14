@@ -1,6 +1,7 @@
 use bytes::Bytes;
 use rari_error::RariError;
 use rustc_hash::FxHashMap;
+use serde_json::Value;
 use tokio::sync::mpsc::Receiver;
 
 use crate::server::routing::types::ParamValue;
@@ -12,9 +13,17 @@ pub struct LayoutRenderContext {
     pub search_params: FxHashMap<String, Vec<String>>,
     pub headers: FxHashMap<String, String>,
     pub pathname: String,
+    pub page_data_props: Option<Value>,
     pub template_navigation_id: Option<u32>,
     pub metadata: Option<PageMetadata>,
     pub reuse_layout_paths: Vec<String>,
+}
+
+#[derive(Debug, Clone)]
+pub struct PageDataResult {
+    pub not_found: bool,
+    pub failed: bool,
+    pub props: Option<Value>,
 }
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]

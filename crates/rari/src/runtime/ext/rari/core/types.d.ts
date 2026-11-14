@@ -203,6 +203,7 @@ declare global {
           pagePath: string,
           params: Readonly<Record<string, string>>,
           searchParams: Readonly<Record<string, string>>,
+          pageProps: Readonly<Record<string, unknown>>,
         ) => Promise<unknown[]>
       }
       injectMetadataIntoDocument?: (element: unknown, metadata: unknown) => unknown

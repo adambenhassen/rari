@@ -25,7 +25,8 @@ use crate::{
         layout::{
             ChunkedContentType, LayoutRenderContext, LayoutRenderer, OpenGraphImage,
             OpenGraphImageDescriptor, OpenGraphMetadata, PageMetadata, RenderResult,
-            TwitterMetadata, component_dist_path, is_rari_page_not_found, sort_flight_protocol,
+            TwitterMetadata, component_dist_path, create_page_props, is_rari_page_not_found,
+            sort_flight_protocol,
         },
     },
     server::{
@@ -125,12 +126,21 @@ pub async fn collect_page_metadata(
     let runtime = Arc::clone(&renderer.runtime);
     drop(renderer);
 
+    let page_props = match create_page_props(route_match, context) {
+        Ok(page_props) => page_props,
+        Err(error) => {
+            tracing::error!("Failed to create page props for metadata collection: {}", error);
+            return None;
+        }
+    };
+
     match runtime
         .collect_metadata(
             layout_paths,
             page_path.clone(),
             context.params.clone(),
             context.search_params.clone(),
+            page_props,
         )
         .await
     {
@@ -1188,6 +1198,7 @@ mod tests {
             search_params: FxHashMap::default(),
             headers: FxHashMap::default(),
             pathname: "/".to_string(),
+            page_data_props: None,
             template_navigation_id: None,
             metadata: None,
             reuse_layout_paths: Vec::new(),

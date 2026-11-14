@@ -334,6 +334,7 @@ fn create_warmup_context(route_match: &AppRouteMatch) -> LayoutRenderContext {
         search_params: FxHashMap::default(),
         headers: FxHashMap::default(),
         pathname: route_match.pathname.clone(),
+        page_data_props: None,
         template_navigation_id: None,
         metadata: None,
         reuse_layout_paths: Vec::new(),

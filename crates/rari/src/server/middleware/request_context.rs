@@ -197,7 +197,7 @@ pub struct RequestContext {
     request_id: String,
     start_time: Instant,
     route_path: String,
-    response_unavailable_after: Mutex<Option<u64>>,
+    response_cache_state: Mutex<ResponseCacheState>,
     pub cookie_header: Option<String>,
     pub request_headers: FxHashMap<String, String>,
     pub skip_layout_html_cache: bool,
@@ -205,6 +205,11 @@ pub struct RequestContext {
     pub function_cache: Arc<DashMap<String, Value>>,
     pub action_form_state: Option<Value>,
     pub csp_nonce: Option<String>,
+}
+
+struct ResponseCacheState {
+    writes_enabled: bool,
+    unavailable_after: Option<u64>,
 }
 
 impl RequestContext {
@@ -215,7 +220,10 @@ impl RequestContext {
             request_id: Uuid::new_v4().to_string(),
             start_time: Instant::now(),
             route_path,
-            response_unavailable_after: Mutex::new(None),
+            response_cache_state: Mutex::new(ResponseCacheState {
+                writes_enabled: true,
+                unavailable_after: None,
+            }),
             cookie_header: None,
             request_headers: FxHashMap::default(),
             skip_layout_html_cache: false,
@@ -268,9 +276,9 @@ impl RequestContext {
 
     pub fn mark_response_unavailable(&self, retry_after_seconds: u64) {
         let newly_marked = {
-            let mut unavailable_after = self.response_unavailable_after.lock();
-            if unavailable_after.is_none() {
-                *unavailable_after = Some(retry_after_seconds);
+            let mut state = self.response_cache_state.lock();
+            if state.unavailable_after.is_none() {
+                state.unavailable_after = Some(retry_after_seconds);
                 true
             } else {
                 false
@@ -286,11 +294,21 @@ impl RequestContext {
     }
 
     pub fn response_unavailable_after(&self) -> Option<u64> {
-        *self.response_unavailable_after.lock()
+        self.response_cache_state.lock().unavailable_after
+    }
+
+    pub fn disable_cache_writes(&self) {
+        self.response_cache_state.lock().writes_enabled = false;
+    }
+
+    pub fn must_send_no_store(&self) -> bool {
+        let state = self.response_cache_state.lock();
+        !state.writes_enabled || state.unavailable_after.is_some()
     }
 
     pub fn response_cache_allowed(&self) -> bool {
-        self.response_unavailable_after().is_none()
+        let state = self.response_cache_state.lock();
+        state.writes_enabled && state.unavailable_after.is_none()
     }
 
     pub fn start_time(&self) -> Instant {
@@ -514,6 +532,18 @@ mod tests {
 
         assert_eq!(ctx.response_unavailable_after(), Some(17));
         assert!(!ctx.response_cache_allowed());
+    }
+
+    #[test]
+    fn failed_request_disables_cache_writes_without_marking_unavailable() {
+        let ctx = RequestContext::new("/test".to_string());
+
+        assert!(!ctx.must_send_no_store());
+        ctx.disable_cache_writes();
+
+        assert!(ctx.must_send_no_store());
+        assert!(!ctx.response_cache_allowed());
+        assert_eq!(ctx.response_unavailable_after(), None);
     }
 
     #[test]

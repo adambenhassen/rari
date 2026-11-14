@@ -127,3 +127,10 @@ jobs:
           test/e2e/runtime-health.spec.ts
           test/e2e/server-response.spec.ts
           test/e2e/stale-render.spec.ts
+
+      - name: Test getData prop isolation and response caching
+        if: steps.jemalloc.outputs.enabled == 'true'
+        run: >-
+          pnpm exec playwright test test/e2e/dynamic-routes.spec.ts
+          --grep='getData props|does not cache a getData throw or invalid props|serves a cached response when getData fails'
+          --project='Desktop Chrome' --workers=1

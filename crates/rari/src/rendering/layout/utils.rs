@@ -97,11 +97,11 @@ pub fn create_page_props(
         serde_json::to_value(&context.search_params)?
     };
 
-    let result = serde_json::json!({
-        "params": params_value,
-        "searchParams": search_params_value
-    });
-    Ok(result)
+    let mut result =
+        context.page_data_props.as_ref().and_then(Value::as_object).cloned().unwrap_or_default();
+    result.insert("params".to_string(), params_value);
+    result.insert("searchParams".to_string(), search_params_value);
+    Ok(Value::Object(result))
 }
 
 pub fn format_action_post_url(
@@ -144,6 +144,7 @@ pub fn create_layout_context(
         search_params,
         headers,
         pathname,
+        page_data_props: None,
         template_navigation_id: None,
         metadata: None,
         reuse_layout_paths: Vec::new(),

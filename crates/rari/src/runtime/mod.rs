@@ -13,9 +13,7 @@ pub mod transpile;
 
 use factory::{JsRuntimePool, PooledRuntime};
 
-use crate::server::{
-    document::metadata, middleware::request_context::RequestContext, routing::types::ParamValue,
-};
+use crate::server::{document::metadata, routing::types::ParamValue};
 
 pub const DEFAULT_JS_POOL_SIZE: usize = 1;
 
@@ -129,12 +127,14 @@ impl JsExecutionRuntime {
         page_path: String,
         params: FxHashMap<String, ParamValue>,
         search_params: FxHashMap<String, Vec<String>>,
+        page_props: Value,
     ) -> Result<Value, RariError> {
         let data = serde_json::json!({
             "layoutPaths": layout_paths,
             "pagePath": page_path,
             "params": params,
             "searchParams": search_params,
+            "pageProps": page_props,
         });
 
         let data_json =
@@ -147,7 +147,8 @@ impl JsExecutionRuntime {
                     data.layoutPaths,
                     data.pagePath,
                     data.params,
-                    data.searchParams
+                    data.searchParams,
+                    data.pageProps
                 );
             }})()"
         );

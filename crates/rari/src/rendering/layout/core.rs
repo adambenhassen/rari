@@ -10,7 +10,7 @@ use tokio::sync::{Mutex, mpsc, oneshot};
 use uuid::Uuid;
 
 use super::{
-    types::{ChunkedContentType, LayoutRenderContext, PageMetadata, RenderResult},
+    types::{ChunkedContentType, LayoutRenderContext, PageDataResult, PageMetadata, RenderResult},
     utils,
 };
 use crate::{
@@ -54,6 +54,11 @@ fn should_use_layout_html_cache(
     request_context: Option<&RequestContext>,
 ) -> bool {
     if request_context.is_some_and(|ctx| ctx.skip_layout_html_cache) {
+        return false;
+    }
+    if request_context.is_some_and(|ctx| !ctx.response_cache_allowed())
+        || context.page_data_props.is_some()
+    {
         return false;
     }
 
@@ -561,7 +566,7 @@ impl LayoutRenderer {
         route_match: &AppRouteMatch,
         context: &LayoutRenderContext,
     ) -> Result<bool, RariError> {
-        self.check_page_not_found_on(route_match, context, None).await
+        Ok(self.get_page_data_on(route_match, context, None).await?.not_found)
     }
 
     /// Prefer [`Self::check_page_not_found_on`] with a sticky runtime when the caller
@@ -572,6 +577,24 @@ impl LayoutRenderer {
         context: &LayoutRenderContext,
         sticky_runtime: Option<&Arc<dyn JsRuntimeInterface>>,
     ) -> Result<bool, RariError> {
+        Ok(self.get_page_data_on(route_match, context, sticky_runtime).await?.not_found)
+    }
+
+    pub async fn get_page_data(
+        &self,
+        route_match: &AppRouteMatch,
+        context: &LayoutRenderContext,
+    ) -> Result<PageDataResult, RariError> {
+        self.get_page_data_on(route_match, context, None).await
+    }
+
+    /// Prefer this method with a sticky runtime when the caller already holds a pool slot lease.
+    pub async fn get_page_data_on(
+        &self,
+        route_match: &AppRouteMatch,
+        context: &LayoutRenderContext,
+        sticky_runtime: Option<&Arc<dyn JsRuntimeInterface>>,
+    ) -> Result<PageDataResult, RariError> {
         let page_props = utils::create_page_props(route_match, context)?;
         let page_props_json = serde_json::to_string(&page_props)?;
 
@@ -581,13 +604,13 @@ impl LayoutRenderer {
             .and_then(|p| p.canonicalize().ok());
 
         let Some(base_path) = dist_server_path else {
-            return Ok(false);
+            return Ok(PageDataResult { not_found: false, failed: false, props: None });
         };
 
         let page_file_path = utils::component_dist_path(&base_path, &route_match.route.file_path);
 
         if !page_file_path.exists() {
-            return Ok(false);
+            return Ok(PageDataResult { not_found: false, failed: false, props: None });
         }
 
         let page_path = path_to_file_url(&page_file_path);
@@ -602,40 +625,52 @@ impl LayoutRenderer {
                     const module = await import("{page_path}");
 
                     if (typeof module.getData !== 'function') {{
-                        return {{ notFound: false }};
+                        return {{ notFound: false, failed: false, props: null }};
                     }}
 
                     const pageProps = {page_props_json};
                     try {{
                         const result = await module.getData(pageProps);
-                        return {{ notFound: result?.notFound === true }};
+                        const props = result?.props;
+                        const propsInvalid = props != null &&
+                            (typeof props !== 'object' || Array.isArray(props));
+                        if (propsInvalid) {{
+                            console.warn('[get_page_data] Ignoring non-object or array getData props');
+                        }}
+                        return {{
+                            notFound: result?.notFound === true,
+                            failed: propsInvalid,
+                            props: propsInvalid ? null : (props ?? null)
+                        }};
                     }} catch (error) {{
                         if (isNotFoundError(error)) {{
-                            return {{ notFound: true }};
+                            return {{ notFound: true, failed: false, props: null }};
                         }}
                         throw error;
                     }}
                 }} catch (error) {{
-                    console.error('[check_page_not_found] Error:', error);
-                    return {{ notFound: false }};
+                    console.error('[get_page_data] Error:', error);
+                    return {{ notFound: false, failed: true, props: null }};
                 }}
             }})()
             "#
         );
 
         let result = if let Some(runtime) = sticky_runtime {
-            runtime.execute_script("check_not_found".to_string(), check_script).await?
+            runtime.execute_script("get_page_data".to_string(), check_script).await?
         } else {
             let renderer = self.renderer.lock().await;
             let runtime = Arc::clone(&renderer.runtime);
             drop(renderer);
-            runtime.execute_script("check_not_found".to_string(), check_script).await?
+            runtime.execute_script("get_page_data".to_string(), check_script).await?
         };
 
         let not_found =
             result.get("notFound").and_then(serde_json::Value::as_bool).unwrap_or(false);
+        let failed = result.get("failed").and_then(serde_json::Value::as_bool).unwrap_or(false);
+        let props = result.get("props").filter(|props| props.is_object()).cloned();
 
-        Ok(not_found)
+        Ok(PageDataResult { not_found, failed, props })
     }
 
     pub async fn render_route(

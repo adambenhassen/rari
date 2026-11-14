@@ -7,6 +7,123 @@ const PRODUCTS_BOOKS_NOVEL_URL = /\/products\/books\/novel-456$/
 
 test.describe('Dynamic Routes', () => {
   test.describe('Single Dynamic Segment [slug]', () => {
+    test('does not share cached layout HTML between concurrent requests with getData props', async ({
+      request,
+    }) => {
+      const cacheCase = `layout-cache-${Date.now()}-${Math.random()}`
+      const primeUrl = `/get-data-props/article?case=${cacheCase}`
+      const primeResponse = await request.get(primeUrl)
+      const primeBody = await primeResponse.text()
+      const primeDataId = /data-testid="request-data-id">(\d+)</.exec(primeBody)?.[1]
+      expect(primeResponse.status()).toBe(200)
+      expect(primeResponse.headers()['x-cache']).toBe('MISS')
+      expect(primeDataId).toBeDefined()
+      expect(primeBody).toContain(`<title>Request data ${primeDataId}</title>`)
+
+      const [firstResponse, secondResponse] = await Promise.all([
+        request.get(`/get-data-props/%61rticle?case=${cacheCase}`),
+        request.get(`/get-data-props/art%69cle?case=${cacheCase}`),
+      ])
+      const [firstBody, secondBody] = await Promise.all([
+        firstResponse.text(),
+        secondResponse.text(),
+      ])
+      expect(firstResponse.status()).toBe(200)
+      expect(secondResponse.status()).toBe(200)
+      expect(firstResponse.headers()['x-cache']).toBe('MISS')
+      expect(secondResponse.headers()['x-cache']).toBe('MISS')
+
+      const dataIds = [firstBody, secondBody].map(
+        body => /data-testid="request-data-id">(\d+)</.exec(body)?.[1],
+      )
+      expect(dataIds[0]).toBeDefined()
+      expect(dataIds[1]).toBeDefined()
+      expect(new Set(dataIds).size).toBe(2)
+
+      for (const [body, dataId] of [
+        [firstBody, dataIds[0]],
+        [secondBody, dataIds[1]],
+      ]) {
+        expect(body).toContain(`<title>Request data ${dataId}</title>`)
+      }
+
+      expect(dataIds).not.toContain(primeDataId)
+
+      const cacheHit = await request.get(primeUrl)
+      expect(cacheHit.status()).toBe(200)
+      expect(cacheHit.headers()['x-cache']).toBe('HIT')
+      expect(await cacheHit.text()).toBe(primeBody)
+    })
+
+    test('shares getData props with metadata and render for concurrent requests to the same URL', async ({
+      request,
+    }) => {
+      const url = `/get-data-props/article?case=same-url-${Date.now()}-${Math.random()}`
+      const [firstResponse, secondResponse] = await Promise.all([
+        request.get(url),
+        request.get(url),
+      ])
+      const [firstBody, secondBody] = await Promise.all([
+        firstResponse.text(),
+        secondResponse.text(),
+      ])
+      const dataIds = [firstBody, secondBody].map(
+        body => /data-testid="request-data-id">(\d+)</.exec(body)?.[1],
+      )
+
+      expect(firstResponse.status()).toBe(200)
+      expect(secondResponse.status()).toBe(200)
+      expect(dataIds[0]).toBeDefined()
+      expect(dataIds[1]).toBeDefined()
+      expect(new Set(dataIds).size).toBe(2)
+
+      for (const [body, dataId] of [
+        [firstBody, dataIds[0]],
+        [secondBody, dataIds[1]],
+      ]) {
+        expect(body).toContain(`<title>Request data ${dataId}</title>`)
+      }
+    })
+
+    test('does not cache a getData throw or invalid props', async ({ request }) => {
+      for (const failure of ['throw', 'array']) {
+        const url = `/get-data-props/article?getDataFailure=${failure}&case=${Date.now()}-${Math.random()}`
+        const firstResponse = await request.get(url)
+        const firstBody = await firstResponse.text()
+        const secondResponse = await request.get(url)
+        const secondBody = await secondResponse.text()
+
+        expect(firstResponse.status()).toBe(200)
+        expect(secondResponse.status()).toBe(200)
+        expect(firstResponse.headers()['cache-control']).toBe('no-store')
+        expect(secondResponse.headers()['cache-control']).toBe('no-store')
+        expect(firstResponse.headers()['x-cache']).not.toBe('HIT')
+        expect(secondResponse.headers()['x-cache']).not.toBe('HIT')
+        expect(/data-testid="request-data-id">\d+</.test(firstBody)).toBe(false)
+        expect(/data-testid="request-data-id">\d+</.test(secondBody)).toBe(false)
+
+        const rscResponse = await request.get(url, { headers: { Accept: 'text/x-component' } })
+        expect(rscResponse.status()).toBe(200)
+        expect(rscResponse.headers()['cache-control']).toBe('no-store')
+      }
+    })
+
+    test('serves a cached response when getData fails on the next request', async ({ request }) => {
+      const cacheCase = `second-call-${Date.now()}-${Math.random()}`
+      const url = `/get-data-props/article?getDataFailure=second-call&case=${cacheCase}`
+      const firstResponse = await request.get(url)
+      const firstBody = await firstResponse.text()
+      const secondResponse = await request.get(url)
+      const secondBody = await secondResponse.text()
+
+      expect(firstResponse.status()).toBe(200)
+      expect(firstResponse.headers()['x-cache']).toBe('MISS')
+      expect(/data-testid="request-data-id">\d+</.test(firstBody)).toBe(true)
+      expect(secondResponse.status()).toBe(200)
+      expect(secondResponse.headers()['x-cache']).toBe('HIT')
+      expect(secondBody).toBe(firstBody)
+    })
+
     test('should render dynamic route with slug parameter', async ({ page }) => {
       await page.goto('/blog/hello-world')
 
