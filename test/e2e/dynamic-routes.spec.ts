@@ -18,7 +18,7 @@ test.describe('Dynamic Routes', () => {
       expect(primeResponse.status()).toBe(200)
       expect(primeResponse.headers()['x-cache']).toBe('MISS')
       expect(primeDataId).toBeDefined()
-      expect(primeBody).toContain(`<title>Request data ${primeDataId}</title>`)
+      expect(primeBody).toMatch(new RegExp(`<title[^>]*>Request data ${primeDataId}</title>`))
 
       const [firstResponse, secondResponse] = await Promise.all([
         request.get(`/get-data-props/%61rticle?case=${cacheCase}`),
@@ -44,7 +44,7 @@ test.describe('Dynamic Routes', () => {
         [firstBody, dataIds[0]],
         [secondBody, dataIds[1]],
       ]) {
-        expect(body).toContain(`<title>Request data ${dataId}</title>`)
+        expect(body).toMatch(new RegExp(`<title[^>]*>Request data ${dataId}</title>`))
       }
 
       expect(dataIds).not.toContain(primeDataId)
@@ -81,7 +81,7 @@ test.describe('Dynamic Routes', () => {
         [firstBody, dataIds[0]],
         [secondBody, dataIds[1]],
       ]) {
-        expect(body).toContain(`<title>Request data ${dataId}</title>`)
+        expect(body).toMatch(new RegExp(`<title[^>]*>Request data ${dataId}</title>`))
       }
     })
 
