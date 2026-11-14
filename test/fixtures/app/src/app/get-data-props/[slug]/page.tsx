@@ -1,8 +1,6 @@
 import type { Metadata, PageProps } from 'rari'
 import RefreshGetDataButton from './RefreshGetDataButton'
 
-type DataPageProps = PageProps<{ slug: string }> & { n: number }
-
 const responseAvailability = globalThis as typeof globalThis & {
   markResponseUnavailable: (retryAfterSeconds?: number) => void
 }
@@ -28,7 +26,13 @@ export function getData({ searchParams }: Readonly<PageProps>) {
   return { props: { n: ++nextId } }
 }
 
-export async function generateMetadata({ n, params }: Readonly<DataPageProps>): Promise<Metadata> {
+export async function generateMetadata({
+  n,
+  params,
+}: Readonly<{
+  n: number
+  params: Readonly<{ slug: string }>
+}>): Promise<Metadata> {
   await new Promise<void>(resolve => {
     setTimeout(resolve, 25)
   })
@@ -36,7 +40,7 @@ export async function generateMetadata({ n, params }: Readonly<DataPageProps>): 
   return { title: `Request data ${n}` }
 }
 
-export default function GetDataPropsPage({ n }: Readonly<DataPageProps>) {
+export default function GetDataPropsPage({ n }: Readonly<{ n: number }>) {
   return (
     <>
       <p data-testid="request-data-id">{n}</p>
