@@ -78,11 +78,6 @@ function mountAppRouterTree(resolvedElement: ReactNode): boolean {
   return true
 }
 
-function notifyClientReady() {
-  Reflect.set(globalThis, '__rari_client_ready', true)
-  window.dispatchEvent(new CustomEvent('rari:client-ready'))
-}
-
 function restoreDocumentTitle(ssrTitle: string) {
   if (ssrTitle === '') return
   const restore = () => {
@@ -112,7 +107,6 @@ function mountApp(content: ReactNode) {
   }
 
   restoreDocumentTitle(ssrTitle)
-  notifyClientReady()
 }
 
 getClientComponents()
