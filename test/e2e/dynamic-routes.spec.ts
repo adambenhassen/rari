@@ -97,8 +97,17 @@ test.describe('Dynamic Routes', () => {
       expect(actionResponse.headers()['x-action-revalidated-path']).toBe(
         '/get-data-props/action-refresh',
       )
-      await expect(requestData).not.toHaveText(originalId)
-      await expect(requestData).toHaveText(/^\d+$/)
+      const actionPayload = await actionResponse.text()
+      const marker = /"data-testid"\s*:\s*"request-data-id"/.exec(actionPayload)
+      expect(marker).not.toBeNull()
+      const markerIndex = marker?.index ?? -1
+      const propsStart = actionPayload.lastIndexOf('{', markerIndex)
+      const propsEnd = actionPayload.indexOf('}', markerIndex)
+      const props = actionPayload.slice(propsStart, propsEnd + 1)
+      const refreshedId = /"children"\s*:\s*"?(\d+)"?/.exec(props)?.[1]
+
+      expect(refreshedId).toBeDefined()
+      expect(refreshedId).not.toBe(originalId)
     })
 
     test('does not cache a getData throw or invalid props', async ({ request }) => {
