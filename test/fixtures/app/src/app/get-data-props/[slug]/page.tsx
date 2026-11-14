@@ -9,7 +9,6 @@ export function generateStaticParams() {
   return [{ slug: 'warmup' }, { slug: 'unavailable' }]
 }
 
-let nextId = 0
 const callsByCase = new Map<string, number>()
 
 export function getData({ searchParams }: Readonly<PageProps>) {
@@ -23,7 +22,7 @@ export function getData({ searchParams }: Readonly<PageProps>) {
     if (callCount === 1) throw new Error('getData failed on second call')
   }
 
-  return { props: { n: ++nextId } }
+  return { props: { n: Math.floor(Math.random() * Number.MAX_SAFE_INTEGER) } }
 }
 
 export async function generateMetadata({
