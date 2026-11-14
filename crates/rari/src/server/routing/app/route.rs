@@ -12,7 +12,7 @@ use axum::{
 use bytes::Bytes;
 use rari_error::RariError;
 use rustc_hash::FxHashMap;
-use tokio::{fs, sync::oneshot};
+use tokio::fs;
 
 use super::{
     apply_request_no_store,
@@ -288,7 +288,13 @@ pub async fn handle_app_route(
             let use_streaming = should_use_streaming(&route_match, &state.config);
 
             if use_streaming {
-                context.metadata = collect_page_metadata(&state, &route_match, &context).await;
+                context.metadata = collect_page_metadata(
+                    &state,
+                    &route_match,
+                    &context,
+                    Some(Arc::clone(&request_context)),
+                )
+                .await;
 
                 let response = render_rsc_navigation_streaming(
                     Arc::new(state),
@@ -303,6 +309,7 @@ pub async fn handle_app_route(
             let cache_key = response_cache_key(path, query_params_ref, Some("rsc"), cookie_header);
 
             if context.template_navigation_id.is_none()
+                && request_context.response_unavailable_after().is_none()
                 && let Some(cached) = state.response_cache.get(&cache_key).await
             {
                 let status_code = if route_match.not_found.is_some() {
@@ -334,7 +341,13 @@ pub async fn handle_app_route(
                     .expect("Valid cached RSC response"));
             }
 
-            context.metadata = collect_page_metadata(&state, &route_match, &context).await;
+            context.metadata = collect_page_metadata(
+                &state,
+                &route_match,
+                &context,
+                Some(Arc::clone(&request_context)),
+            )
+            .await;
 
             let rsc_result = layout_renderer
                 .render_route(&route_match, &context, Some(Arc::clone(&request_context)))
@@ -346,8 +359,13 @@ pub async fn handle_app_route(
                     if let Some(app_router) = state.app_router.as_ref()
                         && mark_route_not_found_if_signaled(&e, &mut route_match, app_router)
                     {
-                        context.metadata =
-                            collect_page_metadata(&state, &route_match, &context).await;
+                        context.metadata = collect_page_metadata(
+                            &state,
+                            &route_match,
+                            &context,
+                            Some(Arc::clone(&request_context)),
+                        )
+                        .await;
                         match layout_renderer
                             .render_route(
                                 &route_match,
@@ -457,7 +475,9 @@ pub async fn handle_app_route(
 
             let client_etag = headers.get("if-none-match").and_then(|v| v.to_str().ok());
 
-            if let Some(cached) = state.response_cache.get(&cache_key).await {
+            if request_context.response_unavailable_after().is_none()
+                && let Some(cached) = state.response_cache.get(&cache_key).await
+            {
                 if let (Some(cached_etag), Some(client_etag)) = (&cached.metadata.etag, client_etag)
                     && cached_etag == client_etag
                 {
@@ -549,15 +569,13 @@ pub async fn handle_app_route(
             let use_streaming = should_use_streaming(&route_match, &state.config);
 
             if use_streaming {
-                let (metadata_tx, metadata_rx) = oneshot::channel();
-                let state_meta = state.clone();
-                let route_match_meta = route_match.clone();
-                let context_meta = context.clone();
-                tokio::spawn(async move {
-                    let metadata =
-                        collect_page_metadata(&state_meta, &route_match_meta, &context_meta).await;
-                    let _ = metadata_tx.send(metadata);
-                });
+                context.metadata = collect_page_metadata(
+                    &state,
+                    &route_match,
+                    &context,
+                    Some(Arc::clone(&request_context)),
+                )
+                .await;
 
                 let response = Box::pin(render_with_fallback(
                     Arc::new(state.clone()),
@@ -565,7 +583,7 @@ pub async fn handle_app_route(
                     context.clone(),
                     accept_encoding,
                     Arc::clone(&request_context),
-                    Some(metadata_rx),
+                    None,
                 ))
                 .await?;
                 let response = apply_request_no_store(response, &request_context);
@@ -703,7 +721,13 @@ pub async fn handle_app_route(
                 return Ok(response);
             }
 
-            let metadata = collect_page_metadata(&state, &route_match, &context).await;
+            let metadata = collect_page_metadata(
+                &state,
+                &route_match,
+                &context,
+                Some(Arc::clone(&request_context)),
+            )
+            .await;
             context.metadata = metadata;
 
             let render_result = match layout_renderer
@@ -721,8 +745,13 @@ pub async fn handle_app_route(
                     if let Some(app_router) = state.app_router.as_ref()
                         && mark_route_not_found_if_signaled(&e, &mut route_match, app_router)
                     {
-                        context.metadata =
-                            collect_page_metadata(&state, &route_match, &context).await;
+                        context.metadata = collect_page_metadata(
+                            &state,
+                            &route_match,
+                            &context,
+                            Some(Arc::clone(&request_context)),
+                        )
+                        .await;
                         match layout_renderer
                             .render_route_with_streaming(
                                 &route_match,

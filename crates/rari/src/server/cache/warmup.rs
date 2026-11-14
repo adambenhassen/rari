@@ -148,7 +148,7 @@ async fn warm_route(
 
     let _render_guard = warmup_render_lock().await.lock_owned().await;
 
-    context.metadata = collect_page_metadata(state, &route_match, &context).await;
+    context.metadata = collect_page_metadata(state, &route_match, &context, None).await;
 
     let render_result = layout_renderer
         .render_route_with_streaming(
