@@ -92,7 +92,11 @@ test.describe('Dynamic Routes', () => {
       const originalId = (await requestData.textContent()) ?? ''
 
       expect(originalId).toMatch(/^\d+$/)
-      await submitAndWaitForAction(page, '[data-testid="refresh-get-data"]')
+      const actionResponse = await submitAndWaitForAction(page, '[data-testid="refresh-get-data"]')
+      expect(actionResponse.headers()['x-action-revalidated']).toBe('2')
+      expect(actionResponse.headers()['x-action-revalidated-path']).toBe(
+        '/get-data-props/action-refresh',
+      )
       await expect(requestData).not.toHaveText(originalId)
       await expect(requestData).toHaveText(/^\d+$/)
     })
