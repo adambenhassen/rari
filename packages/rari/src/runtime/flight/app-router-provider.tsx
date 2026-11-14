@@ -1109,9 +1109,6 @@ export function AppRouterProvider({
     window.addEventListener('rari:rsc-invalidate', onRscInvalidate)
     window.addEventListener('rari:app-router-manifest-updated', onManifestUpdated)
 
-    Reflect.set(globalThis, '__rari_client_ready', true)
-    window.dispatchEvent(new CustomEvent('rari:client-ready'))
-
     return () => {
       window.removeEventListener('rari:navigation-start', handleNavigationStart)
       window.removeEventListener('rari:navigate', onNavigate)
