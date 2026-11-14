@@ -317,12 +317,11 @@ mod tests {
             )
             .await;
 
-        assert!(
-            result
-                .unwrap_err()
+        assert!(result.is_err_and(|error| {
+            error
                 .to_string()
                 .contains("markResponseUnavailable can only be called during a server render")
-        );
+        }));
     }
 
     #[tokio::test]

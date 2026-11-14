@@ -20,6 +20,7 @@ pub struct LayoutRenderContext {
 }
 
 #[derive(Debug, Clone)]
+#[non_exhaustive]
 pub struct PageDataResult {
     pub not_found: bool,
     pub failed: bool,
