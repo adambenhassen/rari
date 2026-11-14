@@ -19,12 +19,11 @@ pub struct LayoutRenderContext {
     pub reuse_layout_paths: Vec<String>,
 }
 
-#[derive(Debug, Clone)]
-#[non_exhaustive]
-pub struct PageDataResult {
-    pub not_found: bool,
-    pub failed: bool,
-    pub props: Option<Value>,
+#[derive(Debug, Clone, PartialEq)]
+pub enum PageData {
+    NotFound,
+    Failed(String),
+    Found(Option<Value>),
 }
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]

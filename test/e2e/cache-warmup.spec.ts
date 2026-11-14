@@ -17,6 +17,28 @@ test.describe('Cache warmup', () => {
     expect(body).toMatch(new RegExp(`<title[^>]*>Request data ${dataId}</title>`))
   })
 
+  test('does not call getData for static fast-cache hits', async ({ request }) => {
+    const cached = await request.get('/get-data-props/fast-cache')
+    const probeCase = `${Date.now()}-${Math.random()}`
+    const probe = await request.get(`/get-data-props/fast-cache?case=${probeCase}`)
+    const probeBody = await probe.text()
+    const getDataCallCount = /data-testid="get-data-call-count">(\d+)</.exec(probeBody)?.[1]
+
+    expect(cached.status()).toBe(200)
+    expect(cached.headers()['x-cache']).toBe('HIT')
+    expect(probe.headers()['x-cache']).not.toBe('HIT')
+    expect(getDataCallCount).toBe('2')
+  })
+
+  test('does not cache a statically parameterized route whose getData fails in warmup', async ({
+    request,
+  }) => {
+    const response = await request.get('/get-data-props/warmup-failure')
+
+    expect(response.status()).toBe(200)
+    expect(response.headers()['x-cache']).not.toBe('HIT')
+  })
+
   test('does not cache a statically parameterized route marked unavailable by metadata', async ({
     request,
   }) => {

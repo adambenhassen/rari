@@ -28,7 +28,7 @@ use crate::{
             constants::{ACTION_FLIGHT_ENCODE_SCRIPT, ACTION_HANDLER_SCRIPT, GET_RSC_BINARY_B64},
             run_with_renderer_result,
         },
-        layout::{LayoutRenderer, create_layout_context},
+        layout::{LayoutRenderer, PageData, create_layout_context},
     },
     runtime::factory::JsRuntimeInterface,
     server::{
@@ -573,26 +573,25 @@ async fn compose_action_refresh_route(
             Arc::clone(&state.layout_html_cache),
         );
         match layout_renderer.get_page_data_on(&route_match, &context, sticky_runtime).await {
-            Ok(page_data) => {
-                if page_data.failed {
+            Ok(page_data) => match page_data {
+                PageData::Failed(error) => {
                     request_context.disable_cache_writes();
                     tracing::error!(
-                        "getData failed for route '{}'; skipping render cache writes",
-                        route_match.route.path
+                        "getData failed for route '{}': {}; skipping render cache writes",
+                        route_match.route.path,
+                        error,
                     );
                 }
-
-                if page_data.not_found {
+                PageData::NotFound => {
                     if let Some(not_found_entry) = app_router
                         .find_not_found_for_route(&route_match.route)
                         .or_else(|| app_router.find_not_found(&route_match.pathname))
                     {
                         route_match.not_found = Some(not_found_entry);
                     }
-                } else if !page_data.failed {
-                    context.page_data_props = page_data.props;
                 }
-            }
+                PageData::Found(props) => context.page_data_props = props,
+            },
             Err(error) => {
                 request_context.disable_cache_writes();
                 tracing::error!(

@@ -6,6 +6,55 @@ const BLOG_TYPESCRIPT_TIPS_URL = /\/blog\/typescript-tips$/
 const PRODUCTS_ELECTRONICS_LAPTOP_URL = /\/products\/electronics\/laptop-123$/
 const PRODUCTS_BOOKS_NOVEL_URL = /\/products\/books\/novel-456$/
 
+function isRecord(value: object): value is Record<string, unknown> {
+  const prototype: unknown = Object.getPrototypeOf(value)
+  return prototype === Object.prototype || prototype === null
+}
+
+function findRequestDataIdInRscValue(value: unknown): string | undefined {
+  if (Array.isArray(value)) {
+    for (const item of value) {
+      const id = findRequestDataIdInRscValue(item)
+      if (id != null) return id
+    }
+    return undefined
+  }
+
+  if (value == null || typeof value !== 'object' || !isRecord(value)) return undefined
+
+  const children = value.children
+  if (
+    value['data-testid'] === 'request-data-id' &&
+    (typeof children === 'number' || typeof children === 'string')
+  ) {
+    return String(children)
+  }
+
+  for (const item of Object.values(value)) {
+    const id = findRequestDataIdInRscValue(item)
+    if (id != null) return id
+  }
+
+  return undefined
+}
+
+function findRequestDataIdInRscPayload(payload: string): string | undefined {
+  for (const row of payload.split(/\r?\n/)) {
+    const separator = row.indexOf(':')
+    if (separator < 0) continue
+
+    try {
+      const value: unknown = JSON.parse(row.slice(separator + 1))
+      const id = findRequestDataIdInRscValue(value)
+      if (id != null) return id
+    } catch {
+      // Flight payloads can include non-JSON rows that do not carry page props.
+    }
+  }
+
+  return undefined
+}
+
 test.describe('Dynamic Routes', () => {
   test.describe('Single Dynamic Segment [slug]', () => {
     test('does not share cached layout HTML between concurrent requests with getData props', async ({
@@ -93,18 +142,12 @@ test.describe('Dynamic Routes', () => {
 
       expect(originalId).toMatch(/^\d+$/)
       const actionResponse = await submitAndWaitForAction(page, '[data-testid="refresh-get-data"]')
+      expect(actionResponse.headers()['content-type']).toContain('text/x-component')
       expect(actionResponse.headers()['x-action-revalidated']).toBe('2')
       expect(actionResponse.headers()['x-action-revalidated-path']).toBe(
         '/get-data-props/action-refresh',
       )
-      const actionPayload = await actionResponse.text()
-      const marker = /"data-testid"\s*:\s*"request-data-id"/.exec(actionPayload)
-      expect(marker).not.toBeNull()
-      const markerIndex = marker?.index ?? -1
-      const propsStart = actionPayload.lastIndexOf('{', markerIndex)
-      const propsEnd = actionPayload.indexOf('}', markerIndex)
-      const props = actionPayload.slice(propsStart, propsEnd + 1)
-      const refreshedId = /"children"\s*:\s*"?(\d+)"?/.exec(props)?.[1]
+      const refreshedId = findRequestDataIdInRscPayload(await actionResponse.text())
 
       expect(refreshedId).toBeDefined()
       expect(refreshedId).not.toBe(originalId)

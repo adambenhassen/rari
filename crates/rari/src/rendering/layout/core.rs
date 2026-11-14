@@ -10,7 +10,7 @@ use tokio::sync::{Mutex, mpsc, oneshot};
 use uuid::Uuid;
 
 use super::{
-    types::{ChunkedContentType, LayoutRenderContext, PageDataResult, PageMetadata, RenderResult},
+    types::{ChunkedContentType, LayoutRenderContext, PageData, PageMetadata, RenderResult},
     utils,
 };
 use crate::{
@@ -56,9 +56,7 @@ fn should_use_layout_html_cache(
     if request_context.is_some_and(|ctx| ctx.skip_layout_html_cache) {
         return false;
     }
-    if request_context.is_some_and(|ctx| !ctx.response_cache_allowed())
-        || context.page_data_props.is_some()
-    {
+    if request_context.is_some_and(|ctx| !ctx.response_cache_allowed()) {
         return false;
     }
 
@@ -72,6 +70,40 @@ fn should_use_layout_html_cache(
 const JS_GET_RESULT: &str = r"
 globalThis['~rsc'].renderResult
 ";
+
+fn parse_page_data_result(result: Value) -> PageData {
+    let Some(failed) = result.get("failed").and_then(Value::as_bool) else {
+        return PageData::Failed(
+            "getData returned a malformed result (missing boolean `failed`)".to_string(),
+        );
+    };
+
+    if failed {
+        return PageData::Failed(
+            result
+                .get("error")
+                .and_then(Value::as_str)
+                .filter(|message| !message.is_empty())
+                .unwrap_or("getData failed")
+                .to_string(),
+        );
+    }
+
+    match result.get("notFound").and_then(Value::as_bool) {
+        Some(true) => PageData::NotFound,
+        Some(false) => match result.get("props") {
+            Some(Value::Null) => PageData::Found(None),
+            Some(props @ Value::Object(_)) => PageData::Found(Some(props.clone())),
+            Some(_) => PageData::Failed("getData props must be an object or null".to_string()),
+            None => PageData::Failed(
+                "getData returned a malformed result (missing `props`)".to_string(),
+            ),
+        },
+        None => PageData::Failed(
+            "getData returned a malformed result (missing boolean `notFound`)".to_string(),
+        ),
+    }
+}
 
 use crate::rendering::base::constants::GET_RSC_BINARY_B64;
 
@@ -566,7 +598,10 @@ impl LayoutRenderer {
         route_match: &AppRouteMatch,
         context: &LayoutRenderContext,
     ) -> Result<bool, RariError> {
-        Ok(self.get_page_data_on(route_match, context, None).await?.not_found)
+        Ok(matches!(
+            self.get_page_data_on(route_match, context, None).await?,
+            PageData::NotFound
+        ))
     }
 
     /// Prefer [`Self::check_page_not_found_on`] with a sticky runtime when the caller
@@ -577,14 +612,17 @@ impl LayoutRenderer {
         context: &LayoutRenderContext,
         sticky_runtime: Option<&Arc<dyn JsRuntimeInterface>>,
     ) -> Result<bool, RariError> {
-        Ok(self.get_page_data_on(route_match, context, sticky_runtime).await?.not_found)
+        Ok(matches!(
+            self.get_page_data_on(route_match, context, sticky_runtime).await?,
+            PageData::NotFound
+        ))
     }
 
     pub async fn get_page_data(
         &self,
         route_match: &AppRouteMatch,
         context: &LayoutRenderContext,
-    ) -> Result<PageDataResult, RariError> {
+    ) -> Result<PageData, RariError> {
         self.get_page_data_on(route_match, context, None).await
     }
 
@@ -594,7 +632,7 @@ impl LayoutRenderer {
         route_match: &AppRouteMatch,
         context: &LayoutRenderContext,
         sticky_runtime: Option<&Arc<dyn JsRuntimeInterface>>,
-    ) -> Result<PageDataResult, RariError> {
+    ) -> Result<PageData, RariError> {
         let page_props = utils::create_page_props(route_match, context)?;
         let page_props_json = serde_json::to_string(&page_props)?;
 
@@ -604,13 +642,13 @@ impl LayoutRenderer {
             .and_then(|p| p.canonicalize().ok());
 
         let Some(base_path) = dist_server_path else {
-            return Ok(PageDataResult { not_found: false, failed: false, props: None });
+            return Ok(PageData::Found(None));
         };
 
         let page_file_path = utils::component_dist_path(&base_path, &route_match.route.file_path);
 
         if !page_file_path.exists() {
-            return Ok(PageDataResult { not_found: false, failed: false, props: None });
+            return Ok(PageData::Found(None));
         }
 
         let page_path = path_to_file_url(&page_file_path);
@@ -640,7 +678,8 @@ impl LayoutRenderer {
                         return {{
                             notFound: result?.notFound === true,
                             failed: propsInvalid,
-                            props: propsInvalid ? null : (props ?? null)
+                            props: propsInvalid ? null : (props ?? null),
+                            error: propsInvalid ? 'getData props must be an object or null' : null
                         }};
                     }} catch (error) {{
                         if (isNotFoundError(error)) {{
@@ -650,7 +689,8 @@ impl LayoutRenderer {
                     }}
                 }} catch (error) {{
                     console.error('[get_page_data] Error:', error);
-                    return {{ notFound: false, failed: true, props: null }};
+                    const message = error instanceof Error ? error.message : String(error);
+                    return {{ notFound: false, failed: true, props: null, error: message }};
                 }}
             }})()
             "#
@@ -665,12 +705,7 @@ impl LayoutRenderer {
             runtime.execute_script("get_page_data".to_string(), check_script).await?
         };
 
-        let not_found =
-            result.get("notFound").and_then(serde_json::Value::as_bool).unwrap_or(false);
-        let failed = result.get("failed").and_then(serde_json::Value::as_bool).unwrap_or(false);
-        let props = result.get("props").filter(|props| props.is_object()).cloned();
-
-        Ok(PageDataResult { not_found, failed, props })
+        Ok(parse_page_data_result(result))
     }
 
     pub async fn render_route(
@@ -1736,6 +1771,24 @@ mod tests {
         let cache = LayoutHtmlCache::with_handler(Arc::new(UnmeasuredCacheHandler));
 
         assert_eq!(cache.get_metrics(), LayoutCacheMetrics { entries: 1, bytes: None });
+    }
+
+    #[test]
+    fn malformed_page_data_result_fails_closed_and_preserves_error() {
+        assert!(matches!(
+            parse_page_data_result(serde_json::json!({ "notFound": false, "props": null })),
+            PageData::Failed(_)
+        ));
+
+        assert!(matches!(
+            parse_page_data_result(serde_json::json!({
+                "notFound": false,
+                "failed": true,
+                "error": "getData exploded",
+                "props": null
+            })),
+            PageData::Failed(error) if error == "getData exploded"
+        ));
     }
 
     #[tokio::test]

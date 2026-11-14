@@ -44,6 +44,8 @@ pub fn generate_cache_key(
         cookie_header.hash(&mut hasher);
     }
 
+    context.page_data_props.as_ref().map(Value::to_string).hash(&mut hasher);
+
     hasher.finish()
 }
 
@@ -219,7 +221,48 @@ pub fn sort_flight_protocol(flight_protocol: &str) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::sort_flight_protocol;
+    use super::{generate_cache_key, sort_flight_protocol};
+    use crate::{
+        rendering::layout::types::LayoutRenderContext,
+        server::routing::app_router::{AppRouteEntry, AppRouteMatch},
+    };
+    use rustc_hash::FxHashMap;
+    use serde_json::{Value, json};
+
+    fn route_match() -> AppRouteMatch {
+        AppRouteMatch {
+            route: AppRouteEntry {
+                path: "/[slug]".to_string(),
+                file_path: "[slug]/page.tsx".to_string(),
+                component_id: None,
+                css: Vec::new(),
+                segments: Vec::new(),
+                params: Vec::new(),
+                is_dynamic: true,
+                static_params: None,
+            },
+            params: FxHashMap::default(),
+            layouts: Vec::new(),
+            loading: None,
+            error: None,
+            not_found: None,
+            templates: Vec::new(),
+            pathname: "/article".to_string(),
+        }
+    }
+
+    fn render_context(page_data_props: Option<Value>) -> LayoutRenderContext {
+        LayoutRenderContext {
+            params: FxHashMap::default(),
+            search_params: FxHashMap::default(),
+            headers: FxHashMap::default(),
+            pathname: "/article".to_string(),
+            page_data_props,
+            template_navigation_id: None,
+            metadata: None,
+            reuse_layout_paths: Vec::new(),
+        }
+    }
 
     #[test]
     fn test_sort_flight_protocol_orders_rows() {
@@ -238,5 +281,20 @@ mod tests {
     #[test]
     fn test_sort_flight_protocol_empty() {
         assert_eq!(sort_flight_protocol(""), "");
+    }
+
+    #[test]
+    fn layout_cache_key_includes_page_data_props() {
+        let route = route_match();
+        let first = render_context(Some(json!({ "n": 1 })));
+        let same = render_context(Some(json!({ "n": 1 })));
+        let different = render_context(Some(json!({ "n": 2 })));
+        let no_props = render_context(None);
+
+        let first_key = generate_cache_key(&route, &first, None);
+
+        assert_eq!(first_key, generate_cache_key(&route, &same, None));
+        assert_ne!(first_key, generate_cache_key(&route, &different, None));
+        assert_ne!(first_key, generate_cache_key(&route, &no_props, None));
     }
 }

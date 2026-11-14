@@ -14,7 +14,7 @@ use tokio::sync::{Mutex, OnceCell};
 
 use crate::{
     rendering::layout::{
-        ChunkedContentType, LayoutRenderContext, LayoutRenderer, drain_chunked_stream,
+        ChunkedContentType, LayoutRenderContext, LayoutRenderer, PageData, drain_chunked_stream,
         types::RenderResult,
     },
     server::{
@@ -150,23 +150,20 @@ async fn warm_route(
 
     if route_match.not_found.is_none() && route_match.route.is_dynamic {
         match layout_renderer.get_page_data(&route_match, &context).await {
-            Ok(page_data) => {
-                if page_data.failed {
+            Ok(page_data) => match page_data {
+                PageData::Failed(error) => {
                     request_context.disable_cache_writes();
                     tracing::error!(
-                        "getData failed for route '{}'; skipping warmup cache writes",
-                        route_match.route.path
+                        "getData failed for route '{}': {}; skipping warmup cache writes",
+                        route_match.route.path,
+                        error,
                     );
                 }
-
-                if page_data.not_found {
+                PageData::NotFound => {
                     return Ok(());
                 }
-
-                if !page_data.failed {
-                    context.page_data_props = page_data.props;
-                }
-            }
+                PageData::Found(props) => context.page_data_props = props,
+            },
             Err(error) => {
                 request_context.disable_cache_writes();
                 tracing::error!(

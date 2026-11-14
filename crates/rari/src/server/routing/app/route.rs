@@ -13,6 +13,7 @@ use bytes::Bytes;
 use rari_error::RariError;
 use rustc_hash::FxHashMap;
 use tokio::fs;
+use tokio::sync::oneshot;
 
 use super::{
     apply_request_no_store,
@@ -32,7 +33,7 @@ use super::{
 use crate::server::metrics_http::{RequestTimer, route_label};
 use crate::{
     rendering::layout::{
-        ChunkedContentType, LayoutRenderer, RenderResult, create_layout_context,
+        ChunkedContentType, LayoutRenderer, PageData, RenderResult, create_layout_context,
         drain_chunked_stream, is_rari_page_not_found, pathname_from_router_state_header,
         router_state_from_headers, shared_layout_paths_for_navigation,
         tree_from_router_state_header,
@@ -149,6 +150,50 @@ pub async fn handle_app_route(
     let query_params_for_cache = route_query_params_for_cache(&query_params);
     let query_params_ref = query_params_for_cache.as_ref();
 
+    if matches!(render_mode, RenderMode::Ssr) && can_use_static_fast_cache(cookie_header) {
+        let fast_key =
+            response::ResponseCache::generate_static_fast_cache_key(path, query_params_ref, None);
+
+        if let Some(prebuilt) = state.static_fast_cache.get(&fast_key) {
+            if let Some(client_etag) = headers.get("if-none-match").and_then(|v| v.to_str().ok())
+                && client_etag == prebuilt.etag
+            {
+                #[expect(
+                    clippy::expect_used,
+                    reason = "Response::builder() with valid components never fails"
+                )]
+                return Ok(Response::builder()
+                    .status(StatusCode::NOT_MODIFIED)
+                    .header("etag", &prebuilt.etag)
+                    .header("vary", static_html_vary_header(None))
+                    .body(Body::empty())
+                    .expect("Valid 304 response"));
+            }
+
+            let encoding = CompressionEncoding::from_accept_encoding(accept_encoding);
+            let (body, encoding_header) = prebuilt.body_for(encoding);
+            let status = if prebuilt.is_not_found { StatusCode::NOT_FOUND } else { StatusCode::OK };
+
+            let mut builder = Response::builder()
+                .status(status)
+                .header("content-type", prebuilt.content_type.as_str())
+                .header("cache-control", prebuilt.cache_control.as_str())
+                .header("etag", &prebuilt.etag)
+                .header("vary", static_html_vary_header(None))
+                .header("x-cache", "HIT");
+
+            if let Some(enc) = encoding_header {
+                builder = builder.header("content-encoding", enc);
+            }
+
+            #[expect(
+                clippy::expect_used,
+                reason = "Response::builder() with valid components never fails"
+            )]
+            return Ok(builder.body(Body::from(body)).expect("Valid fast-path response"));
+        }
+    }
+
     let Some(app_router) = &state.app_router else {
         tracing::error!(
             "App router not initialized - routes.json may be missing or invalid. Path: {}",
@@ -210,24 +255,23 @@ pub async fn handle_app_route(
 
     if route_match.not_found.is_none() && route_match.route.is_dynamic {
         match layout_renderer.get_page_data(&route_match, &context).await {
-            Ok(page_data) => {
-                if page_data.failed {
+            Ok(page_data) => match page_data {
+                PageData::Failed(error) => {
                     request_context.disable_cache_writes();
                     tracing::error!(
-                        "getData failed for route '{}'; skipping render cache writes",
-                        route_match.route.path
+                        "getData failed for route '{}': {}; skipping render cache writes",
+                        route_match.route.path,
+                        error,
                     );
                 }
-
-                if page_data.not_found {
+                PageData::NotFound => {
                     if let Some(not_found_entry) = resolve_not_found_entry(app_router, &route_match)
                     {
                         route_match.not_found = Some(not_found_entry);
                     }
-                } else if !page_data.failed {
-                    context.page_data_props = page_data.props;
                 }
-            }
+                PageData::Found(props) => context.page_data_props = props,
+            },
             Err(e) => {
                 request_context.disable_cache_writes();
                 tracing::error!(
@@ -236,50 +280,6 @@ pub async fn handle_app_route(
                     e
                 );
             }
-        }
-    }
-
-    if matches!(render_mode, RenderMode::Ssr) && can_use_static_fast_cache(cookie_header) {
-        let fast_key =
-            response::ResponseCache::generate_static_fast_cache_key(path, query_params_ref, None);
-
-        if let Some(prebuilt) = state.static_fast_cache.get(&fast_key) {
-            if let Some(client_etag) = headers.get("if-none-match").and_then(|v| v.to_str().ok())
-                && client_etag == prebuilt.etag
-            {
-                #[expect(
-                    clippy::expect_used,
-                    reason = "Response::builder() with valid components never fails"
-                )]
-                return Ok(Response::builder()
-                    .status(StatusCode::NOT_MODIFIED)
-                    .header("etag", &prebuilt.etag)
-                    .header("vary", static_html_vary_header(None))
-                    .body(Body::empty())
-                    .expect("Valid 304 response"));
-            }
-
-            let encoding = CompressionEncoding::from_accept_encoding(accept_encoding);
-            let (body, encoding_header) = prebuilt.body_for(encoding);
-            let status = if prebuilt.is_not_found { StatusCode::NOT_FOUND } else { StatusCode::OK };
-
-            let mut builder = Response::builder()
-                .status(status)
-                .header("content-type", prebuilt.content_type.as_str())
-                .header("cache-control", prebuilt.cache_control.as_str())
-                .header("etag", &prebuilt.etag)
-                .header("vary", static_html_vary_header(None))
-                .header("x-cache", "HIT");
-
-            if let Some(enc) = encoding_header {
-                builder = builder.header("content-encoding", enc);
-            }
-
-            #[expect(
-                clippy::expect_used,
-                reason = "Response::builder() with valid components never fails"
-            )]
-            return Ok(builder.body(Body::from(body)).expect("Valid fast-path response"));
         }
     }
 
@@ -569,23 +569,46 @@ pub async fn handle_app_route(
             let use_streaming = should_use_streaming(&route_match, &state.config);
 
             if use_streaming {
-                context.metadata = collect_page_metadata(
-                    &state,
-                    &route_match,
-                    &context,
-                    Some(Arc::clone(&request_context)),
-                )
-                .await;
+                let (metadata_tx, metadata_rx) = oneshot::channel();
+                let metadata_state = state.clone();
+                let metadata_route_match = route_match.clone();
+                let metadata_context = context.clone();
+                let metadata_request_context = Arc::clone(&request_context);
+                let metadata_task = tokio::spawn(async move {
+                    let metadata = collect_page_metadata(
+                        &metadata_state,
+                        &metadata_route_match,
+                        &metadata_context,
+                        Some(metadata_request_context),
+                    )
+                    .await;
+                    let _ = metadata_tx.send(metadata.clone());
+                    metadata
+                });
 
-                let response = Box::pin(render_with_fallback(
+                let response_result = Box::pin(render_with_fallback(
                     Arc::new(state.clone()),
                     route_match.clone(),
                     context.clone(),
                     accept_encoding,
                     Arc::clone(&request_context),
-                    None,
+                    Some(metadata_rx),
                 ))
-                .await?;
+                .await;
+                let _metadata = metadata_task.await.map_err(|error| {
+                    tracing::error!("Streaming metadata task failed: {error}");
+                    StatusCode::INTERNAL_SERVER_ERROR
+                })?;
+                let mut response = response_result?;
+                if let Some(retry_after) = request_context.response_unavailable_after() {
+                    *response.status_mut() = StatusCode::SERVICE_UNAVAILABLE;
+                    response
+                        .headers_mut()
+                        .insert(CACHE_CONTROL, HeaderValue::from_static("no-store"));
+                    if let Ok(value) = HeaderValue::from_str(&retry_after.to_string()) {
+                        response.headers_mut().insert("retry-after", value);
+                    }
+                }
                 let response = apply_request_no_store(response, &request_context);
 
                 if response.status() == StatusCode::OK
