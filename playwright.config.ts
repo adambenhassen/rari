@@ -38,6 +38,7 @@ export default defineConfig({
     timeout: 120000,
     env: {
       NODE_ENV: 'production',
+      RARI_ORIGIN: new URL(baseURL).origin,
       RUST_LOG: 'debug',
       MALLOC_CONF: 'prof:true,prof_active:true',
       RARI_PROFILING_TOKEN: 'e2e-profiling-token',

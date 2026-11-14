@@ -3,6 +3,7 @@
 interface MetadataParams {
   readonly params: Readonly<Record<string, string>>
   readonly searchParams: Readonly<Record<string, string>>
+  readonly [key: string]: unknown
 }
 
 interface PageMetadata {
@@ -26,13 +27,14 @@ async function collect(
   pagePath: string,
   params: Readonly<Record<string, string>>,
   searchParams: Readonly<Record<string, string>>,
+  pageProps: Readonly<Record<string, unknown>>,
 ): Promise<PageMetadata[]> {
   const metadataList: PageMetadata[] = []
+  const metadataProps: MetadataParams = { ...pageProps, params, searchParams }
 
   async function extractMetadata(
     modulePath: string,
-    params: Readonly<Record<string, string>>,
-    searchParams: Readonly<Record<string, string>>,
+    pageProps: MetadataParams,
   ): Promise<PageMetadata> {
     try {
       if (g['~rsc']?.modules !== undefined) {
@@ -43,7 +45,7 @@ async function collect(
 
         if (module) {
           if (typeof module.generateMetadata === 'function') {
-            const result = await module.generateMetadata({ params, searchParams })
+            const result = await module.generateMetadata(pageProps)
             return result
           }
 
@@ -55,7 +57,7 @@ async function collect(
       const module = (await import(modulePath)) as ModuleWithMetadata
 
       if (typeof module.generateMetadata === 'function') {
-        const result = await module.generateMetadata({ params, searchParams })
+        const result = await module.generateMetadata(pageProps)
         return result
       }
 
@@ -69,11 +71,11 @@ async function collect(
   }
 
   for (const layoutPath of layoutPaths) {
-    const layoutMetadata = await extractMetadata(layoutPath, params, searchParams)
+    const layoutMetadata = await extractMetadata(layoutPath, metadataProps)
     metadataList.push(layoutMetadata)
   }
 
-  const pageMetadata = await extractMetadata(pagePath, params, searchParams)
+  const pageMetadata = await extractMetadata(pagePath, metadataProps)
   metadataList.push(pageMetadata)
 
   return metadataList

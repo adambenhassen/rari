@@ -28,7 +28,7 @@ use crate::{
             constants::{ACTION_FLIGHT_ENCODE_SCRIPT, ACTION_HANDLER_SCRIPT, GET_RSC_BINARY_B64},
             run_with_renderer_result,
         },
-        layout::{LayoutRenderer, create_layout_context},
+        layout::{LayoutRenderer, PageData, create_layout_context},
     },
     runtime::factory::JsRuntimeInterface,
     server::{
@@ -560,7 +560,7 @@ async fn compose_action_refresh_route(
 
     let search_params = extract_search_params(query_params);
     let request_headers = extract_headers(headers);
-    let context = create_layout_context(
+    let mut context = create_layout_context(
         route_match.params.clone(),
         search_params,
         request_headers,
@@ -572,19 +572,33 @@ async fn compose_action_refresh_route(
             Arc::clone(&state.renderer),
             Arc::clone(&state.layout_html_cache),
         );
-        match layout_renderer.check_page_not_found_on(&route_match, &context, sticky_runtime).await
-        {
-            Ok(true) => {
-                if let Some(not_found_entry) = app_router
-                    .find_not_found_for_route(&route_match.route)
-                    .or_else(|| app_router.find_not_found(&route_match.pathname))
-                {
-                    route_match.not_found = Some(not_found_entry);
+        match layout_renderer.get_page_data_on(&route_match, &context, sticky_runtime).await {
+            Ok(page_data) => match page_data {
+                PageData::Failed(error) => {
+                    request_context.disable_cache_writes();
+                    tracing::error!(
+                        "getData failed for route '{}': {}; skipping render cache writes",
+                        route_match.route.path,
+                        error,
+                    );
                 }
-            }
-            Ok(false) => {}
+                PageData::NotFound => {
+                    if let Some(not_found_entry) = app_router
+                        .find_not_found_for_route(&route_match.route)
+                        .or_else(|| app_router.find_not_found(&route_match.pathname))
+                    {
+                        route_match.not_found = Some(not_found_entry);
+                    }
+                }
+                PageData::Found(props) => context.page_data_props = props,
+            },
             Err(error) => {
-                tracing::warn!(error = %error, path = %pathname, "not-found check failed during action refresh");
+                request_context.disable_cache_writes();
+                tracing::error!(
+                    "Failed to get page data for route '{}': {}",
+                    route_match.route.path,
+                    error
+                );
             }
         }
     }

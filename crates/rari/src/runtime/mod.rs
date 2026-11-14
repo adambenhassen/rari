@@ -124,17 +124,20 @@ impl JsExecutionRuntime {
     }
 
     pub async fn collect_metadata(
-        &self,
+        self: &Arc<Self>,
+        request_context: Option<Arc<RequestContext>>,
         layout_paths: Vec<String>,
         page_path: String,
         params: FxHashMap<String, ParamValue>,
         search_params: FxHashMap<String, Vec<String>>,
+        page_props: Value,
     ) -> Result<Value, RariError> {
         let data = serde_json::json!({
             "layoutPaths": layout_paths,
             "pagePath": page_path,
             "params": params,
             "searchParams": search_params,
+            "pageProps": page_props,
         });
 
         let data_json =
@@ -147,12 +150,22 @@ impl JsExecutionRuntime {
                     data.layoutPaths,
                     data.pagePath,
                     data.params,
-                    data.searchParams
+                    data.searchParams,
+                    data.pageProps
                 );
             }})()"
         );
 
-        let metadata_list = self.execute_script("collect_metadata".to_string(), script).await?;
+        let metadata_list = if let Some(request_context) = request_context {
+            self.execute_script_with_request_context(
+                request_context,
+                "collect_metadata".to_string(),
+                script,
+            )
+            .await?
+        } else {
+            self.execute_script("collect_metadata".to_string(), script).await?
+        };
 
         let metadata_array = metadata_list.as_array().ok_or_else(|| {
             RariError::serialization("Expected metadata list to be an array".to_string())
@@ -292,6 +305,24 @@ mod tests {
     use tokio::sync::mpsc;
 
     use super::JsExecutionRuntime;
+
+    #[tokio::test]
+    async fn mark_response_unavailable_is_rejected_outside_a_request() {
+        let runtime = JsExecutionRuntime::new(None);
+
+        let result = runtime
+            .execute_script(
+                "response_unavailable_without_request".to_string(),
+                "globalThis.markResponseUnavailable()".to_string(),
+            )
+            .await;
+
+        assert!(result.is_err_and(|error| {
+            error
+                .to_string()
+                .contains("markResponseUnavailable can only be called during a server render")
+        }));
+    }
 
     #[tokio::test]
     async fn overlapping_streams_on_one_isolate_finish_near_max_delay() {

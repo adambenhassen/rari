@@ -1,12 +1,197 @@
 import { expect, test } from '@playwright/test'
+import { submitAndWaitForAction } from './shared/server-action-helpers'
 
 const BLOG_HELLO_WORLD_URL = /\/blog\/hello-world$/
 const BLOG_TYPESCRIPT_TIPS_URL = /\/blog\/typescript-tips$/
 const PRODUCTS_ELECTRONICS_LAPTOP_URL = /\/products\/electronics\/laptop-123$/
 const PRODUCTS_BOOKS_NOVEL_URL = /\/products\/books\/novel-456$/
 
+function isRecord(value: object): value is Record<string, unknown> {
+  const prototype: unknown = Object.getPrototypeOf(value)
+  return prototype === Object.prototype || prototype === null
+}
+
+function findRequestDataIdInRscValue(value: unknown): string | undefined {
+  if (Array.isArray(value)) {
+    for (const item of value) {
+      const id = findRequestDataIdInRscValue(item)
+      if (id != null) return id
+    }
+    return undefined
+  }
+
+  if (value == null || typeof value !== 'object' || !isRecord(value)) return undefined
+
+  const children = value.children
+  if (
+    value['data-testid'] === 'request-data-id' &&
+    (typeof children === 'number' || typeof children === 'string')
+  ) {
+    return String(children)
+  }
+
+  for (const item of Object.values(value)) {
+    const id = findRequestDataIdInRscValue(item)
+    if (id != null) return id
+  }
+
+  return undefined
+}
+
+function findRequestDataIdInRscPayload(payload: string): string | undefined {
+  for (const row of payload.split(/\r?\n/)) {
+    const separator = row.indexOf(':')
+    if (separator < 0) continue
+
+    try {
+      const value: unknown = JSON.parse(row.slice(separator + 1))
+      const id = findRequestDataIdInRscValue(value)
+      if (id != null) return id
+    } catch {
+      // Flight payloads can include non-JSON rows that do not carry page props.
+    }
+  }
+
+  return undefined
+}
+
 test.describe('Dynamic Routes', () => {
   test.describe('Single Dynamic Segment [slug]', () => {
+    test('does not share cached layout HTML between concurrent requests with getData props', async ({
+      request,
+    }) => {
+      const cacheCase = `layout-cache-${Date.now()}-${Math.random()}`
+      const primeUrl = `/get-data-props/article?case=${cacheCase}`
+      const primeResponse = await request.get(primeUrl)
+      const primeBody = await primeResponse.text()
+      const primeDataId = /data-testid="request-data-id">(\d+)</.exec(primeBody)?.[1]
+      expect(primeResponse.status()).toBe(200)
+      expect(primeResponse.headers()['x-cache']).toBe('MISS')
+      expect(primeDataId).toBeDefined()
+      expect(primeBody).toMatch(new RegExp(`<title[^>]*>Request data ${primeDataId}</title>`))
+
+      const [firstResponse, secondResponse] = await Promise.all([
+        request.get(`/get-data-props/%61rticle?case=${cacheCase}`),
+        request.get(`/get-data-props/art%69cle?case=${cacheCase}`),
+      ])
+      const [firstBody, secondBody] = await Promise.all([
+        firstResponse.text(),
+        secondResponse.text(),
+      ])
+      expect(firstResponse.status()).toBe(200)
+      expect(secondResponse.status()).toBe(200)
+      expect(firstResponse.headers()['x-cache']).toBe('MISS')
+      expect(secondResponse.headers()['x-cache']).toBe('MISS')
+
+      const dataIds = [firstBody, secondBody].map(
+        body => /data-testid="request-data-id">(\d+)</.exec(body)?.[1],
+      )
+      expect(dataIds[0]).toBeDefined()
+      expect(dataIds[1]).toBeDefined()
+      expect(new Set(dataIds).size).toBe(2)
+
+      for (const [body, dataId] of [
+        [firstBody, dataIds[0]],
+        [secondBody, dataIds[1]],
+      ]) {
+        expect(body).toMatch(new RegExp(`<title[^>]*>Request data ${dataId}</title>`))
+      }
+
+      expect(dataIds).not.toContain(primeDataId)
+
+      const cacheHit = await request.get(primeUrl)
+      expect(cacheHit.status()).toBe(200)
+      expect(cacheHit.headers()['x-cache']).toBe('HIT')
+      expect(await cacheHit.text()).toBe(primeBody)
+    })
+
+    test('shares getData props with metadata and render for concurrent requests to the same URL', async ({
+      request,
+    }) => {
+      const url = `/get-data-props/article?case=same-url-${Date.now()}-${Math.random()}`
+      const [firstResponse, secondResponse] = await Promise.all([
+        request.get(url),
+        request.get(url),
+      ])
+      const [firstBody, secondBody] = await Promise.all([
+        firstResponse.text(),
+        secondResponse.text(),
+      ])
+      const dataIds = [firstBody, secondBody].map(
+        body => /data-testid="request-data-id">(\d+)</.exec(body)?.[1],
+      )
+
+      expect(firstResponse.status()).toBe(200)
+      expect(secondResponse.status()).toBe(200)
+      expect(dataIds[0]).toBeDefined()
+      expect(dataIds[1]).toBeDefined()
+      expect(new Set(dataIds).size).toBe(2)
+
+      for (const [body, dataId] of [
+        [firstBody, dataIds[0]],
+        [secondBody, dataIds[1]],
+      ]) {
+        expect(body).toMatch(new RegExp(`<title[^>]*>Request data ${dataId}</title>`))
+      }
+    })
+
+    test('retains getData props after an action refresh', async ({ page }) => {
+      await page.goto('/get-data-props/action-refresh')
+      const requestData = page.getByTestId('request-data-id')
+      const originalId = (await requestData.textContent()) ?? ''
+
+      expect(originalId).toMatch(/^\d+$/)
+      const actionResponse = await submitAndWaitForAction(page, '[data-testid="refresh-get-data"]')
+      expect(actionResponse.headers()['content-type']).toContain('text/x-component')
+      expect(actionResponse.headers()['x-action-revalidated']).toBe('2')
+      expect(actionResponse.headers()['x-action-revalidated-path']).toBe(
+        '/get-data-props/action-refresh',
+      )
+      const refreshedId = findRequestDataIdInRscPayload(await actionResponse.text())
+
+      expect(refreshedId).toBeDefined()
+      expect(refreshedId).not.toBe(originalId)
+    })
+
+    test('does not cache a getData throw or invalid props', async ({ request }) => {
+      for (const failure of ['throw', 'array']) {
+        const url = `/get-data-props/article?getDataFailure=${failure}&case=${Date.now()}-${Math.random()}`
+        const firstResponse = await request.get(url)
+        const firstBody = await firstResponse.text()
+        const secondResponse = await request.get(url)
+        const secondBody = await secondResponse.text()
+
+        expect(firstResponse.status()).toBe(200)
+        expect(secondResponse.status()).toBe(200)
+        expect(firstResponse.headers()['cache-control']).toBe('no-store')
+        expect(secondResponse.headers()['cache-control']).toBe('no-store')
+        expect(firstResponse.headers()['x-cache']).not.toBe('HIT')
+        expect(secondResponse.headers()['x-cache']).not.toBe('HIT')
+        expect(/data-testid="request-data-id">\d+</.test(firstBody)).toBe(false)
+        expect(/data-testid="request-data-id">\d+</.test(secondBody)).toBe(false)
+
+        const rscResponse = await request.get(url, { headers: { Accept: 'text/x-component' } })
+        expect(rscResponse.status()).toBe(200)
+        expect(rscResponse.headers()['cache-control']).toBe('no-store')
+      }
+    })
+
+    test('serves a cached response when getData fails on the next request', async ({ request }) => {
+      const cacheCase = `second-call-${Date.now()}-${Math.random()}`
+      const url = `/get-data-props/article?getDataFailure=second-call&case=${cacheCase}`
+      const firstResponse = await request.get(url)
+      const firstBody = await firstResponse.text()
+      const secondResponse = await request.get(url)
+      const secondBody = await secondResponse.text()
+
+      expect(firstResponse.status()).toBe(200)
+      expect(firstResponse.headers()['x-cache']).toBe('MISS')
+      expect(/data-testid="request-data-id">\d+</.test(firstBody)).toBe(true)
+      expect(secondResponse.status()).toBe(200)
+      expect(secondResponse.headers()['x-cache']).toBe('HIT')
+      expect(secondBody).toBe(firstBody)
+    })
+
     test('should render dynamic route with slug parameter', async ({ page }) => {
       await page.goto('/blog/hello-world')
 

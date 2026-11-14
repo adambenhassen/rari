@@ -25,7 +25,8 @@ use crate::{
         layout::{
             ChunkedContentType, LayoutRenderContext, LayoutRenderer, OpenGraphImage,
             OpenGraphImageDescriptor, OpenGraphMetadata, PageMetadata, RenderResult,
-            TwitterMetadata, component_dist_path, is_rari_page_not_found, sort_flight_protocol,
+            TwitterMetadata, component_dist_path, create_page_props, is_rari_page_not_found,
+            sort_flight_protocol,
         },
     },
     server::{
@@ -86,6 +87,7 @@ pub async fn collect_page_metadata(
     state: &ServerState,
     route_match: &AppRouteMatch,
     context: &LayoutRenderContext,
+    request_context: Option<Arc<RequestContext>>,
 ) -> Option<PageMetadata> {
     let dist_server_path = match env::current_dir() {
         Ok(cwd) => {
@@ -125,12 +127,22 @@ pub async fn collect_page_metadata(
     let runtime = Arc::clone(&renderer.runtime);
     drop(renderer);
 
+    let page_props = match create_page_props(route_match, context) {
+        Ok(page_props) => page_props,
+        Err(error) => {
+            tracing::error!("Failed to create page props for metadata collection: {}", error);
+            return None;
+        }
+    };
+
     match runtime
         .collect_metadata(
+            request_context,
             layout_paths,
             page_path.clone(),
             context.params.clone(),
             context.search_params.clone(),
+            page_props,
         )
         .await
     {
@@ -287,7 +299,13 @@ pub async fn render_with_fallback(
             tracing::error!("Streaming render failed, falling back to synchronous: {}", e);
             let mut context = context;
             if context.metadata.is_none() {
-                context.metadata = collect_page_metadata(&state, &route_match, &context).await;
+                context.metadata = collect_page_metadata(
+                    &state,
+                    &route_match,
+                    &context,
+                    Some(Arc::clone(&request_context)),
+                )
+                .await;
             }
             render_synchronous(state, route_match, context, accept_encoding, request_context).await
         }
@@ -321,7 +339,13 @@ pub async fn render_rsc_navigation_streaming(
             if let Some(app_router) = state.app_router.as_ref()
                 && mark_route_not_found_if_signaled(&e, &mut route_match, app_router)
             {
-                context.metadata = collect_page_metadata(&state, &route_match, &context).await;
+                context.metadata = collect_page_metadata(
+                    &state,
+                    &route_match,
+                    &context,
+                    Some(Arc::clone(&request_context)),
+                )
+                .await;
                 match layout_renderer
                     .render_route_with_streaming(
                         &route_match,
@@ -746,7 +770,13 @@ pub async fn render_synchronous(
             if let Some(app_router) = state.app_router.as_ref()
                 && mark_route_not_found_if_signaled(&e, &mut route_match, app_router)
             {
-                context.metadata = collect_page_metadata(&state, &route_match, &context).await;
+                context.metadata = collect_page_metadata(
+                    &state,
+                    &route_match,
+                    &context,
+                    Some(Arc::clone(&request_context)),
+                )
+                .await;
                 match layout_renderer
                     .render_route_with_streaming(
                         &route_match,
@@ -913,7 +943,13 @@ pub async fn render_streaming_with_layout(
 
             let mut context = context;
             if context.metadata.is_none() {
-                context.metadata = collect_page_metadata(&state, &route_match, &context).await;
+                context.metadata = collect_page_metadata(
+                    &state,
+                    &route_match,
+                    &context,
+                    Some(Arc::clone(&request_context)),
+                )
+                .await;
             }
 
             return render_synchronous(
@@ -1188,6 +1224,7 @@ mod tests {
             search_params: FxHashMap::default(),
             headers: FxHashMap::default(),
             pathname: "/".to_string(),
+            page_data_props: None,
             template_navigation_id: None,
             metadata: None,
             reuse_layout_paths: Vec::new(),

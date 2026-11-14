@@ -14,7 +14,7 @@ use tokio::sync::{Mutex, OnceCell};
 
 use crate::{
     rendering::layout::{
-        ChunkedContentType, LayoutRenderContext, LayoutRenderer, drain_chunked_stream,
+        ChunkedContentType, LayoutRenderContext, LayoutRenderer, PageData, drain_chunked_stream,
         types::RenderResult,
     },
     server::{
@@ -148,7 +148,41 @@ async fn warm_route(
 
     let _render_guard = warmup_render_lock().await.lock_owned().await;
 
-    context.metadata = collect_page_metadata(state, &route_match, &context).await;
+    if route_match.not_found.is_none() && route_match.route.is_dynamic {
+        match layout_renderer.get_page_data(&route_match, &context).await {
+            Ok(page_data) => match page_data {
+                PageData::Failed(error) => {
+                    request_context.disable_cache_writes();
+                    tracing::error!(
+                        "getData failed for route '{}': {}; skipping warmup cache writes",
+                        route_match.route.path,
+                        error,
+                    );
+                }
+                PageData::NotFound => {
+                    return Ok(());
+                }
+                PageData::Found(props) => context.page_data_props = props,
+            },
+            Err(error) => {
+                request_context.disable_cache_writes();
+                tracing::error!(
+                    "Failed to get page data for route '{}': {}",
+                    route_match.route.path,
+                    error
+                );
+            }
+        }
+    }
+
+    context.metadata =
+        collect_page_metadata(state, &route_match, &context, Some(Arc::clone(&request_context)))
+            .await;
+
+    if request_context.response_unavailable_after().is_some() {
+        tracing::debug!("Skipping cache warmup for {path}: response marked unavailable");
+        return Ok(());
+    }
 
     let render_result = layout_renderer
         .render_route_with_streaming(
@@ -334,6 +368,7 @@ fn create_warmup_context(route_match: &AppRouteMatch) -> LayoutRenderContext {
         search_params: FxHashMap::default(),
         headers: FxHashMap::default(),
         pathname: route_match.pathname.clone(),
+        page_data_props: None,
         template_navigation_id: None,
         metadata: None,
         reuse_layout_paths: Vec::new(),
