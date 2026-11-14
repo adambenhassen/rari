@@ -22,7 +22,8 @@ test('returns a pre-commit mark as an uncacheable 503 response', async ({ reques
 })
 
 test('marks metadata collection unavailable for only its request', async ({ request }) => {
-  const unavailableUrl = '/server-response-metadata?mode=unavailable&case=metadata'
+  const caseId = `metadata-${Date.now()}-${Math.random()}`
+  const unavailableUrl = `/server-response-metadata?mode=unavailable&case=${caseId}`
   const first = await request.get(unavailableUrl)
   const second = await request.get(unavailableUrl)
   const secondBody = await second.text()
@@ -36,10 +37,10 @@ test('marks metadata collection unavailable for only its request', async ({ requ
   expect(await first.text()).toContain('<h1>Metadata server response state</h1>')
   expect(secondBody).toContain('<h1>Metadata server response state</h1>')
 
-  const healthyUrl = '/server-response-metadata?mode=healthy&case=metadata'
+  const healthyUrl = `/server-response-metadata?mode=healthy&case=${caseId}-healthy`
   const [healthy, unavailableAgain] = await Promise.all([
     request.get(healthyUrl),
-    request.get('/server-response-metadata?mode=unavailable&case=metadata-concurrent'),
+    request.get(`/server-response-metadata?mode=unavailable&case=${caseId}-concurrent`),
   ])
 
   expect(unavailableAgain.status()).toBe(503)
