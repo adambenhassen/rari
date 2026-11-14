@@ -148,7 +148,44 @@ async fn warm_route(
 
     let _render_guard = warmup_render_lock().await.lock_owned().await;
 
-    context.metadata = collect_page_metadata(state, &route_match, &context, None).await;
+    if route_match.not_found.is_none() && route_match.route.is_dynamic {
+        match layout_renderer.get_page_data(&route_match, &context).await {
+            Ok(page_data) => {
+                if page_data.failed {
+                    request_context.disable_cache_writes();
+                    tracing::error!(
+                        "getData failed for route '{}'; skipping warmup cache writes",
+                        route_match.route.path
+                    );
+                }
+
+                if page_data.not_found {
+                    return Ok(());
+                }
+
+                if !page_data.failed {
+                    context.page_data_props = page_data.props;
+                }
+            }
+            Err(error) => {
+                request_context.disable_cache_writes();
+                tracing::error!(
+                    "Failed to get page data for route '{}': {}",
+                    route_match.route.path,
+                    error
+                );
+            }
+        }
+    }
+
+    context.metadata =
+        collect_page_metadata(state, &route_match, &context, Some(Arc::clone(&request_context)))
+            .await;
+
+    if request_context.response_unavailable_after().is_some() {
+        tracing::debug!("Skipping cache warmup for {path}: response marked unavailable");
+        return Ok(());
+    }
 
     let render_result = layout_renderer
         .render_route_with_streaming(

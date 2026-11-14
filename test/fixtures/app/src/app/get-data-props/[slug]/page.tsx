@@ -1,6 +1,15 @@
 import type { Metadata, PageProps } from 'rari'
+import RefreshGetDataButton from './RefreshGetDataButton'
 
-type DataPageProps = PageProps & { n: number }
+type DataPageProps = PageProps<{ slug: string }> & { n: number }
+
+const responseAvailability = globalThis as typeof globalThis & {
+  markResponseUnavailable: (retryAfterSeconds?: number) => void
+}
+
+export function generateStaticParams() {
+  return [{ slug: 'warmup' }, { slug: 'unavailable' }]
+}
 
 let nextId = 0
 const callsByCase = new Map<string, number>()
@@ -19,13 +28,19 @@ export function getData({ searchParams }: Readonly<PageProps>) {
   return { props: { n: ++nextId } }
 }
 
-export async function generateMetadata({ n }: Readonly<DataPageProps>): Promise<Metadata> {
+export async function generateMetadata({ n, params }: Readonly<DataPageProps>): Promise<Metadata> {
   await new Promise<void>(resolve => {
     setTimeout(resolve, 25)
   })
+  if (params.slug === 'unavailable') responseAvailability.markResponseUnavailable()
   return { title: `Request data ${n}` }
 }
 
 export default function GetDataPropsPage({ n }: Readonly<DataPageProps>) {
-  return <p data-testid="request-data-id">{n}</p>
+  return (
+    <>
+      <p data-testid="request-data-id">{n}</p>
+      <RefreshGetDataButton />
+    </>
+  )
 }

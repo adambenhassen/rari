@@ -1,4 +1,5 @@
 import { expect, test } from '@playwright/test'
+import { submitAndWaitForAction } from './shared/server-action-helpers'
 
 const BLOG_HELLO_WORLD_URL = /\/blog\/hello-world$/
 const BLOG_TYPESCRIPT_TIPS_URL = /\/blog\/typescript-tips$/
@@ -83,6 +84,15 @@ test.describe('Dynamic Routes', () => {
       ]) {
         expect(body).toMatch(new RegExp(`<title[^>]*>Request data ${dataId}</title>`))
       }
+    })
+
+    test('retains getData props after an action refresh', async ({ page }) => {
+      await page.goto('/get-data-props/action-refresh')
+      const requestData = page.getByTestId('request-data-id')
+
+      await expect(requestData).toHaveText(/^\d+$/)
+      await submitAndWaitForAction(page, '[data-testid="refresh-get-data"]')
+      await expect(requestData).toHaveText(/^\d+$/)
     })
 
     test('does not cache a getData throw or invalid props', async ({ request }) => {
