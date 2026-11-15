@@ -795,16 +795,22 @@ pub async fn render_synchronous(
                             retry_err
                         );
                         if is_rari_page_not_found(&retry_err) {
-                            return render_fallback_html(&state, true).await;
+                            return render_fallback_html_for_request(
+                                &state,
+                                true,
+                                &request_context,
+                            )
+                            .await;
                         }
                         return Err(error_response::status(&retry_err));
                     }
                 }
             } else {
                 tracing::error!("Failed to render route '{}': {}", route_match.route.path, e);
-                return render_fallback_html(
+                return render_fallback_html_for_request(
                     &state,
                     route_match.not_found.is_some() || is_rari_page_not_found(&e),
+                    &request_context,
                 )
                 .await;
             }
@@ -1037,15 +1043,33 @@ pub async fn render_streaming_with_layout(
     }
 }
 
-fn fallback_html_response(html: Bytes, is_not_found: bool) -> Response {
-    let status_code = if is_not_found { StatusCode::NOT_FOUND } else { StatusCode::OK };
-    #[expect(clippy::expect_used, reason = "Response::builder() with valid components never fails")]
-    Response::builder()
+fn fallback_html_response(
+    html: Bytes,
+    is_not_found: bool,
+    request_context: Option<&RequestContext>,
+) -> Response {
+    let unavailable_after = request_context.and_then(RequestContext::response_unavailable_after);
+    let status_code = if unavailable_after.is_some() {
+        StatusCode::SERVICE_UNAVAILABLE
+    } else if is_not_found {
+        StatusCode::NOT_FOUND
+    } else {
+        StatusCode::OK
+    };
+    let mut builder = Response::builder()
         .status(status_code)
         .header("content-type", "text/html; charset=utf-8")
-        .header("vary", "Accept")
-        .body(Body::from(html))
-        .expect("Valid HTML response")
+        .header("vary", "Accept");
+
+    if request_context.is_some_and(RequestContext::must_send_no_store) {
+        builder = builder.header("cache-control", "no-store");
+    }
+    if let Some(retry_after) = unavailable_after {
+        builder = builder.header("retry-after", retry_after.to_string());
+    }
+
+    #[expect(clippy::expect_used, reason = "Response::builder() with valid components never fails")]
+    builder.body(Body::from(html)).expect("Valid HTML response")
 }
 
 fn emergency_fallback_shell(client_head: &str) -> String {
@@ -1065,10 +1089,26 @@ pub async fn render_fallback_html(
     state: &ServerState,
     is_not_found: bool,
 ) -> Result<Response, StatusCode> {
+    render_fallback_html_inner(state, is_not_found, None).await
+}
+
+pub(super) async fn render_fallback_html_for_request(
+    state: &ServerState,
+    is_not_found: bool,
+    request_context: &RequestContext,
+) -> Result<Response, StatusCode> {
+    render_fallback_html_inner(state, is_not_found, Some(request_context)).await
+}
+
+async fn render_fallback_html_inner(
+    state: &ServerState,
+    is_not_found: bool,
+    request_context: Option<&RequestContext>,
+) -> Result<Response, StatusCode> {
     if state.config.is_production()
         && let Some(html) = state.html_cache.get()
     {
-        return Ok(fallback_html_response(html, is_not_found));
+        return Ok(fallback_html_response(html, is_not_found, request_context));
     }
 
     let vite_port = state.config.vite.port;
@@ -1092,7 +1132,7 @@ pub async fn render_fallback_html(
         state.html_cache.set_if_generation(body.clone(), cache_generation);
     }
 
-    Ok(fallback_html_response(body, is_not_found))
+    Ok(fallback_html_response(body, is_not_found, request_context))
 }
 
 #[cfg(test)]
@@ -1156,12 +1196,31 @@ mod tests {
     #[test]
     fn test_fallback_html_response_status_from_is_not_found() {
         let body = Bytes::from("<html>fallback</html>");
+        let context = RequestContext::new("/fallback".to_string());
 
-        let ok = fallback_html_response(body.clone(), false);
+        let ok = fallback_html_response(body.clone(), false, Some(&context));
         assert_eq!(ok.status(), StatusCode::OK);
 
-        let not_found = fallback_html_response(body, true);
+        let not_found = fallback_html_response(body, true, Some(&context));
         assert_eq!(not_found.status(), StatusCode::NOT_FOUND);
+    }
+
+    #[test]
+    fn fallback_html_response_preserves_request_cache_state() {
+        let body = Bytes::from("<html>fallback</html>");
+        let failed = RequestContext::new("/fallback".to_string());
+        failed.disable_cache_writes();
+        let failed_response = fallback_html_response(body.clone(), false, Some(&failed));
+        assert_eq!(failed_response.status(), StatusCode::OK);
+        assert_eq!(failed_response.headers()["cache-control"], "no-store");
+        assert!(!failed_response.headers().contains_key("retry-after"));
+
+        let unavailable = RequestContext::new("/fallback".to_string());
+        unavailable.mark_response_unavailable(19);
+        let unavailable_response = fallback_html_response(body, true, Some(&unavailable));
+        assert_eq!(unavailable_response.status(), StatusCode::SERVICE_UNAVAILABLE);
+        assert_eq!(unavailable_response.headers()["cache-control"], "no-store");
+        assert_eq!(unavailable_response.headers()["retry-after"], "19");
     }
 
     fn production_state_with_html_cache(
@@ -1212,7 +1271,10 @@ mod tests {
         html_cache.set(Bytes::from("<html>cached</html>"));
 
         let state = production_state_with_html_cache(html_cache, public_dir.clone());
-        let response = render_fallback_html(&state, true).await.expect("cache hit response");
+        let context = RequestContext::new("/fallback".to_string());
+        let response = render_fallback_html_for_request(&state, true, &context)
+            .await
+            .expect("cache hit response");
         assert_eq!(response.status(), StatusCode::NOT_FOUND);
 
         let _ = fs::remove_dir_all(public_dir);

@@ -22,7 +22,7 @@ use super::{
         should_store_response_cache, static_html_vary_header,
     },
     render::{
-        collect_page_metadata, mark_route_not_found_if_signaled, render_fallback_html,
+        collect_page_metadata, mark_route_not_found_if_signaled, render_fallback_html_for_request,
         render_rsc_navigation_streaming, render_with_fallback, resolve_not_found_entry,
         should_use_streaming, wrap_html_with_metadata,
     },
@@ -790,10 +790,11 @@ pub async fn handle_app_route(
                                     "Direct HTML rendering failed after not-found retry: {}",
                                     retry_err
                                 );
-                                return render_fallback_html(
+                                return render_fallback_html_for_request(
                                     &state,
                                     route_match.not_found.is_some()
                                         || is_rari_page_not_found(&retry_err),
+                                    &request_context,
                                 )
                                 .await;
                             }
@@ -803,9 +804,10 @@ pub async fn handle_app_route(
                             "Direct HTML rendering failed: {}, falling back to shell",
                             e
                         );
-                        return render_fallback_html(
+                        return render_fallback_html_for_request(
                             &state,
                             route_match.not_found.is_some() || is_rari_page_not_found(&e),
+                            &request_context,
                         )
                         .await;
                     }
@@ -853,8 +855,12 @@ pub async fn handle_app_route(
                             tracing::error!(
                                 "Failed to drain chunked HTML stream for build cache: {error}"
                             );
-                            return render_fallback_html(&state, route_match.not_found.is_some())
-                                .await;
+                            return render_fallback_html_for_request(
+                                &state,
+                                route_match.not_found.is_some(),
+                                &request_context,
+                            )
+                            .await;
                         }
                     };
                     let final_html = wrap_html_with_metadata(html, &state);
@@ -863,13 +869,23 @@ pub async fn handle_app_route(
                 }
                 RenderResult::StaticBinary(_bytes) => {
                     tracing::error!("StaticBinary not supported in build mode");
-                    return render_fallback_html(&state, route_match.not_found.is_some()).await;
+                    return render_fallback_html_for_request(
+                        &state,
+                        route_match.not_found.is_some(),
+                        &request_context,
+                    )
+                    .await;
                 }
                 RenderResult::Chunked { content_type: ChunkedContentType::RscFlight, .. } => {
                     tracing::error!(
                         "RSC chunked render not supported in build mode HTML rendering"
                     );
-                    return render_fallback_html(&state, route_match.not_found.is_some()).await;
+                    return render_fallback_html_for_request(
+                        &state,
+                        route_match.not_found.is_some(),
+                        &request_context,
+                    )
+                    .await;
                 }
             };
 

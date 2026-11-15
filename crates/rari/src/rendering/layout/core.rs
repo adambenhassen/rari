@@ -862,18 +862,6 @@ impl LayoutRenderer {
         return_rsc_on_fallback: bool,
         metadata_rx: Option<oneshot::Receiver<Option<PageMetadata>>>,
     ) -> Result<RenderResult, RariError> {
-        let cookie_header = request_context.as_deref().and_then(|ctx| ctx.cookie_header.as_deref());
-        let cache_key = utils::generate_cache_key(route_match, context, cookie_header);
-        let layout_cache_enabled =
-            should_use_layout_html_cache(context, request_context.as_deref());
-
-        if layout_cache_enabled
-            && !return_rsc_on_fallback
-            && let Some(cached_html) = self.html_cache.get(cache_key).await
-        {
-            return Ok(RenderResult::Static(cached_html));
-        }
-
         let loading_enabled = Config::get().map(|config| config.loading.enabled).unwrap_or(true);
 
         let loading_component_id = if loading_enabled {
@@ -888,6 +876,25 @@ impl LayoutRenderer {
         };
 
         let needs_streaming = loading_component_id.is_some();
+
+        let cache_key = if !return_rsc_on_fallback
+            && !needs_streaming
+            && metadata_rx.is_none()
+            && route_match.not_found.is_none()
+            && should_use_layout_html_cache(context, request_context.as_deref())
+        {
+            let cookie_header =
+                request_context.as_deref().and_then(|ctx| ctx.cookie_header.as_deref());
+            utils::generate_cache_key(route_match, context, cookie_header)
+        } else {
+            None
+        };
+
+        if let Some(cache_key) = cache_key
+            && let Some(cached_html) = self.html_cache.get(cache_key).await
+        {
+            return Ok(RenderResult::Static(cached_html));
+        }
 
         if return_rsc_on_fallback {
             if needs_streaming {
@@ -1387,8 +1394,7 @@ impl LayoutRenderer {
 
             let (html, is_dynamic_render, page_cache_tags) = html;
 
-            if layout_cache_enabled
-                && route_match.not_found.is_none()
+            if let Some(cache_key) = cache_key
                 && !is_dynamic_render
                 && request_context.as_deref().is_none_or(RequestContext::response_cache_allowed)
             {

@@ -1,6 +1,7 @@
 use std::{
     collections::hash_map::DefaultHasher,
     hash::{Hash, Hasher},
+    io::{self, Write},
     path::{Path, PathBuf},
 };
 
@@ -21,7 +22,7 @@ pub fn generate_cache_key(
     route_match: &AppRouteMatch,
     context: &LayoutRenderContext,
     cookie_header: Option<&str>,
-) -> u64 {
+) -> Option<u64> {
     let mut hasher = DefaultHasher::new();
 
     route_match.route.path.hash(&mut hasher);
@@ -44,9 +45,26 @@ pub fn generate_cache_key(
         cookie_header.hash(&mut hasher);
     }
 
-    context.page_data_props.as_ref().map(Value::to_string).hash(&mut hasher);
+    context.page_data_props.hash(&mut hasher);
+    context.metadata.is_some().hash(&mut hasher);
+    if let Some(metadata) = &context.metadata {
+        serde_json::to_writer(HashWriter(&mut hasher), metadata).ok()?;
+    }
 
-    hasher.finish()
+    Some(hasher.finish())
+}
+
+struct HashWriter<'a>(&'a mut DefaultHasher);
+
+impl Write for HashWriter<'_> {
+    fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
+        self.0.write(bytes);
+        Ok(bytes.len())
+    }
+
+    fn flush(&mut self) -> io::Result<()> {
+        Ok(())
+    }
 }
 
 pub fn normalize_route_component_path(file_path: &str) -> String {
@@ -297,5 +315,19 @@ mod tests {
         assert_eq!(first_key, generate_cache_key(&route, &same, None));
         assert_ne!(first_key, generate_cache_key(&route, &different, None));
         assert_ne!(first_key, generate_cache_key(&route, &no_props, None));
+    }
+
+    #[test]
+    fn layout_cache_key_includes_generated_metadata() -> Result<(), serde_json::Error> {
+        let route = route_match();
+        let mut first = render_context(Some(json!({ "n": 42 })));
+        let mut second = first.clone();
+        first.metadata = Some(serde_json::from_value(json!({ "title": "first" }))?);
+        second.metadata = Some(serde_json::from_value(json!({ "title": "second" }))?);
+
+        let first_key = generate_cache_key(&route, &first, None);
+        assert!(first_key.is_some());
+        assert_ne!(first_key, generate_cache_key(&route, &second, None));
+        Ok(())
     }
 }

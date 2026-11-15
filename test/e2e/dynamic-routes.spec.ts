@@ -57,6 +57,23 @@ function findRequestDataIdInRscPayload(payload: string): string | undefined {
 
 test.describe('Dynamic Routes', () => {
   test.describe('Single Dynamic Segment [slug]', () => {
+    test('keeps generated metadata distinct for identical getData props', async ({ request }) => {
+      const cacheCase = `metadata-cache-${Date.now()}-${Math.random()}`
+      const first = await request.get(`/get-data-props/metadata-cache?case=${cacheCase}`)
+      const second = await request.get(`/get-data-props/metadata-%63ache?case=${cacheCase}`)
+
+      expect(first.status()).toBe(200)
+      expect(second.status()).toBe(200)
+      expect(first.headers()['x-cache']).toBe('MISS')
+      expect(second.headers()['x-cache']).toBe('MISS')
+      const titlePattern = /<title[^>]*>Request data 42 version (\d+)<\/title>/
+      const firstVersion = titlePattern.exec(await first.text())?.[1]
+      const secondVersion = titlePattern.exec(await second.text())?.[1]
+      expect(firstVersion).toBeDefined()
+      expect(secondVersion).toBeDefined()
+      expect(secondVersion).not.toBe(firstVersion)
+    })
+
     test('does not share cached layout HTML between concurrent requests with getData props', async ({
       request,
     }) => {

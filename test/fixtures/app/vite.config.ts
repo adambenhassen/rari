@@ -14,6 +14,8 @@ export default defineConfig({
           '/use-cache-revalidate': 'no-store',
           '/server-response': 'public, max-age=60',
           '/server-response-metadata': 'public, max-age=60',
+          '/server-response-metadata-streaming': 'public, max-age=60',
+          '/server-response-fallback/*': 'public, max-age=60',
           '/server-response-streaming': 'public, max-age=60',
           '/get-data-props/*': 'public, max-age=60',
           '/runtime-health-blocker': 'no-store',

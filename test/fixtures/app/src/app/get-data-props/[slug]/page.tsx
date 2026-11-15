@@ -38,7 +38,7 @@ export function getData({ params, searchParams }: Readonly<PageProps>) {
   }
 
   const props: { n: number; getDataCallCount?: number } = {
-    n: Math.floor(Math.random() * Number.MAX_SAFE_INTEGER),
+    n: slug === 'metadata-cache' ? 42 : Math.floor(Math.random() * Number.MAX_SAFE_INTEGER),
   }
   if (getDataCallCount != null) props.getDataCallCount = getDataCallCount
 
@@ -56,6 +56,10 @@ export async function generateMetadata({
     setTimeout(resolve, 25)
   })
   if (params.slug === 'unavailable') responseAvailability.markResponseUnavailable()
+  if (params.slug === 'metadata-cache') {
+    const version = Math.floor(Math.random() * Number.MAX_SAFE_INTEGER)
+    return { title: `Request data ${n} version ${version}` }
+  }
   return { title: `Request data ${n}` }
 }
 
