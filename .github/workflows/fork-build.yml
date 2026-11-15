@@ -22,8 +22,29 @@ permissions:
   contents: write
 
 jobs:
+  validate:
+    name: Validate release request
+    runs-on: ubuntu-latest
+    permissions: {}
+    steps:
+      - name: Require cachefix branch and version
+        env:
+          BUILD_REF: ${{ github.ref }}
+          VERSION: ${{ inputs.version }}
+        run: |
+          set -euo pipefail
+          if [[ "$BUILD_REF" != "refs/heads/feat/jemalloc-0.14.13-cachefix" ]]; then
+            echo "Dispatch this workflow from feat/jemalloc-0.14.13-cachefix (got $BUILD_REF)" >&2
+            exit 1
+          fi
+          if [[ ! "$VERSION" =~ ^0\.14\.13-cachefix\.[0-9]+$ ]]; then
+            echo "Version must match 0.14.13-cachefix.<n> (got $VERSION)" >&2
+            exit 1
+          fi
+
   build:
     name: Build ${{ matrix.platform }}
+    needs: validate
     runs-on: ${{ matrix.os }}
     # Job-level so rust-cache's environment hash covers these: a profile
     # change then mints a new cache key instead of poisoning the old one.
