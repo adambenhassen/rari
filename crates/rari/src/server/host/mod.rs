@@ -6,7 +6,7 @@ use std::{
     future::{self, Future},
     net::{IpAddr, SocketAddr},
     path::PathBuf,
-    sync::Arc,
+    sync::{Arc, Weak},
 };
 
 use axum::{
@@ -120,42 +120,17 @@ impl Server {
 
         Self::log_cache_layer_budgets(&config);
 
-        let resource_limits = ResourceLimits {
-            max_script_execution_time_ms: config.rsc.script_execution_timeout_ms,
-            ..ResourceLimits::default()
-        };
-
-        let env_vars: rustc_hash::FxHashMap<String, String> = env::vars().collect();
-        let js_runtime = Arc::new(JsExecutionRuntime::with_pool_size(
-            Some(env_vars),
-            config.server.js_pool_size,
-        ));
-        js_runtime.set_setup_mode(true);
-        let mut renderer =
-            RscRenderer::with_resource_limits(Arc::clone(&js_runtime), resource_limits);
-        renderer.initialize().await?;
-
-        let inject_image_size_config = config.images.runtime_size_config_inject_script();
-        js_runtime.broadcast_script("inject_image_size_config", &inject_image_size_config).await?;
-
         let server_manifest = if config.is_production() {
             ComponentLoader::load_server_manifest_file().await?
         } else {
             None
         };
-
-        if config.is_production() {
-            if let Some(ref manifest) = server_manifest {
-                ComponentLoader::load_production_components(&mut renderer, manifest).await?;
-            }
-        } else {
-            ComponentLoader::load_server_actions_from_source(&mut renderer).await?;
-            ComponentLoader::load_app_router_components(&mut renderer).await?;
-        }
-
-        ComponentLoader::load_ssr_client_components(&renderer.runtime).await?;
-        ComponentLoader::load_client_reference_manifest(&renderer.runtime).await?;
-        js_runtime.set_setup_mode(false);
+        let (js_runtime, renderer) = Self::initialize_renderer(
+            &config,
+            server_manifest.as_ref(),
+            config.server.js_pool_size,
+        )
+        .await?;
 
         let routes_manifest = RoutesManifest::load_from_file(ROUTES_MANIFEST_PATH).await;
 
@@ -273,8 +248,42 @@ impl Server {
         };
 
         if config.is_production() {
-            let warmup_state = state.clone();
+            let mut warmup_state = state.clone();
             tokio::spawn(async move {
+                // Slow warmup renders must not occupy a request runtime slot.
+                let (warmup_runtime, warmup_renderer) = match Self::initialize_production_renderer(
+                    &warmup_state.config,
+                    server_manifest.as_ref(),
+                    1,
+                )
+                .await
+                {
+                    Ok(renderer) => renderer,
+                    Err(error) => {
+                        tracing::error!(
+                            "[rari] Cache warmup: Failed to initialize runtime: {error}"
+                        );
+                        return;
+                    }
+                };
+                warmup_state.ssr_renderer = Arc::new(RscHtmlRenderer::with_public_dir(
+                    Arc::clone(&warmup_runtime),
+                    warmup_state.config.public_dir().clone(),
+                ));
+                let warmup_renderer = Arc::new(Mutex::new(warmup_renderer));
+                let renderer_for_hook = Arc::downgrade(&warmup_renderer);
+                warmup_runtime.set_post_rebuild_hook(Arc::new(move |_idx, slot_runtime| {
+                    let renderer_for_hook = Weak::clone(&renderer_for_hook);
+                    Box::pin(async move {
+                        let renderer = renderer_for_hook.upgrade().ok_or_else(|| {
+                            RariError::internal("Warmup renderer has stopped".to_string())
+                        })?;
+                        let renderer = renderer.lock().await;
+                        renderer.resync_slot(slot_runtime).await
+                    })
+                }));
+                warmup_state.js_runtime = warmup_runtime;
+                warmup_state.renderer = warmup_renderer;
                 warmup::warm_cache(&warmup_state).await;
             });
         }
@@ -294,6 +303,65 @@ impl Server {
             .map_err(|e| RariError::network(format!("Failed to get local address: {e}")))?;
 
         Ok(Self { router, config, listener, address: socket_addr })
+    }
+
+    async fn initialize_renderer(
+        config: &Config,
+        server_manifest: Option<&serde_json::Value>,
+        pool_size: usize,
+    ) -> Result<(Arc<JsExecutionRuntime>, RscRenderer), RariError> {
+        if config.is_production() {
+            return Self::initialize_production_renderer(config, server_manifest, pool_size).await;
+        }
+
+        let (js_runtime, mut renderer) = Self::initialize_renderer_base(config, pool_size).await?;
+        ComponentLoader::load_server_actions_from_source(&mut renderer).await?;
+        ComponentLoader::load_app_router_components(&mut renderer).await?;
+        Self::finish_renderer_setup(&js_runtime, &renderer).await?;
+        Ok((js_runtime, renderer))
+    }
+
+    async fn initialize_production_renderer(
+        config: &Config,
+        server_manifest: Option<&serde_json::Value>,
+        pool_size: usize,
+    ) -> Result<(Arc<JsExecutionRuntime>, RscRenderer), RariError> {
+        let (js_runtime, mut renderer) = Self::initialize_renderer_base(config, pool_size).await?;
+        if let Some(manifest) = server_manifest {
+            ComponentLoader::load_production_components(&mut renderer, manifest).await?;
+        }
+        Self::finish_renderer_setup(&js_runtime, &renderer).await?;
+        Ok((js_runtime, renderer))
+    }
+
+    async fn initialize_renderer_base(
+        config: &Config,
+        pool_size: usize,
+    ) -> Result<(Arc<JsExecutionRuntime>, RscRenderer), RariError> {
+        let resource_limits = ResourceLimits {
+            max_script_execution_time_ms: config.rsc.script_execution_timeout_ms,
+            ..ResourceLimits::default()
+        };
+        let env_vars: rustc_hash::FxHashMap<String, String> = env::vars().collect();
+        let js_runtime = Arc::new(JsExecutionRuntime::with_pool_size(Some(env_vars), pool_size));
+        js_runtime.set_setup_mode(true);
+        let mut renderer =
+            RscRenderer::with_resource_limits(Arc::clone(&js_runtime), resource_limits);
+        renderer.initialize().await?;
+
+        let inject_image_size_config = config.images.runtime_size_config_inject_script();
+        js_runtime.broadcast_script("inject_image_size_config", &inject_image_size_config).await?;
+        Ok((js_runtime, renderer))
+    }
+
+    async fn finish_renderer_setup(
+        js_runtime: &JsExecutionRuntime,
+        renderer: &RscRenderer,
+    ) -> Result<(), RariError> {
+        ComponentLoader::load_ssr_client_components(&renderer.runtime).await?;
+        ComponentLoader::load_client_reference_manifest(&renderer.runtime).await?;
+        js_runtime.set_setup_mode(false);
+        Ok(())
     }
 
     fn log_cache_layer_budgets(config: &Config) {

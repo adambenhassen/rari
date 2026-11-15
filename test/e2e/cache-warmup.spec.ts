@@ -1,5 +1,6 @@
 import { expect, test } from '@playwright/test'
 import { waitForCacheWarmup } from './shared/cache-warmup-helpers'
+import './shared/cache-warmup-concurrency'
 
 test.describe('Cache warmup', () => {
   test.beforeAll(async () => {
