@@ -1,9 +1,9 @@
-name: Finwire PR check
+name: Fork PR check
 
 on:
   pull_request:
     branches:
-      - finwire/main
+      - '*/main'
 
 permissions: {}
 
@@ -74,7 +74,7 @@ jobs:
       - name: Cache Rust
         uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
         with:
-          shared-key: finwire-main-pr-check
+          shared-key: fork-main-pr-check
 
       - name: Create snapshot placeholder
         run: |
