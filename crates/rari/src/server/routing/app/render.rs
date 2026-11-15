@@ -795,19 +795,14 @@ pub async fn render_synchronous(
                             retry_err
                         );
                         if is_rari_page_not_found(&retry_err) {
-                            return render_fallback_html_for_request(
-                                &state,
-                                true,
-                                &request_context,
-                            )
-                            .await;
+                            return render_fallback_html(&state, true, &request_context).await;
                         }
                         return Err(error_response::status(&retry_err));
                     }
                 }
             } else {
                 tracing::error!("Failed to render route '{}': {}", route_match.route.path, e);
-                return render_fallback_html_for_request(
+                return render_fallback_html(
                     &state,
                     route_match.not_found.is_some() || is_rari_page_not_found(&e),
                     &request_context,
@@ -1046,9 +1041,9 @@ pub async fn render_streaming_with_layout(
 fn fallback_html_response(
     html: Bytes,
     is_not_found: bool,
-    request_context: Option<&RequestContext>,
+    request_context: &RequestContext,
 ) -> Response {
-    let unavailable_after = request_context.and_then(RequestContext::response_unavailable_after);
+    let unavailable_after = request_context.response_unavailable_after();
     let status_code = if unavailable_after.is_some() {
         StatusCode::SERVICE_UNAVAILABLE
     } else if is_not_found {
@@ -1061,7 +1056,7 @@ fn fallback_html_response(
         .header("content-type", "text/html; charset=utf-8")
         .header("vary", "Accept");
 
-    if request_context.is_some_and(RequestContext::must_send_no_store) {
+    if request_context.must_send_no_store() {
         builder = builder.header("cache-control", "no-store");
     }
     if let Some(retry_after) = unavailable_after {
@@ -1088,22 +1083,7 @@ fn emergency_fallback_shell(client_head: &str) -> String {
 pub async fn render_fallback_html(
     state: &ServerState,
     is_not_found: bool,
-) -> Result<Response, StatusCode> {
-    render_fallback_html_inner(state, is_not_found, None).await
-}
-
-pub(super) async fn render_fallback_html_for_request(
-    state: &ServerState,
-    is_not_found: bool,
     request_context: &RequestContext,
-) -> Result<Response, StatusCode> {
-    render_fallback_html_inner(state, is_not_found, Some(request_context)).await
-}
-
-async fn render_fallback_html_inner(
-    state: &ServerState,
-    is_not_found: bool,
-    request_context: Option<&RequestContext>,
 ) -> Result<Response, StatusCode> {
     if state.config.is_production()
         && let Some(html) = state.html_cache.get()
@@ -1198,10 +1178,10 @@ mod tests {
         let body = Bytes::from("<html>fallback</html>");
         let context = RequestContext::new("/fallback".to_string());
 
-        let ok = fallback_html_response(body.clone(), false, Some(&context));
+        let ok = fallback_html_response(body.clone(), false, &context);
         assert_eq!(ok.status(), StatusCode::OK);
 
-        let not_found = fallback_html_response(body, true, Some(&context));
+        let not_found = fallback_html_response(body, true, &context);
         assert_eq!(not_found.status(), StatusCode::NOT_FOUND);
     }
 
@@ -1210,14 +1190,14 @@ mod tests {
         let body = Bytes::from("<html>fallback</html>");
         let failed = RequestContext::new("/fallback".to_string());
         failed.disable_cache_writes();
-        let failed_response = fallback_html_response(body.clone(), false, Some(&failed));
+        let failed_response = fallback_html_response(body.clone(), false, &failed);
         assert_eq!(failed_response.status(), StatusCode::OK);
         assert_eq!(failed_response.headers()["cache-control"], "no-store");
         assert!(!failed_response.headers().contains_key("retry-after"));
 
         let unavailable = RequestContext::new("/fallback".to_string());
         unavailable.mark_response_unavailable(19);
-        let unavailable_response = fallback_html_response(body, true, Some(&unavailable));
+        let unavailable_response = fallback_html_response(body, true, &unavailable);
         assert_eq!(unavailable_response.status(), StatusCode::SERVICE_UNAVAILABLE);
         assert_eq!(unavailable_response.headers()["cache-control"], "no-store");
         assert_eq!(unavailable_response.headers()["retry-after"], "19");
@@ -1272,9 +1252,8 @@ mod tests {
 
         let state = production_state_with_html_cache(html_cache, public_dir.clone());
         let context = RequestContext::new("/fallback".to_string());
-        let response = render_fallback_html_for_request(&state, true, &context)
-            .await
-            .expect("cache hit response");
+        let response =
+            render_fallback_html(&state, true, &context).await.expect("cache hit response");
         assert_eq!(response.status(), StatusCode::NOT_FOUND);
 
         let _ = fs::remove_dir_all(public_dir);

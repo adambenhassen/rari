@@ -22,7 +22,7 @@ use super::{
         should_store_response_cache, static_html_vary_header,
     },
     render::{
-        collect_page_metadata, mark_route_not_found_if_signaled, render_fallback_html_for_request,
+        collect_page_metadata, mark_route_not_found_if_signaled, render_fallback_html,
         render_rsc_navigation_streaming, render_with_fallback, resolve_not_found_entry,
         should_use_streaming, wrap_html_with_metadata,
     },
@@ -149,6 +149,8 @@ pub async fn handle_app_route(
     let query_params_for_cache = route_query_params_for_cache(&query_params);
     let query_params_ref = query_params_for_cache.as_ref();
 
+    // Keep the fast tier ahead of route matching and request context setup so a
+    // cache hit only needs a hash lookup and the prebuilt response.
     if matches!(render_mode, RenderMode::Ssr) && can_use_static_fast_cache(cookie_header) {
         let fast_key =
             response::ResponseCache::generate_static_fast_cache_key(path, query_params_ref, None);
@@ -790,7 +792,7 @@ pub async fn handle_app_route(
                                     "Direct HTML rendering failed after not-found retry: {}",
                                     retry_err
                                 );
-                                return render_fallback_html_for_request(
+                                return render_fallback_html(
                                     &state,
                                     route_match.not_found.is_some()
                                         || is_rari_page_not_found(&retry_err),
@@ -804,7 +806,7 @@ pub async fn handle_app_route(
                             "Direct HTML rendering failed: {}, falling back to shell",
                             e
                         );
-                        return render_fallback_html_for_request(
+                        return render_fallback_html(
                             &state,
                             route_match.not_found.is_some() || is_rari_page_not_found(&e),
                             &request_context,
@@ -855,7 +857,7 @@ pub async fn handle_app_route(
                             tracing::error!(
                                 "Failed to drain chunked HTML stream for build cache: {error}"
                             );
-                            return render_fallback_html_for_request(
+                            return render_fallback_html(
                                 &state,
                                 route_match.not_found.is_some(),
                                 &request_context,
@@ -869,7 +871,7 @@ pub async fn handle_app_route(
                 }
                 RenderResult::StaticBinary(_bytes) => {
                     tracing::error!("StaticBinary not supported in build mode");
-                    return render_fallback_html_for_request(
+                    return render_fallback_html(
                         &state,
                         route_match.not_found.is_some(),
                         &request_context,
@@ -880,7 +882,7 @@ pub async fn handle_app_route(
                     tracing::error!(
                         "RSC chunked render not supported in build mode HTML rendering"
                     );
-                    return render_fallback_html_for_request(
+                    return render_fallback_html(
                         &state,
                         route_match.not_found.is_some(),
                         &request_context,

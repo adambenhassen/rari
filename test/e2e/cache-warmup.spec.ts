@@ -18,16 +18,25 @@ test.describe('Cache warmup', () => {
   })
 
   test('does not call getData for static fast-cache hits', async ({ request }) => {
-    const cached = await request.get('/get-data-props/fast-cache')
     const probeCase = `${Date.now()}-${Math.random()}`
-    const probe = await request.get(`/get-data-props/fast-cache?case=${probeCase}`)
-    const probeBody = await probe.text()
-    const getDataCallCount = /data-testid="get-data-call-count">(\d+)</.exec(probeBody)?.[1]
+    const before = await request.get(`/get-data-props/fast-cache?case=${probeCase}-before`)
+    const beforeCount = Number(
+      /data-testid="get-data-call-count">(\d+)</.exec(await before.text())?.[1],
+    )
+    const cached = await request.get('/get-data-props/fast-cache')
+    const after = await request.get(`/get-data-props/fast-cache?case=${probeCase}-after`)
+    const afterCount = Number(
+      /data-testid="get-data-call-count">(\d+)</.exec(await after.text())?.[1],
+    )
 
+    expect(before.status()).toBe(200)
+    expect(before.headers()['x-cache']).not.toBe('HIT')
     expect(cached.status()).toBe(200)
     expect(cached.headers()['x-cache']).toBe('HIT')
-    expect(probe.headers()['x-cache']).not.toBe('HIT')
-    expect(getDataCallCount).toBe('2')
+    expect(after.status()).toBe(200)
+    expect(after.headers()['x-cache']).not.toBe('HIT')
+    expect(Number.isSafeInteger(beforeCount)).toBe(true)
+    expect(afterCount).toBe(beforeCount + 1)
   })
 
   test('does not cache a statically parameterized route whose getData fails in warmup', async ({

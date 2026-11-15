@@ -57,6 +57,24 @@ function findRequestDataIdInRscPayload(payload: string): string | undefined {
 
 test.describe('Dynamic Routes', () => {
   test.describe('Single Dynamic Segment [slug]', () => {
+    test('streams getData props into the page and metadata', async ({ request }) => {
+      const response = await request.get('/get-data-streaming/article')
+      const body = await response.text()
+
+      expect(response.status()).toBe(200)
+      expect(response.headers()['x-render-mode']).toBe('streaming')
+      expect(body).toMatch(/<title[^>]*>Streaming data stream-article<\/title>/)
+      expect(body).toContain('data-testid="streaming-data">stream-article</p>')
+    })
+
+    test('honors notFound with invalid getData props', async ({ request }) => {
+      const url = `/get-data-props/article?getDataFailure=notfound-array&case=${Date.now()}-${Math.random()}`
+      const response = await request.get(url)
+
+      expect(response.status()).toBe(404)
+      expect(await response.text()).not.toContain('data-testid="request-data-id"')
+    })
+
     test('keeps generated metadata distinct for identical getData props', async ({ request }) => {
       const cacheCase = `metadata-cache-${Date.now()}-${Math.random()}`
       const first = await request.get(`/get-data-props/metadata-cache?case=${cacheCase}`)
@@ -158,13 +176,23 @@ test.describe('Dynamic Routes', () => {
       const originalId = (await requestData.textContent()) ?? ''
 
       expect(originalId).toMatch(/^\d+$/)
+      let actionPayload = ''
+      await page.route('**/get-data-props/action-refresh*', async route => {
+        if (route.request().method() !== 'POST') {
+          await route.fallback()
+          return
+        }
+        const response = await route.fetch()
+        actionPayload = await response.text()
+        await route.fulfill({ response })
+      })
       const actionResponse = await submitAndWaitForAction(page, '[data-testid="refresh-get-data"]')
       expect(actionResponse.headers()['content-type']).toContain('text/x-component')
       expect(actionResponse.headers()['x-action-revalidated']).toBe('2')
       expect(actionResponse.headers()['x-action-revalidated-path']).toBe(
         '/get-data-props/action-refresh',
       )
-      const refreshedId = findRequestDataIdInRscPayload(await actionResponse.text())
+      const refreshedId = findRequestDataIdInRscPayload(actionPayload)
 
       expect(refreshedId).toBeDefined()
       expect(refreshedId).not.toBe(originalId)

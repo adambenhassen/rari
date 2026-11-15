@@ -30,6 +30,7 @@ export function getData({ params, searchParams }: Readonly<PageProps>) {
   const failure = String(searchParams.getDataFailure)
   if (failure === 'throw') throw new Error('getData failed')
   if (failure === 'array') return { props: ['invalid'] }
+  if (failure === 'notfound-array') return { notFound: true, props: ['invalid'] }
   if (failure === 'second-call') {
     const caseKey = String(searchParams.case)
     const callCount = callsByCase.get(caseKey) ?? 0

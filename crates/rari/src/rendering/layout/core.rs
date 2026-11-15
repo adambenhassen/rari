@@ -72,6 +72,11 @@ globalThis['~rsc'].renderResult
 ";
 
 fn parse_page_data_result(result: &Value) -> PageData {
+    let not_found = result.get("notFound").and_then(Value::as_bool);
+    if not_found == Some(true) {
+        return PageData::NotFound;
+    }
+
     let Some(failed) = result.get("failed").and_then(Value::as_bool) else {
         return PageData::Failed(
             "getData returned a malformed result (missing boolean `failed`)".to_string(),
@@ -89,19 +94,19 @@ fn parse_page_data_result(result: &Value) -> PageData {
         );
     }
 
-    match result.get("notFound").and_then(Value::as_bool) {
-        Some(true) => PageData::NotFound,
-        Some(false) => match result.get("props") {
-            Some(Value::Null) => PageData::Found(None),
-            Some(props @ Value::Object(_)) => PageData::Found(Some(props.clone())),
-            Some(_) => PageData::Failed("getData props must be an object or null".to_string()),
-            None => PageData::Failed(
-                "getData returned a malformed result (missing `props`)".to_string(),
-            ),
-        },
-        None => PageData::Failed(
+    if not_found.is_none() {
+        return PageData::Failed(
             "getData returned a malformed result (missing boolean `notFound`)".to_string(),
-        ),
+        );
+    }
+
+    match result.get("props") {
+        Some(Value::Null) => PageData::Found(None),
+        Some(props @ Value::Object(_)) => PageData::Found(Some(props.clone())),
+        Some(_) => PageData::Failed("getData props must be an object or null".to_string()),
+        None => {
+            PageData::Failed("getData returned a malformed result (missing `props`)".to_string())
+        }
     }
 }
 
@@ -1791,6 +1796,24 @@ mod tests {
                 "props": null
             })),
             PageData::Failed(error) if error == "getData exploded"
+        ));
+
+        assert!(matches!(
+            parse_page_data_result(&serde_json::json!({
+                "failed": true,
+                "error": "getData exploded"
+            })),
+            PageData::Failed(error) if error == "getData exploded"
+        ));
+
+        assert!(matches!(
+            parse_page_data_result(&serde_json::json!({
+                "notFound": true,
+                "failed": true,
+                "error": "getData props must be an object or null",
+                "props": []
+            })),
+            PageData::NotFound
         ));
     }
 
