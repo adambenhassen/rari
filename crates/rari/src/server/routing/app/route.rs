@@ -59,6 +59,45 @@ use crate::{
     },
 };
 
+fn fast_cache_response(
+    prebuilt: &response::PrebuiltResponse,
+    headers: &HeaderMap,
+    accept_encoding: Option<&str>,
+) -> Response {
+    if let Some(client_etag) = headers.get("if-none-match").and_then(|v| v.to_str().ok())
+        && client_etag == prebuilt.etag
+    {
+        #[expect(
+            clippy::expect_used,
+            reason = "Response::builder() with valid components never fails"
+        )]
+        return Response::builder()
+            .status(StatusCode::NOT_MODIFIED)
+            .header("etag", &prebuilt.etag)
+            .header("vary", static_html_vary_header(None))
+            .body(Body::empty())
+            .expect("Valid 304 response");
+    }
+
+    let encoding = CompressionEncoding::from_accept_encoding(accept_encoding);
+    let (body, encoding_header) = prebuilt.body_for(encoding);
+    let status = if prebuilt.is_not_found { StatusCode::NOT_FOUND } else { StatusCode::OK };
+    let mut builder = Response::builder()
+        .status(status)
+        .header("content-type", prebuilt.content_type.as_str())
+        .header("cache-control", prebuilt.cache_control.as_str())
+        .header("etag", &prebuilt.etag)
+        .header("vary", static_html_vary_header(None))
+        .header("x-cache", "HIT");
+
+    if let Some(enc) = encoding_header {
+        builder = builder.header("content-encoding", enc);
+    }
+
+    #[expect(clippy::expect_used, reason = "Response::builder() with valid components never fails")]
+    builder.body(Body::from(body)).expect("Valid fast-path response")
+}
+
 #[axum::debug_handler]
 #[expect(
     clippy::implicit_hasher,
@@ -149,49 +188,17 @@ pub async fn handle_app_route(
     let query_params_for_cache = route_query_params_for_cache(&query_params);
     let query_params_ref = query_params_for_cache.as_ref();
 
-    // Keep the fast tier ahead of route matching and request context setup so a
-    // cache hit only needs a hash lookup and the prebuilt response.
+    // Pages without getData can return before route matching and context setup.
+    let mut deferred_fast_key = None;
     if matches!(render_mode, RenderMode::Ssr) && can_use_static_fast_cache(cookie_header) {
         let fast_key =
             response::ResponseCache::generate_static_fast_cache_key(path, query_params_ref, None);
 
         if let Some(prebuilt) = state.static_fast_cache.get(&fast_key) {
-            if let Some(client_etag) = headers.get("if-none-match").and_then(|v| v.to_str().ok())
-                && client_etag == prebuilt.etag
-            {
-                #[expect(
-                    clippy::expect_used,
-                    reason = "Response::builder() with valid components never fails"
-                )]
-                return Ok(Response::builder()
-                    .status(StatusCode::NOT_MODIFIED)
-                    .header("etag", &prebuilt.etag)
-                    .header("vary", static_html_vary_header(None))
-                    .body(Body::empty())
-                    .expect("Valid 304 response"));
+            if !prebuilt.has_page_data {
+                return Ok(fast_cache_response(&prebuilt, &headers, accept_encoding));
             }
-
-            let encoding = CompressionEncoding::from_accept_encoding(accept_encoding);
-            let (body, encoding_header) = prebuilt.body_for(encoding);
-            let status = if prebuilt.is_not_found { StatusCode::NOT_FOUND } else { StatusCode::OK };
-
-            let mut builder = Response::builder()
-                .status(status)
-                .header("content-type", prebuilt.content_type.as_str())
-                .header("cache-control", prebuilt.cache_control.as_str())
-                .header("etag", &prebuilt.etag)
-                .header("vary", static_html_vary_header(None))
-                .header("x-cache", "HIT");
-
-            if let Some(enc) = encoding_header {
-                builder = builder.header("content-encoding", enc);
-            }
-
-            #[expect(
-                clippy::expect_used,
-                reason = "Response::builder() with valid components never fails"
-            )]
-            return Ok(builder.body(Body::from(body)).expect("Valid fast-path response"));
+            deferred_fast_key = Some(fast_key);
         }
     }
 
@@ -254,9 +261,11 @@ pub async fn handle_app_route(
         Arc::clone(&state.layout_html_cache),
     );
 
-    if route_match.not_found.is_none() && route_match.route.is_dynamic {
+    let mut has_page_data = true;
+    if route_match.not_found.is_none() {
         match layout_renderer.get_page_data(&route_match, &context).await {
             Ok(page_data) => match page_data {
+                PageData::Missing => has_page_data = false,
                 PageData::Failed(error) => {
                     request_context.disable_cache_writes();
                     tracing::error!(
@@ -266,9 +275,17 @@ pub async fn handle_app_route(
                     );
                 }
                 PageData::NotFound => {
+                    request_context.disable_cache_writes();
                     if let Some(not_found_entry) = resolve_not_found_entry(app_router, &route_match)
                     {
                         route_match.not_found = Some(not_found_entry);
+                    } else {
+                        #[expect(clippy::expect_used, reason = "valid static response")]
+                        return Ok(Response::builder()
+                            .status(StatusCode::NOT_FOUND)
+                            .header(CACHE_CONTROL, "no-store")
+                            .body(Body::empty())
+                            .expect("Valid not-found response"));
                     }
                 }
                 PageData::Found(props) => context.page_data_props = props,
@@ -282,6 +299,17 @@ pub async fn handle_app_route(
                 );
             }
         }
+    }
+
+    if route_match.not_found.is_none()
+        && request_context.response_unavailable_after().is_none()
+        && let Some(fast_key) = deferred_fast_key
+        && let Some(prebuilt) = state.static_fast_cache.get(&fast_key)
+    {
+        return Ok(apply_request_no_store(
+            fast_cache_response(&prebuilt, &headers, accept_encoding),
+            &request_context,
+        ));
     }
 
     match render_mode {
@@ -309,20 +337,15 @@ pub async fn handle_app_route(
             }
             let cache_key = response_cache_key(path, query_params_ref, Some("rsc"), cookie_header);
 
-            if context.template_navigation_id.is_none()
+            if route_match.not_found.is_none()
+                && context.template_navigation_id.is_none()
                 && request_context.response_unavailable_after().is_none()
                 && let Some(cached) = state.response_cache.get(&cache_key).await
             {
-                let status_code = if route_match.not_found.is_some() {
-                    StatusCode::NOT_FOUND
-                } else {
-                    StatusCode::OK
-                };
-
                 let merged_vary = merge_vary_with_accept(cached.headers.get("vary"));
 
                 let mut response_builder = Response::builder()
-                    .status(status_code)
+                    .status(StatusCode::OK)
                     .header("content-type", "text/x-component")
                     .header("vary", merged_vary)
                     .header("x-cache", "HIT");
@@ -337,9 +360,12 @@ pub async fn handle_app_route(
                     clippy::expect_used,
                     reason = "Response::builder() with valid components never fails"
                 )]
-                return Ok(response_builder
-                    .body(Body::from(cached.body))
-                    .expect("Valid cached RSC response"));
+                return Ok(apply_request_no_store(
+                    response_builder
+                        .body(Body::from(cached.body))
+                        .expect("Valid cached RSC response"),
+                    &request_context,
+                ));
             }
 
             context.metadata = collect_page_metadata(
@@ -476,7 +502,8 @@ pub async fn handle_app_route(
 
             let client_etag = headers.get("if-none-match").and_then(|v| v.to_str().ok());
 
-            if request_context.response_unavailable_after().is_none()
+            if route_match.not_found.is_none()
+                && request_context.response_unavailable_after().is_none()
                 && let Some(cached) = state.response_cache.get(&cache_key).await
             {
                 if let (Some(cached_etag), Some(client_etag)) = (&cached.metadata.etag, client_etag)
@@ -488,19 +515,16 @@ pub async fn handle_app_route(
                         clippy::expect_used,
                         reason = "Response::builder() with valid components never fails"
                     )]
-                    return Ok(Response::builder()
-                        .status(StatusCode::NOT_MODIFIED)
-                        .header("etag", cached_etag)
-                        .header("vary", merged_vary)
-                        .body(Body::empty())
-                        .expect("Valid 304 response"));
+                    return Ok(apply_request_no_store(
+                        Response::builder()
+                            .status(StatusCode::NOT_MODIFIED)
+                            .header("etag", cached_etag)
+                            .header("vary", merged_vary)
+                            .body(Body::empty())
+                            .expect("Valid 304 response"),
+                        &request_context,
+                    ));
                 }
-
-                let status_code = if route_match.not_found.is_some() {
-                    StatusCode::NOT_FOUND
-                } else {
-                    StatusCode::OK
-                };
 
                 let merged_vary = merge_vary_with_accept(cached.headers.get("vary"));
 
@@ -534,7 +558,7 @@ pub async fn handle_app_route(
                     };
 
                 let mut response_builder = Response::builder()
-                    .status(status_code)
+                    .status(StatusCode::OK)
                     .header("content-type", "text/html; charset=utf-8")
                     .header("vary", merged_vary)
                     .header("x-cache", "HIT");
@@ -562,9 +586,10 @@ pub async fn handle_app_route(
                     clippy::expect_used,
                     reason = "Response::builder() with valid components never fails"
                 )]
-                return Ok(response_builder
-                    .body(Body::from(body_bytes))
-                    .expect("Valid cached response"));
+                return Ok(apply_request_no_store(
+                    response_builder.body(Body::from(body_bytes)).expect("Valid cached response"),
+                    &request_context,
+                ));
             }
 
             let use_streaming = should_use_streaming(&route_match, &state.config);
@@ -953,6 +978,7 @@ pub async fn handle_app_route(
                             content_type: "text/html; charset=utf-8".to_string(),
                             cache_control: cache_control_value.to_string(),
                             is_not_found: route_match.not_found.is_some(),
+                            has_page_data,
                             cached_at: Instant::now(),
                             route: None,
                         }),

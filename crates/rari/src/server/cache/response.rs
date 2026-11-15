@@ -30,6 +30,8 @@ pub struct PrebuiltResponse {
     pub content_type: String,
     pub cache_control: String,
     pub is_not_found: bool,
+    /// The page exports getData, even when it returns no props.
+    pub has_page_data: bool,
     pub cached_at: Instant,
     /// Matched route pattern, reported as `x-rari-route` on hits (guest
     /// renderers); `None` where the renderer does not label responses.
@@ -1345,6 +1347,7 @@ mod tests {
                 content_type: "text/html; charset=utf-8".to_string(),
                 cache_control: "public".to_string(),
                 is_not_found: false,
+                has_page_data: false,
                 cached_at: Instant::now(),
                 route: None,
             })
@@ -1378,6 +1381,7 @@ mod tests {
                 content_type: "text/html; charset=utf-8".to_string(),
                 cache_control: "public".to_string(),
                 is_not_found: false,
+                has_page_data: false,
                 cached_at: Instant::now(),
                 route: None,
             })
@@ -1416,6 +1420,7 @@ mod tests {
                 content_type: "text/html; charset=utf-8".to_string(),
                 cache_control: "public".to_string(),
                 is_not_found: false,
+                has_page_data: false,
                 cached_at: Instant::now(),
                 route: None,
             })
@@ -1458,6 +1463,7 @@ mod tests {
                         content_type: "text/html; charset=utf-8".to_string(),
                         cache_control: "public".to_string(),
                         is_not_found: false,
+                        has_page_data: false,
                         cached_at: Instant::now(),
                         route: None,
                     });
@@ -1491,6 +1497,7 @@ mod tests {
                 content_type: "text/html; charset=utf-8".to_string(),
                 cache_control: "public, max-age=1".to_string(),
                 is_not_found: false,
+                has_page_data: false,
                 cached_at,
                 route: None,
             }),
@@ -1514,6 +1521,7 @@ mod tests {
                 content_type: "text/html; charset=utf-8".to_string(),
                 cache_control: "public".to_string(),
                 is_not_found: false,
+                has_page_data: false,
                 cached_at,
                 route: None,
             }),
@@ -1536,6 +1544,7 @@ mod tests {
             content_type: "text/html; charset=utf-8".to_string(),
             cache_control: "public, max-age=1".to_string(),
             is_not_found: false,
+            has_page_data: false,
             cached_at: stale_at,
             route: None,
         });
@@ -1550,6 +1559,7 @@ mod tests {
             content_type: "text/html; charset=utf-8".to_string(),
             cache_control: "public, max-age=60".to_string(),
             is_not_found: false,
+            has_page_data: false,
             cached_at: Instant::now(),
             route: None,
         });

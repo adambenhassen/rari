@@ -148,9 +148,11 @@ async fn warm_route(
 
     let _render_guard = warmup_render_lock().await.lock_owned().await;
 
-    if route_match.not_found.is_none() && route_match.route.is_dynamic {
+    let mut has_page_data = true;
+    if route_match.not_found.is_none() {
         match layout_renderer.get_page_data(&route_match, &context).await {
             Ok(page_data) => match page_data {
+                PageData::Missing => has_page_data = false,
                 PageData::Failed(error) => {
                     request_context.disable_cache_writes();
                     tracing::error!(
@@ -238,6 +240,7 @@ async fn warm_route(
             content_type: "text/html; charset=utf-8".to_string(),
             cache_control: cache_control.to_string(),
             is_not_found: false,
+            has_page_data,
             cached_at: Instant::now(),
             route: None,
         });
@@ -417,6 +420,7 @@ mod tests {
             content_type: "text/html; charset=utf-8".to_string(),
             cache_control: "public, max-age=60".to_string(),
             is_not_found: false,
+            has_page_data: false,
             cached_at: Instant::now(),
             route: None,
         })

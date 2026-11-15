@@ -31,11 +31,14 @@ export function getData({ params, searchParams }: Readonly<PageProps>) {
   if (failure === 'throw') throw new Error('getData failed')
   if (failure === 'array') return { props: ['invalid'] }
   if (failure === 'notfound-array') return { notFound: true, props: ['invalid'] }
-  if (failure === 'second-call') {
+  if (failure === 'second-call' || failure === 'second-notfound') {
     const caseKey = String(searchParams.case)
     const callCount = callsByCase.get(caseKey) ?? 0
     callsByCase.set(caseKey, callCount + 1)
-    if (callCount === 1) throw new Error('getData failed on second call')
+    if (failure === 'second-call' && callCount === 1) {
+      throw new Error('getData failed on second call')
+    }
+    if (failure === 'second-notfound' && callCount >= 1) return { notFound: true }
   }
 
   const props: { n: number; getDataCallCount?: number } = {

@@ -237,6 +237,29 @@ test.describe('Dynamic Routes', () => {
       expect(secondBody).toBe(firstBody)
     })
 
+    test('returns an uncached 404 when getData props remove a cached page', async ({ request }) => {
+      const cacheCase = `removed-${Date.now()}-${Math.random()}`
+      const url = `/get-data-props/article?getDataFailure=second-notfound&case=${cacheCase}`
+      const first = await request.get(url)
+      const etag = first.headers().etag
+
+      expect(first.status()).toBe(200)
+      expect(first.headers()['x-cache']).toBe('MISS')
+      expect(etag).toBeDefined()
+      if (!etag) throw new Error('Cached page did not return an ETag')
+
+      const removed = await request.get(url, { headers: { 'If-None-Match': etag } })
+      expect(removed.status()).toBe(404)
+      expect(removed.headers()['cache-control']).toBe('no-store')
+      expect(removed.headers()['x-cache']).not.toBe('HIT')
+      expect(await removed.text()).toContain('data-testid="not-found-page"')
+
+      const navigation = await request.get(url, { headers: { Accept: 'text/x-component' } })
+      expect(navigation.status()).toBe(404)
+      expect(navigation.headers()['cache-control']).toBe('no-store')
+      expect(navigation.headers()['x-cache']).not.toBe('HIT')
+    })
+
     test('should render dynamic route with slug parameter', async ({ page }) => {
       await page.goto('/blog/hello-world')
 

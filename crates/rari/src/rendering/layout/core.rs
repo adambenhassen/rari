@@ -72,6 +72,10 @@ globalThis['~rsc'].renderResult
 ";
 
 fn parse_page_data_result(result: &Value) -> PageData {
+    if result.get("hasGetData").and_then(Value::as_bool) == Some(false) {
+        return PageData::Missing;
+    }
+
     let not_found = result.get("notFound").and_then(Value::as_bool);
     if not_found == Some(true) {
         return PageData::NotFound;
@@ -644,13 +648,13 @@ impl LayoutRenderer {
             .and_then(|p| p.canonicalize().ok());
 
         let Some(base_path) = dist_server_path else {
-            return Ok(PageData::Found(None));
+            return Ok(PageData::Missing);
         };
 
         let page_file_path = utils::component_dist_path(&base_path, &route_match.route.file_path);
 
         if !page_file_path.exists() {
-            return Ok(PageData::Found(None));
+            return Ok(PageData::Missing);
         }
 
         let page_path = path_to_file_url(&page_file_path);
@@ -665,7 +669,7 @@ impl LayoutRenderer {
                     const module = await import("{page_path}");
 
                     if (typeof module.getData !== 'function') {{
-                        return {{ notFound: false, failed: false, props: null }};
+                        return {{ hasGetData: false, notFound: false, failed: false, props: null }};
                     }}
 
                     const pageProps = {page_props_json};

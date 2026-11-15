@@ -567,13 +567,14 @@ async fn compose_action_refresh_route(
         route_match.pathname.clone(),
     );
 
-    if route_match.not_found.is_none() && route_match.route.is_dynamic {
+    if route_match.not_found.is_none() {
         let layout_renderer = LayoutRenderer::with_shared_cache(
             Arc::clone(&state.renderer),
             Arc::clone(&state.layout_html_cache),
         );
         match layout_renderer.get_page_data_on(&route_match, &context, sticky_runtime).await {
             Ok(page_data) => match page_data {
+                PageData::Missing => {}
                 PageData::Failed(error) => {
                     request_context.disable_cache_writes();
                     tracing::error!(
