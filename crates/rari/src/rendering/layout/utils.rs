@@ -221,13 +221,14 @@ pub fn sort_flight_protocol(flight_protocol: &str) -> String {
 
 #[cfg(test)]
 mod tests {
+    use rustc_hash::FxHashMap;
+    use serde_json::{Value, json};
+
     use super::{generate_cache_key, sort_flight_protocol};
     use crate::{
         rendering::layout::types::LayoutRenderContext,
         server::routing::app_router::{AppRouteEntry, AppRouteMatch},
     };
-    use rustc_hash::FxHashMap;
-    use serde_json::{Value, json};
 
     fn route_match() -> AppRouteMatch {
         AppRouteMatch {

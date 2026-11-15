@@ -71,7 +71,7 @@ const JS_GET_RESULT: &str = r"
 globalThis['~rsc'].renderResult
 ";
 
-fn parse_page_data_result(result: Value) -> PageData {
+fn parse_page_data_result(result: &Value) -> PageData {
     let Some(failed) = result.get("failed").and_then(Value::as_bool) else {
         return PageData::Failed(
             "getData returned a malformed result (missing boolean `failed`)".to_string(),
@@ -598,10 +598,7 @@ impl LayoutRenderer {
         route_match: &AppRouteMatch,
         context: &LayoutRenderContext,
     ) -> Result<bool, RariError> {
-        Ok(matches!(
-            self.get_page_data_on(route_match, context, None).await?,
-            PageData::NotFound
-        ))
+        Ok(matches!(self.get_page_data_on(route_match, context, None).await?, PageData::NotFound))
     }
 
     /// Prefer [`Self::check_page_not_found_on`] with a sticky runtime when the caller
@@ -705,7 +702,7 @@ impl LayoutRenderer {
             runtime.execute_script("get_page_data".to_string(), check_script).await?
         };
 
-        Ok(parse_page_data_result(result))
+        Ok(parse_page_data_result(&result))
     }
 
     pub async fn render_route(
@@ -1776,12 +1773,12 @@ mod tests {
     #[test]
     fn malformed_page_data_result_fails_closed_and_preserves_error() {
         assert!(matches!(
-            parse_page_data_result(serde_json::json!({ "notFound": false, "props": null })),
+            parse_page_data_result(&serde_json::json!({ "notFound": false, "props": null })),
             PageData::Failed(_)
         ));
 
         assert!(matches!(
-            parse_page_data_result(serde_json::json!({
+            parse_page_data_result(&serde_json::json!({
                 "notFound": false,
                 "failed": true,
                 "error": "getData exploded",

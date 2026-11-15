@@ -12,8 +12,7 @@ use axum::{
 use bytes::Bytes;
 use rari_error::RariError;
 use rustc_hash::FxHashMap;
-use tokio::fs;
-use tokio::sync::oneshot;
+use tokio::{fs, sync::oneshot};
 
 use super::{
     apply_request_no_store,

@@ -20,6 +20,7 @@ pub struct LayoutRenderContext {
 }
 
 #[derive(Debug, Clone, PartialEq)]
+#[non_exhaustive]
 pub enum PageData {
     NotFound,
     Failed(String),
