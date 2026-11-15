@@ -25,7 +25,8 @@ use crate::{
         layout::{
             ChunkedContentType, LayoutRenderContext, LayoutRenderer, OpenGraphImage,
             OpenGraphImageDescriptor, OpenGraphMetadata, PageMetadata, RenderResult,
-            TwitterMetadata, component_dist_path, is_rari_page_not_found, sort_flight_protocol,
+            TwitterMetadata, component_dist_path, create_page_props, is_rari_page_not_found,
+            sort_flight_protocol,
         },
     },
     server::{
@@ -86,6 +87,7 @@ pub async fn collect_page_metadata(
     state: &ServerState,
     route_match: &AppRouteMatch,
     context: &LayoutRenderContext,
+    request_context: Option<Arc<RequestContext>>,
 ) -> Option<PageMetadata> {
     let dist_server_path = match env::current_dir() {
         Ok(cwd) => {
@@ -125,12 +127,22 @@ pub async fn collect_page_metadata(
     let runtime = Arc::clone(&renderer.runtime);
     drop(renderer);
 
+    let page_props = match create_page_props(route_match, context) {
+        Ok(page_props) => page_props,
+        Err(error) => {
+            tracing::error!("Failed to create page props for metadata collection: {}", error);
+            return None;
+        }
+    };
+
     match runtime
         .collect_metadata(
+            request_context,
             layout_paths,
             page_path.clone(),
             context.params.clone(),
             context.search_params.clone(),
+            page_props,
         )
         .await
     {
@@ -287,7 +299,13 @@ pub async fn render_with_fallback(
             tracing::error!("Streaming render failed, falling back to synchronous: {}", e);
             let mut context = context;
             if context.metadata.is_none() {
-                context.metadata = collect_page_metadata(&state, &route_match, &context).await;
+                context.metadata = collect_page_metadata(
+                    &state,
+                    &route_match,
+                    &context,
+                    Some(Arc::clone(&request_context)),
+                )
+                .await;
             }
             render_synchronous(state, route_match, context, accept_encoding, request_context).await
         }
@@ -321,7 +339,13 @@ pub async fn render_rsc_navigation_streaming(
             if let Some(app_router) = state.app_router.as_ref()
                 && mark_route_not_found_if_signaled(&e, &mut route_match, app_router)
             {
-                context.metadata = collect_page_metadata(&state, &route_match, &context).await;
+                context.metadata = collect_page_metadata(
+                    &state,
+                    &route_match,
+                    &context,
+                    Some(Arc::clone(&request_context)),
+                )
+                .await;
                 match layout_renderer
                     .render_route_with_streaming(
                         &route_match,
@@ -746,7 +770,13 @@ pub async fn render_synchronous(
             if let Some(app_router) = state.app_router.as_ref()
                 && mark_route_not_found_if_signaled(&e, &mut route_match, app_router)
             {
-                context.metadata = collect_page_metadata(&state, &route_match, &context).await;
+                context.metadata = collect_page_metadata(
+                    &state,
+                    &route_match,
+                    &context,
+                    Some(Arc::clone(&request_context)),
+                )
+                .await;
                 match layout_renderer
                     .render_route_with_streaming(
                         &route_match,
@@ -765,7 +795,7 @@ pub async fn render_synchronous(
                             retry_err
                         );
                         if is_rari_page_not_found(&retry_err) {
-                            return render_fallback_html(&state, true).await;
+                            return render_fallback_html(&state, true, &request_context).await;
                         }
                         return Err(error_response::status(&retry_err));
                     }
@@ -775,6 +805,7 @@ pub async fn render_synchronous(
                 return render_fallback_html(
                     &state,
                     route_match.not_found.is_some() || is_rari_page_not_found(&e),
+                    &request_context,
                 )
                 .await;
             }
@@ -913,7 +944,13 @@ pub async fn render_streaming_with_layout(
 
             let mut context = context;
             if context.metadata.is_none() {
-                context.metadata = collect_page_metadata(&state, &route_match, &context).await;
+                context.metadata = collect_page_metadata(
+                    &state,
+                    &route_match,
+                    &context,
+                    Some(Arc::clone(&request_context)),
+                )
+                .await;
             }
 
             return render_synchronous(
@@ -1001,15 +1038,33 @@ pub async fn render_streaming_with_layout(
     }
 }
 
-fn fallback_html_response(html: Bytes, is_not_found: bool) -> Response {
-    let status_code = if is_not_found { StatusCode::NOT_FOUND } else { StatusCode::OK };
-    #[expect(clippy::expect_used, reason = "Response::builder() with valid components never fails")]
-    Response::builder()
+fn fallback_html_response(
+    html: Bytes,
+    is_not_found: bool,
+    request_context: &RequestContext,
+) -> Response {
+    let unavailable_after = request_context.response_unavailable_after();
+    let status_code = if unavailable_after.is_some() {
+        StatusCode::SERVICE_UNAVAILABLE
+    } else if is_not_found {
+        StatusCode::NOT_FOUND
+    } else {
+        StatusCode::OK
+    };
+    let mut builder = Response::builder()
         .status(status_code)
         .header("content-type", "text/html; charset=utf-8")
-        .header("vary", "Accept")
-        .body(Body::from(html))
-        .expect("Valid HTML response")
+        .header("vary", "Accept");
+
+    if request_context.must_send_no_store() {
+        builder = builder.header("cache-control", "no-store");
+    }
+    if let Some(retry_after) = unavailable_after {
+        builder = builder.header("retry-after", retry_after.to_string());
+    }
+
+    #[expect(clippy::expect_used, reason = "Response::builder() with valid components never fails")]
+    builder.body(Body::from(html)).expect("Valid HTML response")
 }
 
 fn emergency_fallback_shell(client_head: &str) -> String {
@@ -1028,11 +1083,12 @@ fn emergency_fallback_shell(client_head: &str) -> String {
 pub async fn render_fallback_html(
     state: &ServerState,
     is_not_found: bool,
+    request_context: &RequestContext,
 ) -> Result<Response, StatusCode> {
     if state.config.is_production()
         && let Some(html) = state.html_cache.get()
     {
-        return Ok(fallback_html_response(html, is_not_found));
+        return Ok(fallback_html_response(html, is_not_found, request_context));
     }
 
     let vite_port = state.config.vite.port;
@@ -1056,7 +1112,7 @@ pub async fn render_fallback_html(
         state.html_cache.set_if_generation(body.clone(), cache_generation);
     }
 
-    Ok(fallback_html_response(body, is_not_found))
+    Ok(fallback_html_response(body, is_not_found, request_context))
 }
 
 #[cfg(test)]
@@ -1120,12 +1176,31 @@ mod tests {
     #[test]
     fn test_fallback_html_response_status_from_is_not_found() {
         let body = Bytes::from("<html>fallback</html>");
+        let context = RequestContext::new("/fallback".to_string());
 
-        let ok = fallback_html_response(body.clone(), false);
+        let ok = fallback_html_response(body.clone(), false, &context);
         assert_eq!(ok.status(), StatusCode::OK);
 
-        let not_found = fallback_html_response(body, true);
+        let not_found = fallback_html_response(body, true, &context);
         assert_eq!(not_found.status(), StatusCode::NOT_FOUND);
+    }
+
+    #[test]
+    fn fallback_html_response_preserves_request_cache_state() {
+        let body = Bytes::from("<html>fallback</html>");
+        let failed = RequestContext::new("/fallback".to_string());
+        failed.disable_cache_writes();
+        let failed_response = fallback_html_response(body.clone(), false, &failed);
+        assert_eq!(failed_response.status(), StatusCode::OK);
+        assert_eq!(failed_response.headers()["cache-control"], "no-store");
+        assert!(!failed_response.headers().contains_key("retry-after"));
+
+        let unavailable = RequestContext::new("/fallback".to_string());
+        unavailable.mark_response_unavailable(19);
+        let unavailable_response = fallback_html_response(body, true, &unavailable);
+        assert_eq!(unavailable_response.status(), StatusCode::SERVICE_UNAVAILABLE);
+        assert_eq!(unavailable_response.headers()["cache-control"], "no-store");
+        assert_eq!(unavailable_response.headers()["retry-after"], "19");
     }
 
     fn production_state_with_html_cache(
@@ -1176,7 +1251,9 @@ mod tests {
         html_cache.set(Bytes::from("<html>cached</html>"));
 
         let state = production_state_with_html_cache(html_cache, public_dir.clone());
-        let response = render_fallback_html(&state, true).await.expect("cache hit response");
+        let context = RequestContext::new("/fallback".to_string());
+        let response =
+            render_fallback_html(&state, true, &context).await.expect("cache hit response");
         assert_eq!(response.status(), StatusCode::NOT_FOUND);
 
         let _ = fs::remove_dir_all(public_dir);
@@ -1188,6 +1265,7 @@ mod tests {
             search_params: FxHashMap::default(),
             headers: FxHashMap::default(),
             pathname: "/".to_string(),
+            page_data_props: None,
             template_navigation_id: None,
             metadata: None,
             reuse_layout_paths: Vec::new(),

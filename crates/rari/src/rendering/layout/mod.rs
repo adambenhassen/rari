@@ -12,7 +12,9 @@ pub use layout_reuse::{
 };
 pub use route_composer::{LayoutInfo, RouteComposer};
 pub use types::*;
-pub(crate) use utils::{component_dist_path, create_component_id, drain_chunked_stream};
+pub(crate) use utils::{
+    component_dist_path, create_component_id, create_page_props, drain_chunked_stream,
+};
 pub use utils::{create_layout_context, sort_flight_protocol};
 
 #[cfg(test)]
@@ -64,6 +66,11 @@ mod tests {
             search_params: search_params.clone(),
             headers: FxHashMap::default(),
             pathname: "/test".to_string(),
+            page_data_props: Some(serde_json::json!({
+                "params": "getData-value",
+                "searchParams": "getData-query",
+                "n": 1,
+            })),
             template_navigation_id: None,
             metadata: None,
             reuse_layout_paths: Vec::new(),
@@ -90,8 +97,9 @@ mod tests {
         };
 
         let props = utils::create_page_props(&route_match, &context).unwrap();
-        assert!(props.get("params").is_some());
-        assert!(props.get("searchParams").is_some());
+        assert_eq!(props["params"]["id"], "123");
+        assert_eq!(props["searchParams"]["q"][0], "test");
+        assert_eq!(props["n"], 1);
     }
 
     #[test]
@@ -121,6 +129,7 @@ mod tests {
             search_params: FxHashMap::default(),
             headers: FxHashMap::default(),
             pathname: "/test".to_string(),
+            page_data_props: None,
             template_navigation_id: None,
             metadata: None,
             reuse_layout_paths: Vec::new(),
@@ -178,6 +187,7 @@ mod tests {
             search_params: FxHashMap::default(),
             headers: FxHashMap::default(),
             pathname: "/test".to_string(),
+            page_data_props: None,
             template_navigation_id: None,
             metadata: None,
             reuse_layout_paths: Vec::new(),
@@ -234,6 +244,7 @@ mod tests {
             search_params: FxHashMap::default(),
             headers: FxHashMap::default(),
             pathname: "/test".to_string(),
+            page_data_props: None,
             template_navigation_id: None,
             metadata: None,
             reuse_layout_paths: Vec::new(),
@@ -276,6 +287,7 @@ mod tests {
             search_params: FxHashMap::default(),
             headers: FxHashMap::default(),
             pathname: "/test".to_string(),
+            page_data_props: None,
             template_navigation_id: None,
             metadata: None,
             reuse_layout_paths: Vec::new(),
@@ -323,6 +335,7 @@ mod tests {
             search_params: FxHashMap::default(),
             headers: FxHashMap::default(),
             pathname: "/test".to_string(),
+            page_data_props: None,
             template_navigation_id: None,
             metadata: None,
             reuse_layout_paths: Vec::new(),
@@ -385,6 +398,7 @@ mod tests {
             search_params: FxHashMap::default(),
             headers: FxHashMap::default(),
             pathname: "/test".to_string(),
+            page_data_props: None,
             template_navigation_id: None,
             metadata: None,
             reuse_layout_paths: Vec::new(),
@@ -436,6 +450,7 @@ mod tests {
             search_params: FxHashMap::default(),
             headers: FxHashMap::default(),
             pathname: "/test".to_string(),
+            page_data_props: None,
             template_navigation_id: None,
             metadata: None,
             reuse_layout_paths: Vec::new(),
@@ -483,6 +498,7 @@ mod tests {
             search_params: FxHashMap::default(),
             headers: FxHashMap::default(),
             pathname: "/about".to_string(),
+            page_data_props: None,
             template_navigation_id: Some(7),
             metadata: None,
             reuse_layout_paths: Vec::new(),

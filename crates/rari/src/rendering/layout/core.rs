@@ -10,7 +10,7 @@ use tokio::sync::{Mutex, mpsc, oneshot};
 use uuid::Uuid;
 
 use super::{
-    types::{ChunkedContentType, LayoutRenderContext, PageMetadata, RenderResult},
+    types::{ChunkedContentType, LayoutRenderContext, PageData, PageMetadata, RenderResult},
     utils,
 };
 use crate::{
@@ -56,6 +56,9 @@ fn should_use_layout_html_cache(
     if request_context.is_some_and(|ctx| ctx.skip_layout_html_cache) {
         return false;
     }
+    if request_context.is_some_and(|ctx| !ctx.response_cache_allowed()) {
+        return false;
+    }
 
     let Some(config) = Config::get() else {
         return true;
@@ -67,6 +70,45 @@ fn should_use_layout_html_cache(
 const JS_GET_RESULT: &str = r"
 globalThis['~rsc'].renderResult
 ";
+
+fn parse_page_data_result(result: &Value) -> PageData {
+    let not_found = result.get("notFound").and_then(Value::as_bool);
+    if not_found == Some(true) {
+        return PageData::NotFound;
+    }
+
+    let Some(failed) = result.get("failed").and_then(Value::as_bool) else {
+        return PageData::Failed(
+            "getData returned a malformed result (missing boolean `failed`)".to_string(),
+        );
+    };
+
+    if failed {
+        return PageData::Failed(
+            result
+                .get("error")
+                .and_then(Value::as_str)
+                .filter(|message| !message.is_empty())
+                .unwrap_or("getData failed")
+                .to_string(),
+        );
+    }
+
+    if not_found.is_none() {
+        return PageData::Failed(
+            "getData returned a malformed result (missing boolean `notFound`)".to_string(),
+        );
+    }
+
+    match result.get("props") {
+        Some(Value::Null) => PageData::Found(None),
+        Some(props @ Value::Object(_)) => PageData::Found(Some(props.clone())),
+        Some(_) => PageData::Failed("getData props must be an object or null".to_string()),
+        None => {
+            PageData::Failed("getData returned a malformed result (missing `props`)".to_string())
+        }
+    }
+}
 
 use crate::rendering::base::constants::GET_RSC_BINARY_B64;
 
@@ -561,7 +603,7 @@ impl LayoutRenderer {
         route_match: &AppRouteMatch,
         context: &LayoutRenderContext,
     ) -> Result<bool, RariError> {
-        self.check_page_not_found_on(route_match, context, None).await
+        Ok(matches!(self.get_page_data_on(route_match, context, None).await?, PageData::NotFound))
     }
 
     /// Prefer [`Self::check_page_not_found_on`] with a sticky runtime when the caller
@@ -572,6 +614,27 @@ impl LayoutRenderer {
         context: &LayoutRenderContext,
         sticky_runtime: Option<&Arc<dyn JsRuntimeInterface>>,
     ) -> Result<bool, RariError> {
+        Ok(matches!(
+            self.get_page_data_on(route_match, context, sticky_runtime).await?,
+            PageData::NotFound
+        ))
+    }
+
+    pub async fn get_page_data(
+        &self,
+        route_match: &AppRouteMatch,
+        context: &LayoutRenderContext,
+    ) -> Result<PageData, RariError> {
+        self.get_page_data_on(route_match, context, None).await
+    }
+
+    /// Prefer this method with a sticky runtime when the caller already holds a pool slot lease.
+    pub async fn get_page_data_on(
+        &self,
+        route_match: &AppRouteMatch,
+        context: &LayoutRenderContext,
+        sticky_runtime: Option<&Arc<dyn JsRuntimeInterface>>,
+    ) -> Result<PageData, RariError> {
         let page_props = utils::create_page_props(route_match, context)?;
         let page_props_json = serde_json::to_string(&page_props)?;
 
@@ -581,13 +644,13 @@ impl LayoutRenderer {
             .and_then(|p| p.canonicalize().ok());
 
         let Some(base_path) = dist_server_path else {
-            return Ok(false);
+            return Ok(PageData::Found(None));
         };
 
         let page_file_path = utils::component_dist_path(&base_path, &route_match.route.file_path);
 
         if !page_file_path.exists() {
-            return Ok(false);
+            return Ok(PageData::Found(None));
         }
 
         let page_path = path_to_file_url(&page_file_path);
@@ -602,40 +665,49 @@ impl LayoutRenderer {
                     const module = await import("{page_path}");
 
                     if (typeof module.getData !== 'function') {{
-                        return {{ notFound: false }};
+                        return {{ notFound: false, failed: false, props: null }};
                     }}
 
                     const pageProps = {page_props_json};
                     try {{
                         const result = await module.getData(pageProps);
-                        return {{ notFound: result?.notFound === true }};
+                        const props = result?.props;
+                        const propsInvalid = props != null &&
+                            (typeof props !== 'object' || Array.isArray(props));
+                        if (propsInvalid) {{
+                            console.warn('[get_page_data] Ignoring non-object or array getData props');
+                        }}
+                        return {{
+                            notFound: result?.notFound === true,
+                            failed: propsInvalid,
+                            props: propsInvalid ? null : (props ?? null),
+                            error: propsInvalid ? 'getData props must be an object or null' : null
+                        }};
                     }} catch (error) {{
                         if (isNotFoundError(error)) {{
-                            return {{ notFound: true }};
+                            return {{ notFound: true, failed: false, props: null }};
                         }}
                         throw error;
                     }}
                 }} catch (error) {{
-                    console.error('[check_page_not_found] Error:', error);
-                    return {{ notFound: false }};
+                    console.error('[get_page_data] Error:', error);
+                    const message = error instanceof Error ? error.message : String(error);
+                    return {{ notFound: false, failed: true, props: null, error: message }};
                 }}
             }})()
             "#
         );
 
         let result = if let Some(runtime) = sticky_runtime {
-            runtime.execute_script("check_not_found".to_string(), check_script).await?
+            runtime.execute_script("get_page_data".to_string(), check_script).await?
         } else {
             let renderer = self.renderer.lock().await;
             let runtime = Arc::clone(&renderer.runtime);
             drop(renderer);
-            runtime.execute_script("check_not_found".to_string(), check_script).await?
+            runtime.execute_script("get_page_data".to_string(), check_script).await?
         };
 
-        let not_found =
-            result.get("notFound").and_then(serde_json::Value::as_bool).unwrap_or(false);
-
-        Ok(not_found)
+        Ok(parse_page_data_result(&result))
     }
 
     pub async fn render_route(
@@ -795,18 +867,6 @@ impl LayoutRenderer {
         return_rsc_on_fallback: bool,
         metadata_rx: Option<oneshot::Receiver<Option<PageMetadata>>>,
     ) -> Result<RenderResult, RariError> {
-        let cookie_header = request_context.as_deref().and_then(|ctx| ctx.cookie_header.as_deref());
-        let cache_key = utils::generate_cache_key(route_match, context, cookie_header);
-        let layout_cache_enabled =
-            should_use_layout_html_cache(context, request_context.as_deref());
-
-        if layout_cache_enabled
-            && !return_rsc_on_fallback
-            && let Some(cached_html) = self.html_cache.get(cache_key).await
-        {
-            return Ok(RenderResult::Static(cached_html));
-        }
-
         let loading_enabled = Config::get().map(|config| config.loading.enabled).unwrap_or(true);
 
         let loading_component_id = if loading_enabled {
@@ -821,6 +881,25 @@ impl LayoutRenderer {
         };
 
         let needs_streaming = loading_component_id.is_some();
+
+        let cache_key = if !return_rsc_on_fallback
+            && !needs_streaming
+            && metadata_rx.is_none()
+            && route_match.not_found.is_none()
+            && should_use_layout_html_cache(context, request_context.as_deref())
+        {
+            let cookie_header =
+                request_context.as_deref().and_then(|ctx| ctx.cookie_header.as_deref());
+            utils::generate_cache_key(route_match, context, cookie_header)
+        } else {
+            None
+        };
+
+        if let Some(cache_key) = cache_key
+            && let Some(cached_html) = self.html_cache.get(cache_key).await
+        {
+            return Ok(RenderResult::Static(cached_html));
+        }
 
         if return_rsc_on_fallback {
             if needs_streaming {
@@ -1320,8 +1399,7 @@ impl LayoutRenderer {
 
             let (html, is_dynamic_render, page_cache_tags) = html;
 
-            if layout_cache_enabled
-                && route_match.not_found.is_none()
+            if let Some(cache_key) = cache_key
                 && !is_dynamic_render
                 && request_context.as_deref().is_none_or(RequestContext::response_cache_allowed)
             {
@@ -1701,6 +1779,42 @@ mod tests {
         let cache = LayoutHtmlCache::with_handler(Arc::new(UnmeasuredCacheHandler));
 
         assert_eq!(cache.get_metrics(), LayoutCacheMetrics { entries: 1, bytes: None });
+    }
+
+    #[test]
+    fn malformed_page_data_result_fails_closed_and_preserves_error() {
+        assert!(matches!(
+            parse_page_data_result(&serde_json::json!({ "notFound": false, "props": null })),
+            PageData::Failed(_)
+        ));
+
+        assert!(matches!(
+            parse_page_data_result(&serde_json::json!({
+                "notFound": false,
+                "failed": true,
+                "error": "getData exploded",
+                "props": null
+            })),
+            PageData::Failed(error) if error == "getData exploded"
+        ));
+
+        assert!(matches!(
+            parse_page_data_result(&serde_json::json!({
+                "failed": true,
+                "error": "getData exploded"
+            })),
+            PageData::Failed(error) if error == "getData exploded"
+        ));
+
+        assert!(matches!(
+            parse_page_data_result(&serde_json::json!({
+                "notFound": true,
+                "failed": true,
+                "error": "getData props must be an object or null",
+                "props": []
+            })),
+            PageData::NotFound
+        ));
     }
 
     #[tokio::test]

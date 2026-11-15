@@ -1,6 +1,7 @@
 use std::{
     collections::hash_map::DefaultHasher,
     hash::{Hash, Hasher},
+    io::{self, Write},
     path::{Path, PathBuf},
 };
 
@@ -21,7 +22,7 @@ pub fn generate_cache_key(
     route_match: &AppRouteMatch,
     context: &LayoutRenderContext,
     cookie_header: Option<&str>,
-) -> u64 {
+) -> Option<u64> {
     let mut hasher = DefaultHasher::new();
 
     route_match.route.path.hash(&mut hasher);
@@ -44,7 +45,26 @@ pub fn generate_cache_key(
         cookie_header.hash(&mut hasher);
     }
 
-    hasher.finish()
+    context.page_data_props.hash(&mut hasher);
+    context.metadata.is_some().hash(&mut hasher);
+    if let Some(metadata) = &context.metadata {
+        serde_json::to_writer(HashWriter(&mut hasher), metadata).ok()?;
+    }
+
+    Some(hasher.finish())
+}
+
+struct HashWriter<'a>(&'a mut DefaultHasher);
+
+impl Write for HashWriter<'_> {
+    fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
+        self.0.write(bytes);
+        Ok(bytes.len())
+    }
+
+    fn flush(&mut self) -> io::Result<()> {
+        Ok(())
+    }
 }
 
 pub fn normalize_route_component_path(file_path: &str) -> String {
@@ -97,11 +117,11 @@ pub fn create_page_props(
         serde_json::to_value(&context.search_params)?
     };
 
-    let result = serde_json::json!({
-        "params": params_value,
-        "searchParams": search_params_value
-    });
-    Ok(result)
+    let mut result =
+        context.page_data_props.as_ref().and_then(Value::as_object).cloned().unwrap_or_default();
+    result.insert("params".to_string(), params_value);
+    result.insert("searchParams".to_string(), search_params_value);
+    Ok(Value::Object(result))
 }
 
 pub fn format_action_post_url(
@@ -144,6 +164,7 @@ pub fn create_layout_context(
         search_params,
         headers,
         pathname,
+        page_data_props: None,
         template_navigation_id: None,
         metadata: None,
         reuse_layout_paths: Vec::new(),
@@ -218,7 +239,49 @@ pub fn sort_flight_protocol(flight_protocol: &str) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::sort_flight_protocol;
+    use rustc_hash::FxHashMap;
+    use serde_json::{Value, json};
+
+    use super::{generate_cache_key, sort_flight_protocol};
+    use crate::{
+        rendering::layout::types::LayoutRenderContext,
+        server::routing::app_router::{AppRouteEntry, AppRouteMatch},
+    };
+
+    fn route_match() -> AppRouteMatch {
+        AppRouteMatch {
+            route: AppRouteEntry {
+                path: "/[slug]".to_string(),
+                file_path: "[slug]/page.tsx".to_string(),
+                component_id: None,
+                css: Vec::new(),
+                segments: Vec::new(),
+                params: Vec::new(),
+                is_dynamic: true,
+                static_params: None,
+            },
+            params: FxHashMap::default(),
+            layouts: Vec::new(),
+            loading: None,
+            error: None,
+            not_found: None,
+            templates: Vec::new(),
+            pathname: "/article".to_string(),
+        }
+    }
+
+    fn render_context(page_data_props: Option<Value>) -> LayoutRenderContext {
+        LayoutRenderContext {
+            params: FxHashMap::default(),
+            search_params: FxHashMap::default(),
+            headers: FxHashMap::default(),
+            pathname: "/article".to_string(),
+            page_data_props,
+            template_navigation_id: None,
+            metadata: None,
+            reuse_layout_paths: Vec::new(),
+        }
+    }
 
     #[test]
     fn test_sort_flight_protocol_orders_rows() {
@@ -237,5 +300,34 @@ mod tests {
     #[test]
     fn test_sort_flight_protocol_empty() {
         assert_eq!(sort_flight_protocol(""), "");
+    }
+
+    #[test]
+    fn layout_cache_key_includes_page_data_props() {
+        let route = route_match();
+        let first = render_context(Some(json!({ "n": 1 })));
+        let same = render_context(Some(json!({ "n": 1 })));
+        let different = render_context(Some(json!({ "n": 2 })));
+        let no_props = render_context(None);
+
+        let first_key = generate_cache_key(&route, &first, None);
+
+        assert_eq!(first_key, generate_cache_key(&route, &same, None));
+        assert_ne!(first_key, generate_cache_key(&route, &different, None));
+        assert_ne!(first_key, generate_cache_key(&route, &no_props, None));
+    }
+
+    #[test]
+    fn layout_cache_key_includes_generated_metadata() -> Result<(), serde_json::Error> {
+        let route = route_match();
+        let mut first = render_context(Some(json!({ "n": 42 })));
+        let mut second = first.clone();
+        first.metadata = Some(serde_json::from_value(json!({ "title": "first" }))?);
+        second.metadata = Some(serde_json::from_value(json!({ "title": "second" }))?);
+
+        let first_key = generate_cache_key(&route, &first, None);
+        assert!(first_key.is_some());
+        assert_ne!(first_key, generate_cache_key(&route, &second, None));
+        Ok(())
     }
 }

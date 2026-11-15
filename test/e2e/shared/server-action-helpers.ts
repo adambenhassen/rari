@@ -71,8 +71,10 @@ export async function resetActionsFixture(
 export async function submitAndWaitForAction(page: Page, clickSelector: string) {
   await waitForClientActions(page)
 
-  await Promise.all([
+  const [response] = await Promise.all([
     page.waitForResponse(isActionPostResponse, { timeout: 15_000 }),
     page.click(clickSelector),
   ])
+
+  return response
 }

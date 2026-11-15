@@ -3,7 +3,7 @@ import { SiteNav } from './site-nav'
 import './globals.css'
 
 export default function Layout({ children, pathname }: LayoutProps) {
-  if (pathname === '/stale-render/failure') {
+  if (pathname === '/stale-render/failure' || pathname?.startsWith('/server-response-fallback/')) {
     throw new Error('Intentional root layout composition failure')
   }
 
