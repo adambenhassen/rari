@@ -1,4 +1,4 @@
-name: Finwire build
+name: Fork build
 
 on:
   workflow_dispatch:
@@ -6,7 +6,7 @@ on:
       version:
         description: Prerelease version for platform tarballs
         required: true
-        default: 0.17.9-finwire.0
+        default: 0.17.9-fork.1
         type: string
       issue:
         description: Issue key to route this build run to (for example MAIN-3724)
@@ -20,18 +20,18 @@ jobs:
     name: Validate release request
     runs-on: ubuntu-latest
     steps:
-      - name: Require finwire/main and a finwire version
+      - name: Require fork/main and a fork version
         env:
           BUILD_REF: ${{ github.ref }}
           VERSION: ${{ inputs.version }}
         run: |
           set -euo pipefail
-          if [[ "$BUILD_REF" != "refs/heads/finwire/main" ]]; then
-            echo "Dispatch this workflow from finwire/main (got $BUILD_REF)" >&2
+          if [[ "$BUILD_REF" != "refs/heads/fork/main" ]]; then
+            echo "Dispatch this workflow from fork/main (got $BUILD_REF)" >&2
             exit 1
           fi
-          if [[ ! "$VERSION" =~ ^0\.17\.9-finwire\.[0-9]+$ ]]; then
-            echo "Version must match 0.17.9-finwire.<n> (got $VERSION)" >&2
+          if [[ ! "$VERSION" =~ ^0\.17\.9-fork\.[0-9]+$ ]]; then
+            echo "Version must match 0.17.9-fork.<n> (got $VERSION)" >&2
             exit 1
           fi
 
@@ -90,7 +90,7 @@ jobs:
         uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
         with:
           key: ${{ matrix.target }}
-          prefix-key: finwire-main-v1
+          prefix-key: fork-main-v1
 
       - name: Install Linux build dependencies
         if: runner.os == 'Linux'
@@ -244,7 +244,7 @@ jobs:
           TAG="build-${VERSION}"
           NOTES_FILE="${RUNNER_TEMP}/release-notes.md"
           cat > "${NOTES_FILE}" <<EOF
-          Finwire prerelease built from finwire/main at ${GITHUB_SHA}.
+          Fork prerelease built from fork/main at ${GITHUB_SHA}.
 
           Platform packages are version ${VERSION} and can be consumed through pnpm overrides using the attached tarball URLs.
 
