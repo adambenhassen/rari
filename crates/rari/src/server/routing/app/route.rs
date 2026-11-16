@@ -181,6 +181,8 @@ pub async fn handle_app_route(
         }
     }
 
+    state.warmup_generations.record_activity(path).await;
+
     let render_mode = detect_render_mode(&headers);
     let accept_encoding = headers.get("accept-encoding").and_then(|v| v.to_str().ok());
 

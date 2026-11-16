@@ -1,12 +1,13 @@
 use std::{
     sync::{
         Arc,
-        atomic::{AtomicUsize, Ordering},
+        atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering},
     },
     time::Instant,
 };
 
 use axum::http::HeaderMap;
+use dashmap::DashMap;
 use futures::stream::{self, StreamExt};
 use rari_error::RariError;
 use rustc_hash::FxHashMap;
@@ -31,6 +32,72 @@ use crate::{
 };
 
 const WARMUP_CONCURRENCY: usize = 10;
+
+#[derive(Default)]
+pub(crate) struct WarmupGenerations {
+    active: AtomicBool,
+    routes: DashMap<String, Arc<Mutex<u64>>>,
+    invalidation_generation: AtomicU64,
+    invalidations_in_flight: AtomicUsize,
+    publication_lock: Mutex<()>,
+}
+
+pub(crate) struct WarmupInvalidation<'a>(&'a WarmupGenerations);
+
+impl Drop for WarmupInvalidation<'_> {
+    fn drop(&mut self) {
+        self.0.invalidation_generation.fetch_add(1, Ordering::AcqRel);
+        self.0.invalidations_in_flight.fetch_sub(1, Ordering::Release);
+    }
+}
+
+impl WarmupGenerations {
+    pub(crate) fn new(paths: Vec<String>) -> Self {
+        let routes: DashMap<_, _> =
+            paths.into_iter().map(|path| (path, Arc::new(Mutex::new(0)))).collect();
+        Self {
+            active: AtomicBool::new(!routes.is_empty()),
+            routes,
+            invalidation_generation: AtomicU64::new(0),
+            invalidations_in_flight: AtomicUsize::new(0),
+            publication_lock: Mutex::new(()),
+        }
+    }
+
+    fn route(&self, path: &str) -> Option<Arc<Mutex<u64>>> {
+        if !self.active.load(Ordering::Acquire) {
+            return None;
+        }
+        self.routes.get(path).map(|entry| Arc::clone(entry.value()))
+    }
+
+    pub(crate) async fn record_activity(&self, path: &str) {
+        if let Some(generation) = self.route(path) {
+            let mut current = generation.lock().await;
+            *current = current.saturating_add(1);
+        }
+    }
+
+    pub(crate) async fn begin_invalidation(&self, path: &str) -> Option<WarmupInvalidation<'_>> {
+        if !self.active.load(Ordering::Acquire) {
+            return None;
+        }
+        self.invalidations_in_flight.fetch_add(1, Ordering::AcqRel);
+        self.invalidation_generation.fetch_add(1, Ordering::AcqRel);
+        let invalidation = WarmupInvalidation(self);
+
+        // If a warmup publication already started, let it finish before the
+        // invalidation removes its entries.
+        drop(self.publication_lock.lock().await);
+        self.record_activity(path).await;
+        Some(invalidation)
+    }
+
+    pub(crate) fn finish(&self) {
+        self.active.store(false, Ordering::Release);
+        self.routes.clear();
+    }
+}
 
 struct WarmupHtmlCacheEntry {
     path: String,
@@ -130,6 +197,22 @@ async fn warm_route(
     app_router: &Arc<AppRouter>,
     path: &str,
 ) -> Result<(), RariError> {
+    let Some(generation) = state.warmup_generations.route(path) else {
+        return Ok(());
+    };
+    if state.warmup_generations.invalidations_in_flight.load(Ordering::Acquire) != 0 {
+        return Ok(());
+    }
+    let initial_invalidations =
+        state.warmup_generations.invalidation_generation.load(Ordering::Acquire);
+    if state.warmup_generations.invalidations_in_flight.load(Ordering::Acquire) != 0 {
+        return Ok(());
+    }
+    let initial_generation = *generation.lock().await;
+    if initial_generation != 0 {
+        return Ok(());
+    }
+
     let route_match = app_router.match_route(path)?;
 
     if route_match.loading.is_some() {
@@ -316,6 +399,19 @@ async fn warm_route(
     };
 
     if let Some(html_cache_entry) = html_cache_entry {
+        // An invalidated tag can affect another route. Do not publish across an
+        // invalidation, and let invalidations wait for any ongoing publication.
+        let publication = state.warmup_generations.publication_lock.lock().await;
+        if state.warmup_generations.invalidations_in_flight.load(Ordering::Acquire) != 0
+            || state.warmup_generations.invalidation_generation.load(Ordering::Acquire)
+                != initial_invalidations
+        {
+            return Ok(());
+        }
+        let current_generation = generation.lock().await;
+        if *current_generation != initial_generation {
+            return Ok(());
+        }
         store_warmed_render(
             &state.static_fast_cache,
             &state.response_cache,
@@ -324,6 +420,8 @@ async fn warm_route(
             rsc_cache_entry,
         )
         .await;
+        drop(current_generation);
+        drop(publication);
     }
 
     Ok(())

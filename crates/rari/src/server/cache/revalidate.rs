@@ -79,6 +79,7 @@ async fn invalidate_route_caches_inner(
     path: &str,
     sticky_runtime: Option<&Arc<dyn JsRuntimeInterface>>,
 ) -> Result<(), RariError> {
+    let warmup_invalidation = state.warmup_generations.begin_invalidation(path).await;
     state.response_cache.invalidate(path).await;
     state.response_cache.invalidate_by_tag(path).await;
     response::invalidate_static_fast_cache_for_path(&state.static_fast_cache, path);
@@ -103,12 +104,14 @@ async fn invalidate_route_caches_inner(
         }
     }
 
-    state.layout_html_cache.clear().await.map_err(|e| {
+    let result = state.layout_html_cache.clear().await.map_err(|e| {
         tracing::warn!(
             error = %e,
             path = %path,
             "layout_html_cache.clear failed during route cache invalidation"
         );
         RariError::from(format!("layout cache clear error: {e}"))
-    })
+    });
+    drop(warmup_invalidation);
+    result
 }

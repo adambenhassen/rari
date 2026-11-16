@@ -1227,6 +1227,7 @@ mod tests {
             layout_html_cache: Arc::new(LayoutHtmlCache::new()),
             response_cache: Arc::new(ResponseCache::new(CacheConfig::default())),
             static_fast_cache: Arc::new(StaticFastCache::new()),
+            warmup_generations: Arc::default(),
             og_generator: None,
             app_icons: Arc::new(Vec::new()),
             project_root: path::PathBuf::from("."),

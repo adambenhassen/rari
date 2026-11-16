@@ -225,6 +225,12 @@ impl Server {
         let image_optimizer =
             Arc::new(ImageOptimizer::with_cache(config.images.clone(), &project_root, image_cache));
 
+        let warmup_paths = if config.is_production() {
+            app_router.as_ref().map_or_else(Vec::new, |router| router.warmup_paths())
+        } else {
+            Vec::new()
+        };
+
         let state = ServerState {
             renderer: renderer_arc,
             js_runtime: Arc::clone(&js_runtime),
@@ -239,6 +245,7 @@ impl Server {
             ),
             response_cache,
             static_fast_cache: Arc::new(response::StaticFastCache::new()),
+            warmup_generations: Arc::new(warmup::WarmupGenerations::new(warmup_paths)),
             og_generator,
             app_icons,
             project_root,
@@ -263,6 +270,7 @@ impl Server {
                         tracing::error!(
                             "[rari] Cache warmup: Failed to initialize runtime: {error}"
                         );
+                        warmup_state.warmup_generations.finish();
                         return;
                     }
                 };
@@ -285,6 +293,7 @@ impl Server {
                 warmup_state.js_runtime = warmup_runtime;
                 warmup_state.renderer = warmup_renderer;
                 warmup::warm_cache(&warmup_state).await;
+                warmup_state.warmup_generations.finish();
             });
         }
 

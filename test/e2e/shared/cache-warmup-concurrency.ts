@@ -1,7 +1,8 @@
-import type { Server } from 'node:http'
+import type { Server, ServerResponse } from 'node:http'
 import { spawn } from 'node:child_process'
+import { readdir } from 'node:fs/promises'
 import { createServer } from 'node:http'
-import { resolve as resolvePath } from 'node:path'
+import { basename, resolve as resolvePath } from 'node:path'
 import process from 'node:process'
 import { expect, test } from '@playwright/test'
 import { getBinaryPath } from '../../../packages/rari/src/cli/platform'
@@ -147,6 +148,148 @@ test('Cache warmup does not delay a slow request', async ({ request }) => {
     if (warmupTimer) clearTimeout(warmupTimer)
     releaseWarmup()
     releaseRequest()
+    child.kill('SIGTERM')
+    await exited
+    await close(backend)
+  }
+})
+
+test('Cache warmup cannot overwrite live renders or an action invalidation', async ({
+  request,
+}) => {
+  test.setTimeout(90_000)
+  const held = new Map<string, ServerResponse>()
+  const seen: string[] = []
+  const backend = createServer((incoming, response) => {
+    const slug = new URL(incoming.url ?? '/', 'http://localhost').pathname.slice(1)
+    if (slug === 'tag-target') {
+      response.end('new')
+      return
+    }
+    if (!held.has(slug)) {
+      held.set(slug, response)
+      seen.push(slug)
+    } else {
+      response.end('new')
+    }
+  })
+  const backendPort = await listen(backend)
+  const reservation = createServer()
+  const port = await listen(reservation)
+  await close(reservation)
+  const origin = `http://127.0.0.1:${port}`
+  const child = spawn(
+    getBinaryPath(),
+    ['--mode', 'production', '--host', '127.0.0.1', '--port', String(port)],
+    {
+      cwd: resolvePath(import.meta.dirname, '../../fixtures/app'),
+      env: {
+        ...process.env,
+        NODE_ENV: 'production',
+        RARI_ORIGIN: origin,
+        RARI_JS_POOL_SIZE: '1',
+        RARI_TEST_RACE_BACKEND: `http://127.0.0.1:${backendPort}`,
+        RUST_LOG: 'info',
+      },
+      stdio: ['ignore', 'pipe', 'pipe'],
+    },
+  )
+  let logs = ''
+  child.stdout.on('data', chunk => {
+    logs += String(chunk)
+  })
+  child.stderr.on('data', chunk => {
+    logs += String(chunk)
+  })
+  const exited = new Promise<void>(resolve => {
+    child.once('exit', () => {
+      resolve()
+    })
+    child.once('error', error => {
+      logs += String(error)
+      resolve()
+    })
+  })
+
+  try {
+    await expect.poll(() => seen.length, { timeout: 60_000 }).toBe(1)
+    const first = seen.at(0)
+    if (first == null) throw new Error('Missing first warmup route')
+    const firstUrl = `${origin}/warmup-race/${first}`
+    const live = await request.get(firstUrl)
+    expect(live.status()).toBe(200)
+    expect(live.headers()['x-cache']).toBe('MISS')
+    expect(await live.text()).toContain('>new</h1>')
+    const liveRsc = await request.get(firstUrl, { headers: { Accept: 'text/x-component' } })
+    expect(liveRsc.status()).toBe(200)
+    expect(liveRsc.headers()['x-cache']).toBe('MISS')
+    expect(await liveRsc.text()).toContain('"new"')
+    held.get(first)?.end('old')
+
+    await expect.poll(() => seen.length, { timeout: 60_000 }).toBe(2)
+    const second = seen.at(1)
+    if (second == null) throw new Error('Missing second warmup route')
+    const actionDir = resolvePath(
+      import.meta.dirname,
+      '../../fixtures/app/dist/server/app/get-data-props/_slug_',
+    )
+    const actionBundle = (await readdir(actionDir)).find(
+      name => name.startsWith('actions_') && name.endsWith('.js'),
+    )
+    if (actionBundle == null) throw new Error('Action bundle not found')
+    const actionId = `app/get-data-props/_slug_/${basename(actionBundle, '.js')}#refreshGetData`
+    const refresh = async (path: string) => {
+      const action = await request.post(`${origin}${path}`, {
+        headers: {
+          'Content-Type': 'text/plain;charset=UTF-8',
+          'rsc-action-id': actionId,
+          'rari-router-state': JSON.stringify({ pathname: path, search: '' }),
+          'Origin': origin,
+        },
+        data: '[]',
+      })
+      expect(action.status()).toBe(200)
+      expect(action.headers()['x-action-revalidated']).toBe('2')
+      expect(action.headers()['x-action-revalidated-path']).toBe(path)
+    }
+    const secondPath = `/warmup-race/${second}`
+    await refresh(secondPath)
+    held.get(second)?.end('old')
+
+    await expect.poll(() => seen.length, { timeout: 60_000 }).toBe(3)
+    expect(seen.at(2)).toBe('tagged')
+    await refresh('/warmup-race/tag-target')
+    held.get('tagged')?.end('old')
+    await expect
+      .poll(() => logs.includes('Cache warmup: Completed'), { timeout: 60_000 })
+      .toBe(true)
+
+    const htmlHit = await request.get(firstUrl)
+    expect.soft(htmlHit.headers()['x-cache']).toBe('HIT')
+    expect.soft((await htmlHit.text()).includes('>new</h1>'), 'live HTML remains cached').toBe(true)
+    const rscHit = await request.get(firstUrl, { headers: { Accept: 'text/x-component' } })
+    expect.soft(rscHit.headers()['x-cache']).toBe('HIT')
+    expect.soft((await rscHit.text()).includes('"new"'), 'live RSC remains cached').toBe(true)
+    const afterInvalidation = await request.get(`${origin}${secondPath}`)
+    expect.soft(afterInvalidation.headers()['x-cache']).toBe('MISS')
+    expect
+      .soft(
+        (await afterInvalidation.text()).includes('>new</h1>'),
+        'invalidated HTML is rendered again',
+      )
+      .toBe(true)
+    const afterTagInvalidation = await request.get(`${origin}/warmup-race/tagged`)
+    expect.soft(afterTagInvalidation.headers()['x-cache']).toBe('MISS')
+    expect
+      .soft(
+        (await afterTagInvalidation.text()).includes('>new</h1>'),
+        'tagged HTML is rendered again',
+      )
+      .toBe(true)
+  } finally {
+    for (const response of held.values()) {
+      if (!response.writableEnded) response.end('old')
+    }
     child.kill('SIGTERM')
     await exited
     await close(backend)
