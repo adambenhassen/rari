@@ -6,10 +6,7 @@ use base64::{Engine, engine::general_purpose::STANDARD};
 use bytes::Bytes;
 use rari_error::RariError;
 use serde_json::Value;
-use tokio::{
-    fs,
-    sync::{Mutex, mpsc, oneshot},
-};
+use tokio::sync::{Mutex, mpsc, oneshot};
 use uuid::Uuid;
 
 use super::{
@@ -645,44 +642,31 @@ impl LayoutRenderer {
         let page_props = utils::create_page_props(route_match, context)?;
         let page_props_json = serde_json::to_string(&page_props)?;
 
-        let current_dir = env::current_dir().map_err(|error| {
-            RariError::io(format!("Failed to determine project directory: {error}"))
-        })?;
-        let base_path = fs::canonicalize(current_dir.join("dist/server"))
-            .await
-            .map_err(|error| RariError::io(format!("Failed to inspect server bundle: {error}")))?;
-
-        let page_file_path = utils::component_dist_path(&base_path, &route_match.route.file_path);
-        let page_file = fs::File::open(&page_file_path).await.map_err(|error| {
-            RariError::io(format!(
-                "Failed to open page bundle {}: {error}",
-                page_file_path.display()
-            ))
-        })?;
-        let metadata = page_file.metadata().await.map_err(|error| {
-            RariError::io(format!(
-                "Failed to inspect page bundle {}: {error}",
-                page_file_path.display()
-            ))
-        })?;
-        if !metadata.is_file() {
-            return Err(RariError::io(format!(
-                "Page bundle is not a file: {}",
-                page_file_path.display()
-            )));
-        }
-        drop(page_file);
-
-        let page_path = path_to_file_url(&page_file_path);
+        let component_id = utils::create_component_id(&route_match.route.file_path);
+        let component_id_json = serde_json::to_string(&component_id)?;
+        let page_path = env::current_dir().ok().map(|current_dir| {
+            let file = utils::component_dist_path(
+                &current_dir.join("dist/server"),
+                &route_match.route.file_path,
+            );
+            path_to_file_url(&file)
+        });
+        let page_path_json = serde_json::to_string(&page_path)?;
 
         let check_script = format!(
-            r#"
+            r"
             (async () => {{
                 const isNotFoundError = (error) =>
                     error?.digest === 'RARI_NOT_FOUND' || error?.message === 'RARI_NOT_FOUND';
 
                 try {{
-                    const module = await import("{page_path}");
+                    let module = globalThis['~rsc']?.modules?.[{component_id_json}];
+                    if (Object.prototype.toString.call(module) !== '[object Module]') {{
+                        if ({page_path_json} === null) {{
+                            throw new Error('Page module is not loaded and its path is unavailable');
+                        }}
+                        module = await import({page_path_json});
+                    }}
 
                     if (typeof module.getData !== 'function') {{
                         return {{ hasGetData: false, notFound: false, failed: false, props: null }};
@@ -715,7 +699,7 @@ impl LayoutRenderer {
                     return {{ notFound: false, failed: true, props: null, error: message }};
                 }}
             }})()
-            "#
+            "
         );
 
         let result = if let Some(runtime) = sticky_runtime {

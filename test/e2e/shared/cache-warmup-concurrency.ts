@@ -1,6 +1,6 @@
 import type { Server, ServerResponse } from 'node:http'
 import { spawn } from 'node:child_process'
-import { readdir } from 'node:fs/promises'
+import { readdir, rename } from 'node:fs/promises'
 import { createServer } from 'node:http'
 import { basename, resolve as resolvePath } from 'node:path'
 import process from 'node:process'
@@ -388,5 +388,79 @@ test('Cache warmup invalidates fast hits by tag after publication', async ({ req
     child.kill('SIGTERM')
     await exited
     await close(backend)
+  }
+})
+
+test('An unavailable unloaded page module does not cache a response and can recover', async ({
+  request,
+}) => {
+  test.setTimeout(90_000)
+  const directory = resolvePath(
+    import.meta.dirname,
+    '../../fixtures/app/dist/server/app/get-data-unloaded/_slug_',
+  )
+  const pageFile = (await readdir(directory)).find(
+    name => name.startsWith('page_') && name.endsWith('.js'),
+  )
+  if (pageFile == null) throw new Error('Page bundle not found')
+  const bundle = resolvePath(directory, pageFile)
+  const hidden = `${bundle}.unavailable`
+  const reservation = createServer()
+  const port = await listen(reservation)
+  await close(reservation)
+  const origin = `http://127.0.0.1:${port}`
+  await rename(bundle, hidden)
+  let hiddenBundle = true
+  const child = spawn(
+    getBinaryPath(),
+    ['--mode', 'production', '--host', '127.0.0.1', '--port', String(port)],
+    {
+      cwd: resolvePath(import.meta.dirname, '../../fixtures/app'),
+      env: {
+        ...process.env,
+        NODE_ENV: 'production',
+        RARI_ORIGIN: origin,
+        RARI_JS_POOL_SIZE: '1',
+        RUST_LOG: 'info',
+      },
+      stdio: ['ignore', 'pipe', 'pipe'],
+    },
+  )
+  let logs = ''
+  child.stdout.on('data', chunk => {
+    logs += String(chunk)
+  })
+  child.stderr.on('data', chunk => {
+    logs += String(chunk)
+  })
+  const exited = new Promise<void>(resolve => {
+    child.once('exit', () => {
+      resolve()
+    })
+    child.once('error', error => {
+      logs += String(error)
+      resolve()
+    })
+  })
+
+  try {
+    await expect
+      .poll(() => logs.includes('Cache warmup: Completed'), { timeout: 60_000 })
+      .toBe(true)
+    const url = `${origin}/get-data-unloaded/article`
+    const unavailable = await request.get(url)
+    expect(unavailable.headers()['cache-control']).toBe('no-store')
+    expect(unavailable.headers()['x-cache']).not.toBe('HIT')
+
+    await rename(hidden, bundle)
+    hiddenBundle = false
+    const recovered = await request.get(url)
+    expect(recovered.status()).toBe(404)
+    expect(recovered.headers()['cache-control']).toBe('no-store')
+    expect(recovered.headers()['x-cache']).not.toBe('HIT')
+  } finally {
+    if (hiddenBundle) await rename(hidden, bundle)
+    child.kill('SIGTERM')
+    await exited
   }
 })

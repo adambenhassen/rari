@@ -55,6 +55,41 @@ test.describe('Cache warmup', () => {
     expect(removed.headers()['x-cache']).not.toBe('HIT')
   })
 
+  test('runs loaded getData on fast hits without inspecting the bundle', async ({ request }) => {
+    const directory = resolve(
+      import.meta.dirname,
+      '../fixtures/app/dist/server/app/get-data-loaded/_slug_',
+    )
+    const pageFile = (await readdir(directory)).find(
+      name => name.startsWith('page_') && name.endsWith('.js'),
+    )
+    if (pageFile == null) throw new Error('Page bundle not found')
+    const bundle = join(directory, pageFile)
+    const hidden = `${bundle}.unavailable`
+    const probe = `/get-data-loaded/hit?case=${Date.now()}-${Math.random()}`
+    const before = await request.get(`${probe}-before`)
+    const beforeCount = Number(
+      /data-testid="loaded-data-calls">(\d+)</.exec(await before.text())?.[1],
+    )
+
+    await rename(bundle, hidden)
+    try {
+      const cached = await request.get('/get-data-loaded/hit')
+      expect(cached.status()).toBe(200)
+      expect(cached.headers()['x-cache']).toBe('HIT')
+      expect(cached.headers()['cache-control']).not.toBe('no-store')
+    } finally {
+      await rename(hidden, bundle)
+    }
+
+    const after = await request.get(`${probe}-after`)
+    const afterCount = Number(
+      /data-testid="loaded-data-calls">(\d+)</.exec(await after.text())?.[1],
+    )
+    expect(Number.isSafeInteger(beforeCount)).toBe(true)
+    expect(afterCount).toBe(beforeCount + 2)
+  })
+
   test('does not cache a page whose bundle cannot be inspected', async ({ request }) => {
     const directory = resolve(
       import.meta.dirname,
