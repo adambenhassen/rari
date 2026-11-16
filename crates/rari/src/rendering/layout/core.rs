@@ -6,7 +6,10 @@ use base64::{Engine, engine::general_purpose::STANDARD};
 use bytes::Bytes;
 use rari_error::RariError;
 use serde_json::Value;
-use tokio::sync::{Mutex, mpsc, oneshot};
+use tokio::{
+    fs,
+    sync::{Mutex, mpsc, oneshot},
+};
 use uuid::Uuid;
 
 use super::{
@@ -642,20 +645,33 @@ impl LayoutRenderer {
         let page_props = utils::create_page_props(route_match, context)?;
         let page_props_json = serde_json::to_string(&page_props)?;
 
-        let dist_server_path = env::current_dir()
-            .ok()
-            .map(|p| p.join("dist/server"))
-            .and_then(|p| p.canonicalize().ok());
-
-        let Some(base_path) = dist_server_path else {
-            return Ok(PageData::Missing);
-        };
+        let current_dir = env::current_dir().map_err(|error| {
+            RariError::io(format!("Failed to determine project directory: {error}"))
+        })?;
+        let base_path = fs::canonicalize(current_dir.join("dist/server"))
+            .await
+            .map_err(|error| RariError::io(format!("Failed to inspect server bundle: {error}")))?;
 
         let page_file_path = utils::component_dist_path(&base_path, &route_match.route.file_path);
-
-        if !page_file_path.exists() {
-            return Ok(PageData::Missing);
+        let page_file = fs::File::open(&page_file_path).await.map_err(|error| {
+            RariError::io(format!(
+                "Failed to open page bundle {}: {error}",
+                page_file_path.display()
+            ))
+        })?;
+        let metadata = page_file.metadata().await.map_err(|error| {
+            RariError::io(format!(
+                "Failed to inspect page bundle {}: {error}",
+                page_file_path.display()
+            ))
+        })?;
+        if !metadata.is_file() {
+            return Err(RariError::io(format!(
+                "Page bundle is not a file: {}",
+                page_file_path.display()
+            )));
         }
+        drop(page_file);
 
         let page_path = path_to_file_url(&page_file_path);
 

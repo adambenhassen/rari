@@ -1,3 +1,5 @@
+import { readdir, rename } from 'node:fs/promises'
+import { join, resolve } from 'node:path'
 import { expect, test } from '@playwright/test'
 import { waitForCacheWarmup } from './shared/cache-warmup-helpers'
 import './shared/cache-warmup-concurrency'
@@ -51,6 +53,34 @@ test.describe('Cache warmup', () => {
     expect(removed.status()).toBe(404)
     expect(removed.headers()['cache-control']).toBe('no-store')
     expect(removed.headers()['x-cache']).not.toBe('HIT')
+  })
+
+  test('does not cache a page whose bundle cannot be inspected', async ({ request }) => {
+    const directory = resolve(
+      import.meta.dirname,
+      '../fixtures/app/dist/server/app/get-data-recovery/_slug_',
+    )
+    const pageFile = (await readdir(directory)).find(
+      name => name.startsWith('page_') && name.endsWith('.js'),
+    )
+    if (pageFile == null) throw new Error('Page bundle not found')
+    const bundle = join(directory, pageFile)
+    const hidden = `${bundle}.unavailable`
+    const url = `/get-data-recovery/article?case=${Date.now()}-${Math.random()}`
+
+    await rename(bundle, hidden)
+    try {
+      const unavailable = await request.get(url)
+      expect.soft(unavailable.headers()['cache-control']).toBe('no-store')
+      expect.soft(unavailable.headers()['x-cache']).not.toBe('HIT')
+    } finally {
+      await rename(hidden, bundle)
+    }
+
+    const recovered = await request.get(url)
+    expect(recovered.status()).toBe(404)
+    expect(recovered.headers()['cache-control']).toBe('no-store')
+    expect(recovered.headers()['x-cache']).not.toBe('HIT')
   })
 
   test('does not cache a statically parameterized route whose getData fails in warmup', async ({
