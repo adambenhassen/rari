@@ -1,4 +1,5 @@
 use std::{
+    collections::{HashMap, HashSet},
     env,
     sync::{
         Arc,
@@ -9,7 +10,7 @@ use std::{
 
 use axum::http::HeaderMap;
 use bytes::Bytes;
-use dashmap::DashMap;
+use dashmap::{DashMap, mapref::entry::Entry};
 use parking_lot::Mutex;
 
 use crate::server::{
@@ -108,13 +109,53 @@ impl CachedResponse {
 
 pub struct StaticFastCache {
     map: DashMap<String, Arc<PrebuiltResponse>>,
-    insert_lock: Mutex<()>,
+    index: Mutex<StaticFastCacheIndex>,
     entry_count: AtomicUsize,
+}
+
+#[derive(Default)]
+struct StaticFastCacheIndex {
+    paths: HashMap<String, HashSet<String>>,
+    tags: HashMap<String, HashSet<String>>,
+}
+
+impl StaticFastCacheIndex {
+    fn route(key: &str) -> &str {
+        key.split(['?', '#']).next().unwrap_or(key)
+    }
+
+    fn insert(&mut self, key: &str, tags: &[String]) {
+        self.paths.entry(Self::route(key).to_string()).or_default().insert(key.to_string());
+        for tag in tags {
+            self.tags.entry(tag.clone()).or_default().insert(key.to_string());
+        }
+    }
+
+    fn remove(&mut self, key: &str, tags: &[String]) {
+        Self::remove_from(&mut self.paths, Self::route(key), key);
+        for tag in tags {
+            Self::remove_from(&mut self.tags, tag, key);
+        }
+    }
+
+    fn remove_from(index: &mut HashMap<String, HashSet<String>>, bucket: &str, key: &str) {
+        let empty = index.get_mut(bucket).is_some_and(|keys| {
+            keys.remove(key);
+            keys.is_empty()
+        });
+        if empty {
+            index.remove(bucket);
+        }
+    }
 }
 
 impl StaticFastCache {
     pub fn new() -> Self {
-        Self { map: DashMap::new(), insert_lock: Mutex::new(()), entry_count: AtomicUsize::new(0) }
+        Self {
+            map: DashMap::new(),
+            index: Mutex::new(StaticFastCacheIndex::default()),
+            entry_count: AtomicUsize::new(0),
+        }
     }
 
     pub fn entry_count(&self) -> usize {
@@ -133,7 +174,18 @@ impl StaticFastCache {
     }
 
     fn remove_observed(&self, key: &str, observed: &Arc<PrebuiltResponse>) {
-        if self.map.remove_if(key, |_, current| Arc::ptr_eq(current, observed)).is_some() {
+        let mut index = self.index.lock();
+        if let Some((_, removed)) =
+            self.map.remove_if(key, |_, current| Arc::ptr_eq(current, observed))
+        {
+            index.remove(key, &removed.tags);
+            self.entry_count.fetch_sub(1, Ordering::Relaxed);
+        }
+    }
+
+    fn remove_key(&self, index: &mut StaticFastCacheIndex, key: &str) {
+        if let Some((_, removed)) = self.map.remove(key) {
+            index.remove(key, &removed.tags);
             self.entry_count.fetch_sub(1, Ordering::Relaxed);
         }
     }
@@ -150,40 +202,37 @@ impl Default for StaticFastCache {
 }
 
 pub fn invalidate_static_fast_cache_for_path(cache: &StaticFastCache, path: &str) {
-    let _guard = cache.insert_lock.lock();
-    if cache.map.remove(path).is_some() {
-        cache.entry_count.fetch_sub(1, Ordering::Relaxed);
-    }
-    let query_prefix = format!("{path}?");
-    let hash_prefix = format!("{path}#");
-    let keys: Vec<String> = cache
-        .map
-        .iter()
-        .filter(|entry| {
-            let key = entry.key();
-            key.starts_with(&query_prefix) || key.starts_with(&hash_prefix)
-        })
-        .map(|entry| entry.key().clone())
-        .collect();
+    let mut index = cache.index.lock();
+    let route = StaticFastCacheIndex::route(path);
+    let keys = if route == path {
+        index.paths.remove(path).unwrap_or_default()
+    } else {
+        index
+            .paths
+            .get(route)
+            .map(|keys| {
+                keys.iter()
+                    .filter(|key| {
+                        key.as_str() == path
+                            || key.strip_prefix(path).is_some_and(|suffix| {
+                                suffix.starts_with('?') || suffix.starts_with('#')
+                            })
+                    })
+                    .cloned()
+                    .collect()
+            })
+            .unwrap_or_default()
+    };
     for key in keys {
-        if cache.map.remove(&key).is_some() {
-            cache.entry_count.fetch_sub(1, Ordering::Relaxed);
-        }
+        cache.remove_key(&mut index, &key);
     }
 }
 
 pub fn invalidate_static_fast_cache_by_tag(cache: &StaticFastCache, tag: &str) {
-    let _guard = cache.insert_lock.lock();
-    let keys: Vec<String> = cache
-        .map
-        .iter()
-        .filter(|entry| entry.tags.iter().any(|entry_tag| entry_tag == tag))
-        .map(|entry| entry.key().clone())
-        .collect();
+    let mut index = cache.index.lock();
+    let keys = index.tags.remove(tag).unwrap_or_default();
     for key in keys {
-        if cache.map.remove(&key).is_some() {
-            cache.entry_count.fetch_sub(1, Ordering::Relaxed);
-        }
+        cache.remove_key(&mut index, &key);
     }
 }
 
@@ -197,11 +246,21 @@ pub fn insert_static_fast_cache(
         return;
     }
 
-    let _guard = cache.insert_lock.lock();
-    let replacing = cache.map.insert(key.to_string(), value).is_some();
-    if !replacing {
-        cache.entry_count.fetch_add(1, Ordering::Relaxed);
-    }
+    let mut index = cache.index.lock();
+    let replacing = match cache.map.entry(key.to_string()) {
+        Entry::Occupied(mut entry) => {
+            index.remove(key, &entry.get().tags);
+            index.insert(key, &value.tags);
+            entry.insert(value);
+            true
+        }
+        Entry::Vacant(entry) => {
+            index.insert(key, &value.tags);
+            entry.insert(value);
+            cache.entry_count.fetch_add(1, Ordering::Relaxed);
+            false
+        }
+    };
     if replacing {
         return;
     }
@@ -221,9 +280,7 @@ pub fn insert_static_fast_cache(
             });
         match victim {
             Some(victim_key) => {
-                if cache.map.remove(&victim_key).is_some() {
-                    cache.entry_count.fetch_sub(1, Ordering::Relaxed);
-                }
+                cache.remove_key(&mut index, &victim_key);
             }
             None => break,
         }
@@ -781,7 +838,11 @@ mod header_map_serde {
 #[cfg(test)]
 #[expect(clippy::expect_used, clippy::unwrap_used, clippy::clone_on_ref_ptr)]
 mod tests {
-    use std::{sync::Arc, thread, time::Duration};
+    use std::{
+        sync::{Arc, mpsc},
+        thread,
+        time::Duration,
+    };
 
     use parking_lot::Mutex as PMutex;
     use rustc_hash::FxHashMap;
@@ -1403,6 +1464,125 @@ mod tests {
         assert!(!cache.contains_key("/about#cookie:abc123"));
         assert!(cache.contains_key("/other"));
         assert_eq!(cache.entry_count(), 1);
+
+        insert_static_fast_cache(&cache, "/about?tab=1", make_entry(), 10);
+        insert_static_fast_cache(&cache, "/about?tab=1#cookie:abc", make_entry(), 10);
+        insert_static_fast_cache(&cache, "/about?tab=2", make_entry(), 10);
+        invalidate_static_fast_cache_for_path(&cache, "/about?tab=1");
+        assert!(!cache.contains_key("/about?tab=1"));
+        assert!(!cache.contains_key("/about?tab=1#cookie:abc"));
+        assert!(cache.contains_key("/about?tab=2"));
+    }
+
+    #[test]
+    fn fast_cache_invalidation_does_not_scan_unrelated_entries() {
+        let cache = Arc::new(StaticFastCache::new());
+        for index in 0..2048 {
+            let key = format!("/unrelated/{index}");
+            insert_static_fast_cache(
+                &cache,
+                &key,
+                Arc::new(PrebuiltResponse {
+                    identity: Bytes::from_static(b"html"),
+                    gzip: None,
+                    br: None,
+                    zstd: None,
+                    etag: "etag".to_string(),
+                    content_type: "text/html".to_string(),
+                    cache_control: "public".to_string(),
+                    is_not_found: false,
+                    has_page_data: false,
+                    has_dynamic_metadata: false,
+                    tags: vec![format!("tag-{index}")],
+                    cached_at: Instant::now(),
+                    route: None,
+                }),
+                4096,
+            );
+        }
+
+        // A scan must visit this unrelated shard and block; indexed matches
+        // in other shards can be removed without reading unrelated entries.
+        let held_entry = cache.map.get_mut("/unrelated/0").expect("unrelated entry");
+        let targets: Vec<_> = (1..2048)
+            .filter(|index| cache.map.try_get_mut(&format!("/unrelated/{index}")).is_present())
+            .take(2)
+            .collect();
+        assert_eq!(targets.len(), 2);
+        let tag_target = targets[0];
+        let path_target = targets[1];
+        let (sender, receiver) = mpsc::channel();
+        let task_cache = Arc::clone(&cache);
+        let task = thread::spawn(move || {
+            invalidate_static_fast_cache_by_tag(&task_cache, &format!("tag-{tag_target}"));
+            sender.send(()).expect("receiver alive");
+            invalidate_static_fast_cache_for_path(
+                &task_cache,
+                &format!("/unrelated/{path_target}"),
+            );
+            sender.send(()).expect("receiver alive");
+        });
+        let tag_done = receiver.recv_timeout(Duration::from_secs(2)).is_ok();
+        let path_done = receiver.recv_timeout(Duration::from_secs(2)).is_ok();
+        drop(held_entry);
+        task.join().expect("invalidation task");
+        assert!(tag_done, "tag invalidation scanned an unrelated shard");
+        assert!(path_done, "path invalidation scanned an unrelated shard");
+        assert!(!cache.contains_key(&format!("/unrelated/{tag_target}")));
+        assert!(!cache.contains_key(&format!("/unrelated/{path_target}")));
+        assert_eq!(cache.entry_count(), 2046);
+    }
+
+    #[test]
+    fn fast_cache_tag_invalidation_tracks_replacement_expiry_and_eviction() {
+        let cache = StaticFastCache::new();
+        let make_entry = |tag: &str, cached_at: Instant| {
+            Arc::new(PrebuiltResponse {
+                identity: Bytes::from_static(b"html"),
+                gzip: None,
+                br: None,
+                zstd: None,
+                etag: "etag".to_string(),
+                content_type: "text/html".to_string(),
+                cache_control: "public, max-age=1".to_string(),
+                is_not_found: false,
+                has_page_data: false,
+                has_dynamic_metadata: false,
+                tags: vec![tag.to_string()],
+                cached_at,
+                route: None,
+            })
+        };
+
+        insert_static_fast_cache(&cache, "/replace", make_entry("old", Instant::now()), 4);
+        insert_static_fast_cache(&cache, "/replace", make_entry("new", Instant::now()), 4);
+        invalidate_static_fast_cache_by_tag(&cache, "old");
+        assert!(cache.contains_key("/replace"));
+
+        let expired = Instant::now().checked_sub(Duration::from_secs(10)).expect("clock");
+        insert_static_fast_cache(&cache, "/expired", make_entry("expired", expired), 4);
+        assert!(cache.get("/expired").is_none());
+        insert_static_fast_cache(&cache, "/expired", make_entry("new", Instant::now()), 4);
+        invalidate_static_fast_cache_by_tag(&cache, "expired");
+        assert!(cache.contains_key("/expired"));
+
+        insert_static_fast_cache(&cache, "/evicted?x=1", make_entry("evicted", Instant::now()), 4);
+        insert_static_fast_cache(&cache, "/other", make_entry("other", Instant::now()), 4);
+        insert_static_fast_cache(&cache, "/extra", make_entry("other", Instant::now()), 4);
+        assert!(!cache.contains_key("/evicted?x=1"));
+        insert_static_fast_cache(&cache, "/evicted?x=1", make_entry("new", Instant::now()), 4);
+        invalidate_static_fast_cache_by_tag(&cache, "evicted");
+        assert!(cache.contains_key("/evicted?x=1"));
+
+        invalidate_static_fast_cache_by_tag(&cache, "new");
+        assert!(!cache.contains_key("/replace"));
+        assert!(!cache.contains_key("/expired"));
+        assert!(!cache.contains_key("/evicted?x=1"));
+        let index = cache.index.lock();
+        assert!(!index.tags.contains_key("old"));
+        assert!(!index.tags.contains_key("expired"));
+        assert!(!index.tags.contains_key("evicted"));
+        assert!(!index.tags.contains_key("new"));
     }
 
     #[test]
