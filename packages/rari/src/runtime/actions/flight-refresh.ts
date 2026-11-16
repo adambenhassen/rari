@@ -28,19 +28,6 @@ function isActionRefreshRoot(value: unknown): boolean {
   return isValidElement(value) || isFlightThenable(value)
 }
 
-function resolveRefreshElement(refreshFlight: ActionFlightResponseShape['f']): unknown {
-  if (refreshFlight == null || refreshFlight === '') return null
-
-  if (refreshFlight instanceof Promise) {
-    return refreshFlight.then((resolved: unknown) => {
-      if (resolved == null || resolved === '') return null
-      return resolved
-    })
-  }
-
-  return refreshFlight
-}
-
 export function scheduleActionFlightRefresh(
   response: Response,
   flightResponse: ActionFlightResponseShape,
@@ -50,44 +37,47 @@ export function scheduleActionFlightRefresh(
 
   if (shouldSkipRefreshForActionResult(actionResult)) return
 
-  void (async () => {
-    const pending = resolveRefreshElement(flightResponse.f)
-    const refreshElement: unknown = pending instanceof Promise ? await pending : pending
-    if (refreshElement == null) return
+  void Promise.resolve()
+    .then(async () => {
+      const flight = flightResponse.f
+      const refreshElement: unknown =
+        flight instanceof Promise && flight.constructor === Promise ? await flight : flight
+      if (refreshElement == null || refreshElement === '') return
 
-    if (!isActionRefreshRoot(refreshElement)) return
+      if (!isActionRefreshRoot(refreshElement)) return
 
-    const revalidationKind = parseActionRevalidationKind(
-      response.headers.get('x-action-revalidated'),
-    )
-
-    if (revalidationKind === ActionDidNotRevalidate) return
-
-    const revalidatedPath = response.headers.get('x-action-revalidated-path') ?? undefined
-
-    const applyRefresh = () => {
-      globalThis.dispatchEvent(
-        new CustomEvent('rari:action-flight-refresh', {
-          detail: {
-            element: refreshElement,
-            revalidationKind,
-            revalidatedPath,
-          } satisfies ActionFlightRefreshDetail,
-        }),
+      const revalidationKind = parseActionRevalidationKind(
+        response.headers.get('x-action-revalidated'),
       )
-    }
 
-    if (typeof requestAnimationFrame === 'function') {
-      requestAnimationFrame(() => {
-        requestAnimationFrame(applyRefresh)
-      })
-      return
-    }
+      if (revalidationKind === ActionDidNotRevalidate) return
 
-    queueMicrotask(applyRefresh)
-  })().catch((error: unknown) => {
-    console.error('[rari] Action flight refresh failed:', errorMessage(error, String(error)))
-  })
+      const revalidatedPath = response.headers.get('x-action-revalidated-path') ?? undefined
+
+      const applyRefresh = () => {
+        globalThis.dispatchEvent(
+          new CustomEvent('rari:action-flight-refresh', {
+            detail: {
+              element: refreshElement,
+              revalidationKind,
+              revalidatedPath,
+            } satisfies ActionFlightRefreshDetail,
+          }),
+        )
+      }
+
+      if (typeof requestAnimationFrame === 'function') {
+        requestAnimationFrame(() => {
+          requestAnimationFrame(applyRefresh)
+        })
+        return
+      }
+
+      queueMicrotask(applyRefresh)
+    })
+    .catch((error: unknown) => {
+      console.error('[rari] Action flight refresh failed:', errorMessage(error, String(error)))
+    })
 }
 
 export {
