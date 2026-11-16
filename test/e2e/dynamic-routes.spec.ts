@@ -176,6 +176,7 @@ test.describe('Dynamic Routes', () => {
       const originalId = (await requestData.textContent()) ?? ''
 
       expect(originalId).toMatch(/^\d+$/)
+      await page.evaluate(() => Reflect.set(window, '__actionRefreshDocument', true))
       let actionPayload = ''
       await page.route('**/get-data-props/action-refresh*', async route => {
         if (route.request().method() !== 'POST') {
@@ -196,6 +197,12 @@ test.describe('Dynamic Routes', () => {
 
       expect(refreshedId).toBeDefined()
       expect(refreshedId).not.toBe(originalId)
+      if (refreshedId == null)
+        throw new Error('Action refresh payload did not contain getData props')
+      await expect(requestData).toHaveText(refreshedId)
+      expect(
+        await page.evaluate(() => Reflect.get(window, '__actionRefreshDocument') === true),
+      ).toBe(true)
     })
 
     test('does not cache a getData throw or invalid props', async ({ request }) => {
