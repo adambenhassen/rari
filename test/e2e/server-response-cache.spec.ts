@@ -63,7 +63,7 @@ test('Fast hits without getData do not wait for dynamic metadata', async ({ requ
     await expect
       .poll(() => logs.includes('Cache warmup: Completed'), { timeout: 60_000 })
       .toBe(true)
-    const staticCases = [
+    const staticCases: { path: string; headers: Record<string, string> }[] = [
       { path: '/cache-static/cookie', headers: { Cookie: 'rari-action-form-state=bnVsbA' } },
       { path: '/cache-static/rsc', headers: { Accept: 'text/x-component' } },
     ]
