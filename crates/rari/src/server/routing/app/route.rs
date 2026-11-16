@@ -217,7 +217,7 @@ pub async fn handle_app_route(
             response::ResponseCache::generate_static_fast_cache_key(path, query_params_ref, None);
 
         if let Some(prebuilt) = state.static_fast_cache.get(&fast_key) {
-            if !prebuilt.has_page_data && !prebuilt.has_dynamic_metadata {
+            if !prebuilt.has_page_data {
                 return Ok(fast_cache_response(&prebuilt, &headers, accept_encoding));
             }
             deferred_fast_key = Some(fast_key);

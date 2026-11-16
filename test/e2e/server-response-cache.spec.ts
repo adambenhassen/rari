@@ -8,6 +8,102 @@ import { expect, test } from '@playwright/test'
 import { getBinaryPath } from '../../packages/rari/src/cli/platform'
 import { close, listen } from './shared/test-server'
 
+test('Fast hits without getData do not wait for dynamic metadata', async ({ request }) => {
+  test.setTimeout(90_000)
+  let hold = false
+  let calls = 0
+  const held: ServerResponse[] = []
+  const backend = createServer((_incoming, response) => {
+    calls += 1
+    if (hold) {
+      held.push(response)
+      return
+    }
+    response.end('healthy')
+  })
+  const backendPort = await listen(backend)
+  const reservation = createServer()
+  const port = await listen(reservation)
+  await close(reservation)
+  const origin = `http://127.0.0.1:${port}`
+  const child = spawn(
+    getBinaryPath(),
+    ['--mode', 'production', '--host', '127.0.0.1', '--port', String(port)],
+    {
+      cwd: resolvePath(import.meta.dirname, '../fixtures/app'),
+      env: {
+        ...process.env,
+        NODE_ENV: 'production',
+        RARI_ORIGIN: origin,
+        RARI_JS_POOL_SIZE: '1',
+        RARI_TEST_AVAILABILITY_BACKEND: `http://127.0.0.1:${backendPort}`,
+        RUST_LOG: 'info',
+      },
+      stdio: ['ignore', 'pipe', 'pipe'],
+    },
+  )
+  let logs = ''
+  child.stdout.on('data', chunk => {
+    logs += String(chunk)
+  })
+  child.stderr.on('data', chunk => {
+    logs += String(chunk)
+  })
+  const exited = new Promise<void>(resolve => {
+    child.once('exit', () => {
+      resolve()
+    })
+    child.once('error', error => {
+      logs += String(error)
+      resolve()
+    })
+  })
+
+  try {
+    await expect
+      .poll(() => logs.includes('Cache warmup: Completed'), { timeout: 60_000 })
+      .toBe(true)
+    for (const path of ['/cache-availability-metadata/slow', '/cache-availability-layout/slow']) {
+      hold = false
+      const url = `${origin}${path}`
+      const initial = await request.get(url)
+      expect(initial.status(), path).toBe(200)
+      expect(initial.headers()['x-cache'], path).toBe('MISS')
+      const etag = initial.headers().etag
+      expect(etag, path).toBeDefined()
+      hold = true
+      const blocking = request.get(`${origin}/cache-availability-metadata/block-${calls}`, {
+        timeout: 15_000,
+      })
+      try {
+        await expect.poll(() => held.length, { timeout: 10_000 }).toBe(1)
+        const callsBeforeHit = calls
+        const hit = await request.get(url, { timeout: 3000 }).catch(() => null)
+        expect.soft(hit, `${path}: fast hit timed out`).not.toBeNull()
+        if (hit == null) continue
+        expect(hit.status(), path).toBe(200)
+        expect(hit.headers()['x-cache'], path).toBe('HIT')
+        const conditional = await request.get(url, {
+          headers: { 'If-None-Match': etag },
+          timeout: 3000,
+        })
+        expect(conditional.status(), path).toBe(304)
+        expect(calls, path).toBe(callsBeforeHit)
+      } finally {
+        hold = false
+        for (const response of held.splice(0)) response.end('healthy')
+        const unblocked = await blocking
+        expect(unblocked.status(), path).toBe(200)
+      }
+    }
+  } finally {
+    for (const response of held) response.end('healthy')
+    child.kill('SIGTERM')
+    await exited
+    await close(backend)
+  }
+})
+
 test('Cached responses run availability metadata before serving a hit', async ({ request }) => {
   test.setTimeout(90_000)
   let available = true
@@ -82,8 +178,16 @@ test('Cached responses run availability metadata before serving a hit', async ({
         headers: { Accept: 'text/x-component' },
         conditional: false,
       },
-      { path: '/cache-availability-metadata/page', headers: {}, conditional: false },
-      { path: '/cache-availability-layout/page', headers: {}, conditional: false },
+      {
+        path: '/cache-availability-metadata/page',
+        headers: { Cookie: 'rari-action-form-state=bnVsbA' },
+        conditional: false,
+      },
+      {
+        path: '/cache-availability-layout/page',
+        headers: { Cookie: 'rari-action-form-state=bnVsbA' },
+        conditional: false,
+      },
     ]
 
     for (const { path, headers, conditional } of cases) {
@@ -123,12 +227,12 @@ test('Cached responses run availability metadata before serving a hit', async ({
     if (actionBundle == null) throw new Error('Action bundle not found')
     const actionId = `app/get-data-props/_slug_/${basename(actionBundle, '.js')}#refreshGetData`
     const races: { path: string; headers: Record<string, string> }[] = [
-      { path: '/cache-availability-metadata/race-fast', headers: {} },
+      { path: '/cache-availability-check/race-fast', headers: {} },
       {
-        path: '/cache-availability-metadata/race-response',
+        path: '/cache-availability-check/race-response',
         headers: { Cookie: 'rari-action-form-state=bnVsbA' },
       },
-      { path: '/cache-availability-metadata/race-rsc', headers: { Accept: 'text/x-component' } },
+      { path: '/cache-availability-check/race-rsc', headers: { Accept: 'text/x-component' } },
     ]
     for (const { path, headers } of races) {
       const url = `${origin}${path}`
