@@ -32,11 +32,13 @@ use crate::{
 };
 
 const WARMUP_CONCURRENCY: usize = 10;
+const ROUTE_ACTIVE: u64 = 1;
+const ROUTE_PUBLISHING: u64 = 2;
 
 #[derive(Default)]
 pub(crate) struct WarmupGenerations {
     active: AtomicBool,
-    routes: DashMap<String, Arc<Mutex<u64>>>,
+    routes: DashMap<String, Arc<AtomicU64>>,
     invalidation_generation: AtomicU64,
     invalidations_in_flight: AtomicUsize,
     publication_lock: Mutex<()>,
@@ -54,7 +56,7 @@ impl Drop for WarmupInvalidation<'_> {
 impl WarmupGenerations {
     pub(crate) fn new(paths: Vec<String>) -> Self {
         let routes: DashMap<_, _> =
-            paths.into_iter().map(|path| (path, Arc::new(Mutex::new(0)))).collect();
+            paths.into_iter().map(|path| (path, Arc::new(AtomicU64::new(0)))).collect();
         Self {
             active: AtomicBool::new(!routes.is_empty()),
             routes,
@@ -64,18 +66,19 @@ impl WarmupGenerations {
         }
     }
 
-    fn route(&self, path: &str) -> Option<Arc<Mutex<u64>>> {
+    fn route(&self, path: &str) -> Option<Arc<AtomicU64>> {
         if !self.active.load(Ordering::Acquire) {
             return None;
         }
         self.routes.get(path).map(|entry| Arc::clone(entry.value()))
     }
 
-    pub(crate) async fn record_activity(&self, path: &str) {
-        if let Some(generation) = self.route(path) {
-            let mut current = generation.lock().await;
-            *current = current.saturating_add(1);
-        }
+    /// Returns true when a request must bypass cache reads and writes while a
+    /// warmup publication is in progress for this route.
+    pub(crate) fn record_activity(&self, path: &str) -> bool {
+        self.route(path).is_some_and(|generation| {
+            generation.fetch_or(ROUTE_ACTIVE, Ordering::AcqRel) & ROUTE_PUBLISHING != 0
+        })
     }
 
     pub(crate) async fn begin_invalidation(&self, path: &str) -> Option<WarmupInvalidation<'_>> {
@@ -89,7 +92,7 @@ impl WarmupGenerations {
         // If a warmup publication already started, let it finish before the
         // invalidation removes its entries.
         drop(self.publication_lock.lock().await);
-        self.record_activity(path).await;
+        self.record_activity(path);
         Some(invalidation)
     }
 
@@ -110,6 +113,11 @@ struct WarmupHtmlCacheEntry {
 struct WarmupResponseCacheEntry {
     key: String,
     response: response::CachedResponse,
+}
+
+struct WarmupCacheEntries {
+    html: WarmupHtmlCacheEntry,
+    rsc: Option<WarmupResponseCacheEntry>,
 }
 
 fn is_warmup_interrupted(error: &RariError) -> bool {
@@ -208,8 +216,7 @@ async fn warm_route(
     if state.warmup_generations.invalidations_in_flight.load(Ordering::Acquire) != 0 {
         return Ok(());
     }
-    let initial_generation = *generation.lock().await;
-    if initial_generation != 0 {
+    if generation.load(Ordering::Acquire) != 0 {
         return Ok(());
     }
 
@@ -400,32 +407,69 @@ async fn warm_route(
     };
 
     if let Some(html_cache_entry) = html_cache_entry {
-        // An invalidated tag can affect another route. Do not publish across an
-        // invalidation, and let invalidations wait for any ongoing publication.
-        let publication = state.warmup_generations.publication_lock.lock().await;
-        if state.warmup_generations.invalidations_in_flight.load(Ordering::Acquire) != 0
-            || state.warmup_generations.invalidation_generation.load(Ordering::Acquire)
-                != initial_invalidations
-        {
-            return Ok(());
-        }
-        let current_generation = generation.lock().await;
-        if *current_generation != initial_generation {
-            return Ok(());
-        }
-        store_warmed_render(
+        publish_warmed_render(
+            &state.warmup_generations,
+            &generation,
+            initial_invalidations,
             &state.static_fast_cache,
             &state.response_cache,
             &request_context,
-            html_cache_entry,
-            rsc_cache_entry,
+            WarmupCacheEntries { html: html_cache_entry, rsc: rsc_cache_entry },
         )
         .await;
-        drop(current_generation);
-        drop(publication);
     }
 
     Ok(())
+}
+
+async fn publish_warmed_render(
+    generations: &WarmupGenerations,
+    generation: &AtomicU64,
+    initial_invalidations: u64,
+    static_fast_cache: &response::StaticFastCache,
+    response_cache: &response::ResponseCache,
+    request_context: &RequestContext,
+    entries: WarmupCacheEntries,
+) {
+    // An invalidated tag can affect another route. Do not publish across an
+    // invalidation, and let invalidations wait for any ongoing publication.
+    let publication = generations.publication_lock.lock().await;
+    if generations.invalidations_in_flight.load(Ordering::Acquire) != 0
+        || generations.invalidation_generation.load(Ordering::Acquire) != initial_invalidations
+    {
+        return;
+    }
+    if generation
+        .compare_exchange(0, ROUTE_PUBLISHING, Ordering::AcqRel, Ordering::Acquire)
+        .is_err()
+    {
+        return;
+    }
+    let path = entries.html.path.clone();
+    let html_key = entries.html.key.clone();
+    let rsc_key = entries.rsc.as_ref().map(|entry| entry.key.clone());
+    store_warmed_render(
+        static_fast_cache,
+        response_cache,
+        request_context,
+        entries.html,
+        entries.rsc,
+    )
+    .await;
+    if generation
+        .compare_exchange(ROUTE_PUBLISHING, 0, Ordering::AcqRel, Ordering::Acquire)
+        .is_err()
+    {
+        // Requests that arrived during publication bypassed the caches. Remove
+        // the partial warmup entries before allowing later requests to use them.
+        response_cache.invalidate(&html_key).await;
+        if let Some(rsc_key) = rsc_key {
+            response_cache.invalidate(&rsc_key).await;
+        }
+        response::invalidate_static_fast_cache_for_path(static_fast_cache, &path);
+        generation.fetch_and(!ROUTE_PUBLISHING, Ordering::Release);
+    }
+    drop(publication);
 }
 
 async fn store_warmed_render(
@@ -479,19 +523,100 @@ fn create_warmup_context(route_match: &AppRouteMatch) -> LayoutRenderContext {
 
 #[cfg(test)]
 mod tests {
-    use std::{sync::Arc, time::Instant};
-
-    use axum::http::HeaderMap;
-    use bytes::Bytes;
-
-    use super::{WarmupHtmlCacheEntry, WarmupResponseCacheEntry, store_warmed_render};
-    use crate::server::{
-        cache::response::{
-            CacheConfig, CacheMetadata, CachedResponse, PrebuiltResponse, ResponseCache,
-            StaticFastCache,
+    use std::{
+        path::PathBuf,
+        sync::{
+            Arc,
+            atomic::{AtomicUsize, Ordering},
         },
-        middleware::request_context::RequestContext,
+        time::{Duration, Instant},
     };
+
+    use axum::{
+        extract::{Query, State},
+        http::{HeaderMap, StatusCode},
+    };
+    use bytes::Bytes;
+    use rustc_hash::FxHashMap;
+    use tokio::{
+        sync::{Mutex, Notify},
+        time::timeout,
+    };
+
+    use super::{
+        WarmupCacheEntries, WarmupGenerations, WarmupHtmlCacheEntry, WarmupResponseCacheEntry,
+        publish_warmed_render, store_warmed_render,
+    };
+    use crate::{
+        RscHtmlRenderer, RscRenderer,
+        rendering::layout::LayoutHtmlCache,
+        runtime::JsExecutionRuntime,
+        server::{
+            FallbackHtmlCache, ServerState,
+            cache::{
+                handler::{
+                    CacheError, CacheHandler, CacheHandlerRegistry, MemoryCacheHandler, SetOutcome,
+                    async_trait,
+                },
+                response::{
+                    CacheConfig, CacheMetadata, CachedResponse, PrebuiltResponse, ResponseCache,
+                    StaticFastCache, insert_static_fast_cache,
+                },
+            },
+            config::{Config, Mode},
+            middleware::request_context::RequestContext,
+            routing::app::handle_app_route,
+        },
+    };
+
+    #[derive(Debug, Default)]
+    struct DelayedCacheHandler {
+        inner: MemoryCacheHandler,
+        started: Notify,
+        release: Notify,
+        sets: AtomicUsize,
+    }
+
+    #[async_trait]
+    impl CacheHandler for DelayedCacheHandler {
+        async fn get(&self, key: &str) -> Result<Option<Vec<u8>>, CacheError> {
+            self.inner.get(key).await
+        }
+
+        async fn set(&self, key: &str, value: Vec<u8>, ttl: u64) -> Result<SetOutcome, CacheError> {
+            self.set_with_tags(key, value, ttl, &[]).await
+        }
+
+        async fn set_with_tags(
+            &self,
+            key: &str,
+            value: Vec<u8>,
+            ttl: u64,
+            tags: &[String],
+        ) -> Result<SetOutcome, CacheError> {
+            if self.sets.fetch_add(1, Ordering::Relaxed) == 0 {
+                self.started.notify_one();
+                self.release.notified().await;
+            }
+            self.inner.set_with_tags(key, value, ttl, tags).await
+        }
+
+        async fn invalidate(&self, key: &str) -> Result<bool, CacheError> {
+            self.inner.invalidate(key).await
+        }
+
+        async fn invalidate_by_tag(&self, tag: &str) -> Result<(), CacheError> {
+            self.inner.invalidate_by_tag(tag).await
+        }
+
+        async fn clear(&self) -> Result<(), CacheError> {
+            self.inner.clear().await
+        }
+
+        fn get_all_keys(&self) -> Vec<String> {
+            self.inner.get_all_keys()
+        }
+    }
 
     fn test_cached_response(body: &str) -> CachedResponse {
         CachedResponse {
@@ -526,6 +651,33 @@ mod tests {
         })
     }
 
+    fn test_server_state(
+        generations: Arc<WarmupGenerations>,
+        fast_cache: Arc<StaticFastCache>,
+        response_cache: Arc<ResponseCache>,
+    ) -> ServerState {
+        let runtime = Arc::new(JsExecutionRuntime::new(None));
+        ServerState {
+            renderer: Arc::new(Mutex::new(RscRenderer::new(Arc::clone(&runtime)))),
+            ssr_renderer: Arc::new(RscHtmlRenderer::new(Arc::clone(&runtime))),
+            js_runtime: runtime,
+            config: Arc::new(Config::new(Mode::Production)),
+            app_router: None,
+            api_route_handler: None,
+            html_cache: FallbackHtmlCache::default(),
+            layout_html_cache: Arc::new(LayoutHtmlCache::new()),
+            response_cache,
+            static_fast_cache: fast_cache,
+            warmup_generations: generations,
+            og_generator: None,
+            app_icons: Arc::new(Vec::new()),
+            project_root: PathBuf::from("."),
+            image_optimizer: None,
+            cache_registry: Arc::new(CacheHandlerRegistry::default_with_memory()),
+            image_handler: Arc::new(MemoryCacheHandler::default()),
+        }
+    }
+
     #[tokio::test]
     async fn marked_warmup_render_skips_all_cache_writes() {
         let static_fast_cache = StaticFastCache::new();
@@ -554,5 +706,76 @@ mod tests {
         assert!(!static_fast_cache.contains_key("/maintenance"));
         assert!(response_cache.get("html-key").await.is_none());
         assert!(response_cache.get("rsc-key").await.is_none());
+    }
+
+    #[tokio::test]
+    #[expect(clippy::expect_used, reason = "test setup and assertions must succeed")]
+    async fn request_during_delayed_warmup_publication_does_not_wait_or_see_stale_entries() {
+        let generations = Arc::new(WarmupGenerations::new(vec!["/slow".to_string()]));
+        let generation = generations.route("/slow").expect("warmup route");
+        let handler = Arc::new(DelayedCacheHandler::default());
+        let response_cache = Arc::new(ResponseCache::new_with_handler(
+            CacheConfig::default(),
+            Arc::<DelayedCacheHandler>::clone(&handler),
+        ));
+        let fast_cache = Arc::new(StaticFastCache::new());
+        insert_static_fast_cache(&fast_cache, "/slow", test_prebuilt_response(), 10);
+        let state = test_server_state(
+            Arc::clone(&generations),
+            Arc::clone(&fast_cache),
+            Arc::clone(&response_cache),
+        );
+        let task_generations = Arc::clone(&generations);
+        let task_response_cache = Arc::clone(&response_cache);
+        let task_fast_cache = Arc::clone(&fast_cache);
+        let task = tokio::spawn(async move {
+            let context = RequestContext::new("/slow".to_string());
+            publish_warmed_render(
+                &task_generations,
+                &generation,
+                0,
+                &task_fast_cache,
+                &task_response_cache,
+                &context,
+                WarmupCacheEntries {
+                    html: WarmupHtmlCacheEntry {
+                        path: "/slow".to_string(),
+                        key: "html-key".to_string(),
+                        prebuilt: test_prebuilt_response(),
+                        response: test_cached_response("old html"),
+                        max_entries: 10,
+                    },
+                    rsc: Some(WarmupResponseCacheEntry {
+                        key: "rsc-key".to_string(),
+                        response: test_cached_response("old rsc"),
+                    }),
+                },
+            )
+            .await;
+        });
+
+        timeout(Duration::from_secs(2), handler.started.notified())
+            .await
+            .expect("warmup publication started");
+        let request = timeout(
+            Duration::from_secs(2),
+            handle_app_route(
+                State(state),
+                "/slow".parse().expect("valid URI"),
+                Query(FxHashMap::default()),
+                HeaderMap::new(),
+            ),
+        )
+        .await;
+        handler.release.notify_one();
+        task.await.expect("warmup task");
+
+        assert!(matches!(
+            request.expect("request waited for warmup publication"),
+            Err(StatusCode::NOT_FOUND)
+        ));
+        assert!(response_cache.get("html-key").await.is_none());
+        assert!(response_cache.get("rsc-key").await.is_none());
+        assert!(!fast_cache.contains_key("/slow"));
     }
 }

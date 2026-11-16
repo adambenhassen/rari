@@ -181,7 +181,7 @@ pub async fn handle_app_route(
         }
     }
 
-    state.warmup_generations.record_activity(path).await;
+    let warmup_publication_in_progress = state.warmup_generations.record_activity(path);
 
     let render_mode = detect_render_mode(&headers);
     let accept_encoding = headers.get("accept-encoding").and_then(|v| v.to_str().ok());
@@ -192,7 +192,10 @@ pub async fn handle_app_route(
 
     // Pages without getData can return before route matching and context setup.
     let mut deferred_fast_key = None;
-    if matches!(render_mode, RenderMode::Ssr) && can_use_static_fast_cache(cookie_header) {
+    if !warmup_publication_in_progress
+        && matches!(render_mode, RenderMode::Ssr)
+        && can_use_static_fast_cache(cookie_header)
+    {
         let fast_key =
             response::ResponseCache::generate_static_fast_cache_key(path, query_params_ref, None);
 
@@ -231,6 +234,9 @@ pub async fn handle_app_route(
                 &headers,
             ))),
     );
+    if warmup_publication_in_progress {
+        request_context.disable_cache_writes();
+    }
 
     let search_params = extract_search_params(query_params_for_cache.clone().unwrap_or_default());
 
@@ -341,6 +347,7 @@ pub async fn handle_app_route(
 
             if route_match.not_found.is_none()
                 && context.template_navigation_id.is_none()
+                && !warmup_publication_in_progress
                 && request_context.response_unavailable_after().is_none()
                 && let Some(cached) = state.response_cache.get(&cache_key).await
             {
@@ -505,6 +512,7 @@ pub async fn handle_app_route(
             let client_etag = headers.get("if-none-match").and_then(|v| v.to_str().ok());
 
             if route_match.not_found.is_none()
+                && !warmup_publication_in_progress
                 && request_context.response_unavailable_after().is_none()
                 && let Some(cached) = state.response_cache.get(&cache_key).await
             {
