@@ -210,6 +210,7 @@ pub struct RequestContext {
 struct ResponseCacheState {
     writes_enabled: bool,
     unavailable_after: Option<u64>,
+    has_dynamic_metadata: bool,
 }
 
 impl RequestContext {
@@ -223,6 +224,7 @@ impl RequestContext {
             response_cache_state: Mutex::new(ResponseCacheState {
                 writes_enabled: true,
                 unavailable_after: None,
+                has_dynamic_metadata: true,
             }),
             cookie_header: None,
             request_headers: FxHashMap::default(),
@@ -309,6 +311,14 @@ impl RequestContext {
     pub fn response_cache_allowed(&self) -> bool {
         let state = self.response_cache_state.lock();
         state.writes_enabled && state.unavailable_after.is_none()
+    }
+
+    pub(crate) fn set_has_dynamic_metadata(&self, has_dynamic_metadata: bool) {
+        self.response_cache_state.lock().has_dynamic_metadata = has_dynamic_metadata;
+    }
+
+    pub(crate) fn has_dynamic_metadata(&self) -> bool {
+        self.response_cache_state.lock().has_dynamic_metadata
     }
 
     pub fn start_time(&self) -> Instant {

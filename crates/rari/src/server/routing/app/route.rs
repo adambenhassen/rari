@@ -32,10 +32,10 @@ use super::{
 use crate::server::metrics_http::{RequestTimer, route_label};
 use crate::{
     rendering::layout::{
-        ChunkedContentType, LayoutRenderer, PageData, RenderResult, create_layout_context,
-        drain_chunked_stream, is_rari_page_not_found, pathname_from_router_state_header,
-        router_state_from_headers, shared_layout_paths_for_navigation,
-        tree_from_router_state_header,
+        ChunkedContentType, LayoutRenderContext, LayoutRenderer, PageData, RenderResult,
+        create_layout_context, drain_chunked_stream, is_rari_page_not_found,
+        pathname_from_router_state_header, router_state_from_headers,
+        shared_layout_paths_for_navigation, tree_from_router_state_header,
     },
     server::{
         ServerState,
@@ -56,8 +56,64 @@ use crate::{
             },
         },
         middleware::request_context::RequestContext,
+        routing::AppRouteMatch,
     },
 };
+
+async fn metadata_allows_cache_hit(
+    state: &ServerState,
+    route_match: &AppRouteMatch,
+    context: &mut LayoutRenderContext,
+    request_context: &Arc<RequestContext>,
+    collected: &mut bool,
+) -> bool {
+    if !*collected {
+        context.metadata =
+            collect_page_metadata(state, route_match, context, Some(Arc::clone(request_context)))
+                .await;
+        *collected = true;
+    }
+    context.metadata.is_some() && request_context.response_unavailable_after().is_none()
+}
+
+fn fast_cache_response(
+    prebuilt: &response::PrebuiltResponse,
+    headers: &HeaderMap,
+    accept_encoding: Option<&str>,
+) -> Response {
+    if let Some(client_etag) = headers.get("if-none-match").and_then(|v| v.to_str().ok())
+        && client_etag == prebuilt.etag
+    {
+        #[expect(
+            clippy::expect_used,
+            reason = "Response::builder() with valid components never fails"
+        )]
+        return Response::builder()
+            .status(StatusCode::NOT_MODIFIED)
+            .header("etag", &prebuilt.etag)
+            .header("vary", static_html_vary_header(None))
+            .body(Body::empty())
+            .expect("Valid 304 response");
+    }
+
+    let encoding = CompressionEncoding::from_accept_encoding(accept_encoding);
+    let (body, encoding_header) = prebuilt.body_for(encoding);
+    let status = if prebuilt.is_not_found { StatusCode::NOT_FOUND } else { StatusCode::OK };
+    let mut builder = Response::builder()
+        .status(status)
+        .header("content-type", prebuilt.content_type.as_str())
+        .header("cache-control", prebuilt.cache_control.as_str())
+        .header("etag", &prebuilt.etag)
+        .header("vary", static_html_vary_header(None))
+        .header("x-cache", "HIT");
+
+    if let Some(enc) = encoding_header {
+        builder = builder.header("content-encoding", enc);
+    }
+
+    #[expect(clippy::expect_used, reason = "Response::builder() with valid components never fails")]
+    builder.body(Body::from(body)).expect("Valid fast-path response")
+}
 
 #[axum::debug_handler]
 #[expect(
@@ -142,6 +198,8 @@ pub async fn handle_app_route(
         }
     }
 
+    let warmup_publication_in_progress = state.warmup_generations.record_activity(path);
+
     let render_mode = detect_render_mode(&headers);
     let accept_encoding = headers.get("accept-encoding").and_then(|v| v.to_str().ok());
 
@@ -149,49 +207,20 @@ pub async fn handle_app_route(
     let query_params_for_cache = route_query_params_for_cache(&query_params);
     let query_params_ref = query_params_for_cache.as_ref();
 
-    // Keep the fast tier ahead of route matching and request context setup so a
-    // cache hit only needs a hash lookup and the prebuilt response.
-    if matches!(render_mode, RenderMode::Ssr) && can_use_static_fast_cache(cookie_header) {
+    // Pages without getData can return before route matching and context setup.
+    let mut deferred_fast_key = None;
+    if !warmup_publication_in_progress
+        && matches!(render_mode, RenderMode::Ssr)
+        && can_use_static_fast_cache(cookie_header)
+    {
         let fast_key =
             response::ResponseCache::generate_static_fast_cache_key(path, query_params_ref, None);
 
         if let Some(prebuilt) = state.static_fast_cache.get(&fast_key) {
-            if let Some(client_etag) = headers.get("if-none-match").and_then(|v| v.to_str().ok())
-                && client_etag == prebuilt.etag
-            {
-                #[expect(
-                    clippy::expect_used,
-                    reason = "Response::builder() with valid components never fails"
-                )]
-                return Ok(Response::builder()
-                    .status(StatusCode::NOT_MODIFIED)
-                    .header("etag", &prebuilt.etag)
-                    .header("vary", static_html_vary_header(None))
-                    .body(Body::empty())
-                    .expect("Valid 304 response"));
+            if !prebuilt.has_page_data {
+                return Ok(fast_cache_response(&prebuilt, &headers, accept_encoding));
             }
-
-            let encoding = CompressionEncoding::from_accept_encoding(accept_encoding);
-            let (body, encoding_header) = prebuilt.body_for(encoding);
-            let status = if prebuilt.is_not_found { StatusCode::NOT_FOUND } else { StatusCode::OK };
-
-            let mut builder = Response::builder()
-                .status(status)
-                .header("content-type", prebuilt.content_type.as_str())
-                .header("cache-control", prebuilt.cache_control.as_str())
-                .header("etag", &prebuilt.etag)
-                .header("vary", static_html_vary_header(None))
-                .header("x-cache", "HIT");
-
-            if let Some(enc) = encoding_header {
-                builder = builder.header("content-encoding", enc);
-            }
-
-            #[expect(
-                clippy::expect_used,
-                reason = "Response::builder() with valid components never fails"
-            )]
-            return Ok(builder.body(Body::from(body)).expect("Valid fast-path response"));
+            deferred_fast_key = Some(fast_key);
         }
     }
 
@@ -222,6 +251,9 @@ pub async fn handle_app_route(
                 &headers,
             ))),
     );
+    if warmup_publication_in_progress {
+        request_context.disable_cache_writes();
+    }
 
     let search_params = extract_search_params(query_params_for_cache.clone().unwrap_or_default());
 
@@ -254,9 +286,37 @@ pub async fn handle_app_route(
         Arc::clone(&state.layout_html_cache),
     );
 
-    if route_match.not_found.is_none() && route_match.route.is_dynamic {
+    let lookup_key = match render_mode {
+        RenderMode::Ssr => Some(response_cache_key(path, query_params_ref, None, cookie_header)),
+        RenderMode::RscNavigation
+            if !should_use_streaming(&route_match, &state.config)
+                && context.template_navigation_id.is_none() =>
+        {
+            Some(response_cache_key(path, query_params_ref, Some("rsc"), cookie_header))
+        }
+        _ => None,
+    };
+    let mut candidate = if !warmup_publication_in_progress
+        && deferred_fast_key.is_none()
+        && route_match.not_found.is_none()
+    {
+        if let Some(key) = lookup_key.as_deref() {
+            Some(state.response_cache.candidate(key).await)
+        } else {
+            None
+        }
+    } else {
+        None
+    };
+    let known_no_page_data = candidate
+        .as_ref()
+        .and_then(Option::as_ref)
+        .is_some_and(|entry| entry.is_guarded() && !entry.response.metadata.has_page_data);
+    let mut has_page_data = !known_no_page_data;
+    if route_match.not_found.is_none() && !known_no_page_data {
         match layout_renderer.get_page_data(&route_match, &context).await {
             Ok(page_data) => match page_data {
+                PageData::Missing => has_page_data = false,
                 PageData::Failed(error) => {
                     request_context.disable_cache_writes();
                     tracing::error!(
@@ -266,9 +326,17 @@ pub async fn handle_app_route(
                     );
                 }
                 PageData::NotFound => {
+                    request_context.disable_cache_writes();
                     if let Some(not_found_entry) = resolve_not_found_entry(app_router, &route_match)
                     {
                         route_match.not_found = Some(not_found_entry);
+                    } else {
+                        #[expect(clippy::expect_used, reason = "valid static response")]
+                        return Ok(Response::builder()
+                            .status(StatusCode::NOT_FOUND)
+                            .header(CACHE_CONTROL, "no-store")
+                            .body(Body::empty())
+                            .expect("Valid not-found response"));
                     }
                 }
                 PageData::Found(props) => context.page_data_props = props,
@@ -284,18 +352,43 @@ pub async fn handle_app_route(
         }
     }
 
+    let mut metadata_collected = false;
+    if route_match.not_found.is_none()
+        && request_context.response_unavailable_after().is_none()
+        && let Some(fast_key) = deferred_fast_key
+        && let Some(prebuilt) = state.static_fast_cache.get(&fast_key)
+        && (!prebuilt.has_dynamic_metadata
+            || metadata_allows_cache_hit(
+                &state,
+                &route_match,
+                &mut context,
+                &request_context,
+                &mut metadata_collected,
+            )
+            .await)
+        && let Some(current) = state.static_fast_cache.get(&fast_key)
+        && Arc::ptr_eq(&prebuilt, &current)
+    {
+        return Ok(apply_request_no_store(
+            fast_cache_response(&current, &headers, accept_encoding),
+            &request_context,
+        ));
+    }
+
     match render_mode {
         RenderMode::RscNavigation => {
             let use_streaming = should_use_streaming(&route_match, &state.config);
 
             if use_streaming {
-                context.metadata = collect_page_metadata(
-                    &state,
-                    &route_match,
-                    &context,
-                    Some(Arc::clone(&request_context)),
-                )
-                .await;
+                if !metadata_collected {
+                    context.metadata = collect_page_metadata(
+                        &state,
+                        &route_match,
+                        &context,
+                        Some(Arc::clone(&request_context)),
+                    )
+                    .await;
+                }
 
                 let response = render_rsc_navigation_streaming(
                     Arc::new(state),
@@ -309,20 +402,47 @@ pub async fn handle_app_route(
             }
             let cache_key = response_cache_key(path, query_params_ref, Some("rsc"), cookie_header);
 
-            if context.template_navigation_id.is_none()
+            let cached = if route_match.not_found.is_none()
+                && !warmup_publication_in_progress
                 && request_context.response_unavailable_after().is_none()
-                && let Some(cached) = state.response_cache.get(&cache_key).await
+                && context.template_navigation_id.is_none()
             {
-                let status_code = if route_match.not_found.is_some() {
-                    StatusCode::NOT_FOUND
-                } else {
-                    StatusCode::OK
+                let entry = match candidate.take() {
+                    Some(entry) => entry,
+                    None => state.response_cache.candidate(&cache_key).await,
                 };
-
+                let allowed = if let Some(entry) = entry.as_ref() {
+                    (entry.is_guarded() && !entry.response.metadata.has_dynamic_metadata)
+                        || metadata_allows_cache_hit(
+                            &state,
+                            &route_match,
+                            &mut context,
+                            &request_context,
+                            &mut metadata_collected,
+                        )
+                        .await
+                } else {
+                    false
+                };
+                let cached = if allowed {
+                    if let Some(entry) = entry {
+                        state.response_cache.validate_candidate(&cache_key, entry).await
+                    } else {
+                        None
+                    }
+                } else {
+                    None
+                };
+                state.response_cache.record_lookup(cached.is_some());
+                cached
+            } else {
+                None
+            };
+            if let Some(cached) = cached {
                 let merged_vary = merge_vary_with_accept(cached.headers.get("vary"));
 
                 let mut response_builder = Response::builder()
-                    .status(status_code)
+                    .status(StatusCode::OK)
                     .header("content-type", "text/x-component")
                     .header("vary", merged_vary)
                     .header("x-cache", "HIT");
@@ -337,18 +457,23 @@ pub async fn handle_app_route(
                     clippy::expect_used,
                     reason = "Response::builder() with valid components never fails"
                 )]
-                return Ok(response_builder
-                    .body(Body::from(cached.body))
-                    .expect("Valid cached RSC response"));
+                return Ok(apply_request_no_store(
+                    response_builder
+                        .body(Body::from(cached.body))
+                        .expect("Valid cached RSC response"),
+                    &request_context,
+                ));
             }
 
-            context.metadata = collect_page_metadata(
-                &state,
-                &route_match,
-                &context,
-                Some(Arc::clone(&request_context)),
-            )
-            .await;
+            if !metadata_collected {
+                context.metadata = collect_page_metadata(
+                    &state,
+                    &route_match,
+                    &context,
+                    Some(Arc::clone(&request_context)),
+                )
+                .await;
+            }
 
             let rsc_result = layout_renderer
                 .render_route(&route_match, &context, Some(Arc::clone(&request_context)))
@@ -447,6 +572,8 @@ pub async fn handle_app_route(
                             ttl: cache_policy.ttl,
                             etag: None,
                             tags: response_cache_tags,
+                            has_page_data,
+                            has_dynamic_metadata: request_context.has_dynamic_metadata(),
                         },
                         compressed_zstd: None,
                         compressed_br: None,
@@ -476,9 +603,42 @@ pub async fn handle_app_route(
 
             let client_etag = headers.get("if-none-match").and_then(|v| v.to_str().ok());
 
-            if request_context.response_unavailable_after().is_none()
-                && let Some(cached) = state.response_cache.get(&cache_key).await
+            let cached = if route_match.not_found.is_none()
+                && !warmup_publication_in_progress
+                && request_context.response_unavailable_after().is_none()
             {
+                let entry = match candidate.take() {
+                    Some(entry) => entry,
+                    None => state.response_cache.candidate(&cache_key).await,
+                };
+                let allowed = if let Some(entry) = entry.as_ref() {
+                    (entry.is_guarded() && !entry.response.metadata.has_dynamic_metadata)
+                        || metadata_allows_cache_hit(
+                            &state,
+                            &route_match,
+                            &mut context,
+                            &request_context,
+                            &mut metadata_collected,
+                        )
+                        .await
+                } else {
+                    false
+                };
+                let cached = if allowed {
+                    if let Some(entry) = entry {
+                        state.response_cache.validate_candidate(&cache_key, entry).await
+                    } else {
+                        None
+                    }
+                } else {
+                    None
+                };
+                state.response_cache.record_lookup(cached.is_some());
+                cached
+            } else {
+                None
+            };
+            if let Some(cached) = cached {
                 if let (Some(cached_etag), Some(client_etag)) = (&cached.metadata.etag, client_etag)
                     && cached_etag == client_etag
                 {
@@ -488,19 +648,16 @@ pub async fn handle_app_route(
                         clippy::expect_used,
                         reason = "Response::builder() with valid components never fails"
                     )]
-                    return Ok(Response::builder()
-                        .status(StatusCode::NOT_MODIFIED)
-                        .header("etag", cached_etag)
-                        .header("vary", merged_vary)
-                        .body(Body::empty())
-                        .expect("Valid 304 response"));
+                    return Ok(apply_request_no_store(
+                        Response::builder()
+                            .status(StatusCode::NOT_MODIFIED)
+                            .header("etag", cached_etag)
+                            .header("vary", merged_vary)
+                            .body(Body::empty())
+                            .expect("Valid 304 response"),
+                        &request_context,
+                    ));
                 }
-
-                let status_code = if route_match.not_found.is_some() {
-                    StatusCode::NOT_FOUND
-                } else {
-                    StatusCode::OK
-                };
 
                 let merged_vary = merge_vary_with_accept(cached.headers.get("vary"));
 
@@ -534,7 +691,7 @@ pub async fn handle_app_route(
                     };
 
                 let mut response_builder = Response::builder()
-                    .status(status_code)
+                    .status(StatusCode::OK)
                     .header("content-type", "text/html; charset=utf-8")
                     .header("vary", merged_vary)
                     .header("x-cache", "HIT");
@@ -562,9 +719,10 @@ pub async fn handle_app_route(
                     clippy::expect_used,
                     reason = "Response::builder() with valid components never fails"
                 )]
-                return Ok(response_builder
-                    .body(Body::from(body_bytes))
-                    .expect("Valid cached response"));
+                return Ok(apply_request_no_store(
+                    response_builder.body(Body::from(body_bytes)).expect("Valid cached response"),
+                    &request_context,
+                ));
             }
 
             let use_streaming = should_use_streaming(&route_match, &state.config);
@@ -576,13 +734,17 @@ pub async fn handle_app_route(
                 let metadata_context = context.clone();
                 let metadata_request_context = Arc::clone(&request_context);
                 let metadata_task = tokio::spawn(async move {
-                    let metadata = collect_page_metadata(
-                        &metadata_state,
-                        &metadata_route_match,
-                        &metadata_context,
-                        Some(metadata_request_context),
-                    )
-                    .await;
+                    let metadata = if metadata_collected {
+                        metadata_context.metadata.clone()
+                    } else {
+                        collect_page_metadata(
+                            &metadata_state,
+                            &metadata_route_match,
+                            &metadata_context,
+                            Some(metadata_request_context),
+                        )
+                        .await
+                    };
                     let _ = metadata_tx.send(metadata.clone());
                     metadata
                 });
@@ -706,6 +868,8 @@ pub async fn handle_app_route(
                                 ttl: cache_policy.ttl,
                                 etag: Some(etag.clone()),
                                 tags: merged_tags,
+                                has_page_data,
+                                has_dynamic_metadata: request_context.has_dynamic_metadata(),
                             },
                             compressed_zstd,
                             compressed_br,
@@ -745,14 +909,15 @@ pub async fn handle_app_route(
                 return Ok(response);
             }
 
-            let metadata = collect_page_metadata(
-                &state,
-                &route_match,
-                &context,
-                Some(Arc::clone(&request_context)),
-            )
-            .await;
-            context.metadata = metadata;
+            if !metadata_collected {
+                context.metadata = collect_page_metadata(
+                    &state,
+                    &route_match,
+                    &context,
+                    Some(Arc::clone(&request_context)),
+                )
+                .await;
+            }
 
             let render_result = match layout_renderer
                 .render_route_with_streaming(
@@ -953,6 +1118,9 @@ pub async fn handle_app_route(
                             content_type: "text/html; charset=utf-8".to_string(),
                             cache_control: cache_control_value.to_string(),
                             is_not_found: route_match.not_found.is_some(),
+                            has_page_data,
+                            has_dynamic_metadata: request_context.has_dynamic_metadata(),
+                            tags: response_cache_tags.clone(),
                             cached_at: Instant::now(),
                             route: None,
                         }),
@@ -968,6 +1136,8 @@ pub async fn handle_app_route(
                         ttl: cache_policy.ttl,
                         etag: Some(etag.clone()),
                         tags: response_cache_tags,
+                        has_page_data,
+                        has_dynamic_metadata: request_context.has_dynamic_metadata(),
                     },
                     compressed_zstd,
                     compressed_br,

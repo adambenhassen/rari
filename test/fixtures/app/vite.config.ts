@@ -17,7 +17,9 @@ export default defineConfig({
           '/server-response-metadata-streaming': 'public, max-age=60',
           '/server-response-fallback/*': 'public, max-age=60',
           '/server-response-streaming': 'public, max-age=60',
-          '/get-data-props/*': 'public, max-age=60',
+          // Keep prewarmed fixtures fresh while isolated server tests run.
+          '/get-data-props/*': 'public, max-age=3600',
+          '/get-data-static': 'public, max-age=60',
           '/runtime-health-blocker': 'no-store',
           '/stale-render/source': 'no-store',
           '/stale-render/failure': 'no-store',

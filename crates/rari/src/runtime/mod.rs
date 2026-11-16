@@ -144,19 +144,30 @@ impl JsExecutionRuntime {
             serde_json::to_string(&data).map_err(|e| RariError::serialization(e.to_string()))?;
 
         let script = format!(
-            r"(function() {{
+            r"(async function() {{
                 const data = {data_json};
-                return globalThis['~rari'].metadataCollector.collect(
+                let hasDynamicMetadata = false;
+                for (const path of [...data.layoutPaths, data.pagePath]) {{
+                    const key = path.replace(/^file:\/\/.*\/app\//, 'app/').replace(/\.js$/, '');
+                    let module = globalThis['~rsc']?.modules?.[key];
+                    if (Object.prototype.toString.call(module) !== '[object Module]') {{
+                        module = await import(path);
+                    }}
+                    if ('generateMetadata' in module) hasDynamicMetadata = true;
+                }}
+                const metadata = await globalThis['~rari'].metadataCollector.collect(
                     data.layoutPaths,
                     data.pagePath,
                     data.params,
                     data.searchParams,
                     data.pageProps
                 );
+                return {{ metadata, hasDynamicMetadata }};
             }})()"
         );
 
-        let metadata_list = if let Some(request_context) = request_context {
+        let metadata_context = request_context.clone();
+        let metadata_result = if let Some(request_context) = request_context {
             self.execute_script_with_request_context(
                 request_context,
                 "collect_metadata".to_string(),
@@ -167,9 +178,15 @@ impl JsExecutionRuntime {
             self.execute_script("collect_metadata".to_string(), script).await?
         };
 
-        let metadata_array = metadata_list.as_array().ok_or_else(|| {
-            RariError::serialization("Expected metadata list to be an array".to_string())
-        })?;
+        let metadata_array =
+            metadata_result.get("metadata").and_then(Value::as_array).ok_or_else(|| {
+                RariError::serialization("Expected metadata list to be an array".to_string())
+            })?;
+        if let Some(context) = metadata_context {
+            context.set_has_dynamic_metadata(
+                metadata_result.get("hasDynamicMetadata").and_then(Value::as_bool).unwrap_or(true),
+            );
+        }
 
         let mut merged_metadata = serde_json::json!({});
         for metadata_item in metadata_array {
