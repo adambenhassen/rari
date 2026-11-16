@@ -1,0 +1,168 @@
+import type { ServerResponse } from 'node:http'
+import { spawn } from 'node:child_process'
+import { readdir } from 'node:fs/promises'
+import { createServer } from 'node:http'
+import { basename, resolve as resolvePath } from 'node:path'
+import process from 'node:process'
+import { expect, test } from '@playwright/test'
+import { getBinaryPath } from '../../packages/rari/src/cli/platform'
+import { close, listen } from './shared/test-server'
+
+test('Cached responses run availability metadata before serving a hit', async ({ request }) => {
+  test.setTimeout(90_000)
+  let available = true
+  let holdNext = false
+  let heldResponse: ServerResponse | undefined
+  const backend = createServer((_incoming, response) => {
+    if (holdNext) {
+      holdNext = false
+      heldResponse = response
+      return
+    }
+    response.writeHead(available ? 200 : 503)
+    response.end(available ? 'healthy' : 'unavailable')
+  })
+  const backendPort = await listen(backend)
+  const reservation = createServer()
+  const port = await listen(reservation)
+  await close(reservation)
+  const origin = `http://127.0.0.1:${port}`
+  const child = spawn(
+    getBinaryPath(),
+    ['--mode', 'production', '--host', '127.0.0.1', '--port', String(port)],
+    {
+      cwd: resolvePath(import.meta.dirname, '../fixtures/app'),
+      env: {
+        ...process.env,
+        NODE_ENV: 'production',
+        RARI_ORIGIN: origin,
+        RARI_JS_POOL_SIZE: '2',
+        RARI_TEST_AVAILABILITY_BACKEND: `http://127.0.0.1:${backendPort}`,
+        RUST_LOG: 'info',
+      },
+      stdio: ['ignore', 'pipe', 'pipe'],
+    },
+  )
+  let logs = ''
+  child.stdout.on('data', chunk => {
+    logs += String(chunk)
+  })
+  child.stderr.on('data', chunk => {
+    logs += String(chunk)
+  })
+  const exited = new Promise<void>(resolve => {
+    child.once('exit', () => {
+      resolve()
+    })
+    child.once('error', error => {
+      logs += String(error)
+      resolve()
+    })
+  })
+
+  try {
+    await expect
+      .poll(() => logs.includes('Cache warmup: Completed'), { timeout: 60_000 })
+      .toBe(true)
+    const cases: { path: string; headers: Record<string, string>; conditional: boolean }[] = [
+      { path: '/cache-availability/fast', headers: {}, conditional: false },
+      { path: '/cache-availability/fast-etag', headers: {}, conditional: true },
+      {
+        path: '/cache-availability/response',
+        headers: { Cookie: 'rari-action-form-state=bnVsbA' },
+        conditional: false,
+      },
+      {
+        path: '/cache-availability/response-etag',
+        headers: { Cookie: 'rari-action-form-state=bnVsbA' },
+        conditional: true,
+      },
+      {
+        path: '/cache-availability/rsc',
+        headers: { Accept: 'text/x-component' },
+        conditional: false,
+      },
+      { path: '/cache-availability-metadata/page', headers: {}, conditional: false },
+      { path: '/cache-availability-layout/page', headers: {}, conditional: false },
+    ]
+
+    for (const { path, headers, conditional } of cases) {
+      const url = `${origin}${path}`
+      available = true
+      const initial = await request.get(url, { headers })
+      expect.soft(initial.status(), `${path}: initial`).toBe(200)
+      expect.soft(initial.headers()['x-cache'], `${path}: initial`).toBe('MISS')
+      const healthy = await request.get(url, { headers })
+      expect.soft(healthy.status(), `${path}: healthy hit`).toBe(200)
+      expect.soft(healthy.headers()['x-cache'], `${path}: healthy hit`).toBe('HIT')
+      const etag = healthy.headers().etag
+      if (conditional) expect.soft(etag, `${path}: etag`).toBeDefined()
+
+      available = false
+      const unavailable = await request.get(url, {
+        headers: conditional ? { ...headers, 'If-None-Match': etag } : headers,
+      })
+      expect.soft(unavailable.status(), `${path}: unavailable`).toBe(503)
+      expect.soft(unavailable.headers()['cache-control'], `${path}: unavailable`).toBe('no-store')
+      expect.soft(unavailable.headers()['retry-after'], `${path}: unavailable`).toBe('17')
+      expect.soft(unavailable.headers()['x-cache'], `${path}: unavailable`).not.toBe('HIT')
+
+      available = true
+      const recovered = await request.get(url, { headers })
+      expect.soft(recovered.status(), `${path}: recovered`).toBe(200)
+      expect.soft(recovered.headers()['x-cache'], `${path}: recovered`).toBe('HIT')
+    }
+
+    const actionDir = resolvePath(
+      import.meta.dirname,
+      '../fixtures/app/dist/server/app/get-data-props/_slug_',
+    )
+    const actionBundle = (await readdir(actionDir)).find(
+      name => name.startsWith('actions_') && name.endsWith('.js'),
+    )
+    if (actionBundle == null) throw new Error('Action bundle not found')
+    const actionId = `app/get-data-props/_slug_/${basename(actionBundle, '.js')}#refreshGetData`
+    const races: { path: string; headers: Record<string, string> }[] = [
+      { path: '/cache-availability-metadata/race-fast', headers: {} },
+      {
+        path: '/cache-availability-metadata/race-response',
+        headers: { Cookie: 'rari-action-form-state=bnVsbA' },
+      },
+      { path: '/cache-availability-metadata/race-rsc', headers: { Accept: 'text/x-component' } },
+    ]
+    for (const { path, headers } of races) {
+      const url = `${origin}${path}`
+      const initial = await request.get(url, { headers })
+      expect(initial.headers()['x-cache']).toBe('MISS')
+      const cached = await request.get(url, { headers })
+      expect(cached.headers()['x-cache']).toBe('HIT')
+      holdNext = true
+      const pending = request.get(url, { headers })
+      await expect.poll(() => heldResponse != null, { timeout: 10_000 }).toBe(true)
+      const action = await request.post(url, {
+        headers: {
+          'Content-Type': 'text/plain;charset=UTF-8',
+          'rsc-action-id': actionId,
+          'rari-router-state': JSON.stringify({ pathname: path, search: '' }),
+          'Origin': origin,
+        },
+        data: '[]',
+        timeout: 15_000,
+      })
+      expect(action.status()).toBe(200)
+      expect(action.headers()['x-action-revalidated-path']).toBe(path)
+      if (heldResponse == null) throw new Error('Missing held metadata response')
+      heldResponse.writeHead(200)
+      heldResponse.end('healthy')
+      heldResponse = undefined
+      const afterInvalidation = await pending
+      expect.soft(afterInvalidation.status(), path).toBe(200)
+      expect.soft(afterInvalidation.headers()['x-cache'], path).toBe('MISS')
+    }
+  } finally {
+    if (heldResponse != null && !heldResponse.writableEnded) heldResponse.end('healthy')
+    child.kill('SIGTERM')
+    await exited
+    await close(backend)
+  }
+})

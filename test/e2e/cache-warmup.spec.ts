@@ -55,6 +55,19 @@ test.describe('Cache warmup', () => {
     expect(removed.headers()['x-cache']).not.toBe('HIT')
   })
 
+  test('checks a metadata export that becomes available after caching', async ({ request }) => {
+    const url = `/cache-availability-late/${Date.now()}-${Math.random()}`
+    const healthy = await request.get(url)
+    expect(healthy.status()).toBe(200)
+    expect(healthy.headers()['x-cache']).toBe('MISS')
+
+    const unavailable = await request.get(url)
+    expect(unavailable.status()).toBe(503)
+    expect(unavailable.headers()['cache-control']).toBe('no-store')
+    expect(unavailable.headers()['retry-after']).toBe('17')
+    expect(unavailable.headers()['x-cache']).not.toBe('HIT')
+  })
+
   test('runs loaded getData on fast hits without inspecting the bundle', async ({ request }) => {
     const directory = resolve(
       import.meta.dirname,

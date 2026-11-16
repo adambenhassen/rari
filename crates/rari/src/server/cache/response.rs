@@ -32,6 +32,8 @@ pub struct PrebuiltResponse {
     pub is_not_found: bool,
     /// The page exports getData, even when it returns no props.
     pub has_page_data: bool,
+    /// A page or layout exports generateMetadata.
+    pub has_dynamic_metadata: bool,
     pub tags: Vec<String>,
     pub cached_at: Instant,
     /// Matched route pattern, reported as `x-rari-route` on hits (guest
@@ -502,6 +504,14 @@ impl ResponseCache {
     }
 
     pub async fn get(&self, key: &str) -> Option<CachedResponse> {
+        self.get_inner(key, true).await
+    }
+
+    pub(crate) async fn get_untracked(&self, key: &str) -> Option<CachedResponse> {
+        self.get_inner(key, false).await
+    }
+
+    async fn get_inner(&self, key: &str, track_metrics: bool) -> Option<CachedResponse> {
         if !self.config.enabled {
             return None;
         }
@@ -509,12 +519,16 @@ impl ResponseCache {
         let bytes = match self.handler.get(&Self::ns(key)).await {
             Ok(Some(b)) => b,
             Ok(None) => {
-                self.cache_misses.fetch_add(1, Ordering::Relaxed);
+                if track_metrics {
+                    self.cache_misses.fetch_add(1, Ordering::Relaxed);
+                }
                 return None;
             }
             Err(e) => {
                 tracing::debug!(error = %e, key = %key, "cache get failed");
-                self.cache_misses.fetch_add(1, Ordering::Relaxed);
+                if track_metrics {
+                    self.cache_misses.fetch_add(1, Ordering::Relaxed);
+                }
                 return None;
             }
         };
@@ -525,7 +539,9 @@ impl ResponseCache {
                 tracing::warn!(error = %e, key = %key, "cache deserialize failed; evicting");
                 let _ = self.handler.invalidate(&Self::ns(key)).await;
                 self.resync_entry_count();
-                self.cache_misses.fetch_add(1, Ordering::Relaxed);
+                if track_metrics {
+                    self.cache_misses.fetch_add(1, Ordering::Relaxed);
+                }
                 return None;
             }
         };
@@ -533,11 +549,15 @@ impl ResponseCache {
         if !response.is_valid() {
             let _ = self.handler.invalidate(&Self::ns(key)).await;
             self.resync_entry_count();
-            self.cache_misses.fetch_add(1, Ordering::Relaxed);
+            if track_metrics {
+                self.cache_misses.fetch_add(1, Ordering::Relaxed);
+            }
             return None;
         }
 
-        self.cache_hits.fetch_add(1, Ordering::Relaxed);
+        if track_metrics {
+            self.cache_hits.fetch_add(1, Ordering::Relaxed);
+        }
         Some(response)
     }
 
@@ -1364,6 +1384,7 @@ mod tests {
                 cache_control: "public".to_string(),
                 is_not_found: false,
                 has_page_data: false,
+                has_dynamic_metadata: false,
                 tags: Vec::new(),
                 cached_at: Instant::now(),
                 route: None,
@@ -1399,6 +1420,7 @@ mod tests {
                 cache_control: "public".to_string(),
                 is_not_found: false,
                 has_page_data: false,
+                has_dynamic_metadata: false,
                 tags: Vec::new(),
                 cached_at: Instant::now(),
                 route: None,
@@ -1439,6 +1461,7 @@ mod tests {
                 cache_control: "public".to_string(),
                 is_not_found: false,
                 has_page_data: false,
+                has_dynamic_metadata: false,
                 tags: Vec::new(),
                 cached_at: Instant::now(),
                 route: None,
@@ -1483,6 +1506,7 @@ mod tests {
                         cache_control: "public".to_string(),
                         is_not_found: false,
                         has_page_data: false,
+                        has_dynamic_metadata: false,
                         tags: Vec::new(),
                         cached_at: Instant::now(),
                         route: None,
@@ -1518,6 +1542,7 @@ mod tests {
                 cache_control: "public, max-age=1".to_string(),
                 is_not_found: false,
                 has_page_data: false,
+                has_dynamic_metadata: false,
                 tags: Vec::new(),
                 cached_at,
                 route: None,
@@ -1543,6 +1568,7 @@ mod tests {
                 cache_control: "public".to_string(),
                 is_not_found: false,
                 has_page_data: false,
+                has_dynamic_metadata: false,
                 tags: Vec::new(),
                 cached_at,
                 route: None,
@@ -1567,6 +1593,7 @@ mod tests {
             cache_control: "public, max-age=1".to_string(),
             is_not_found: false,
             has_page_data: false,
+            has_dynamic_metadata: false,
             tags: Vec::new(),
             cached_at: stale_at,
             route: None,
@@ -1583,6 +1610,7 @@ mod tests {
             cache_control: "public, max-age=60".to_string(),
             is_not_found: false,
             has_page_data: false,
+            has_dynamic_metadata: false,
             tags: Vec::new(),
             cached_at: Instant::now(),
             route: None,

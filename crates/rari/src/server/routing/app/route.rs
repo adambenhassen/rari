@@ -32,10 +32,10 @@ use super::{
 use crate::server::metrics_http::{RequestTimer, route_label};
 use crate::{
     rendering::layout::{
-        ChunkedContentType, LayoutRenderer, PageData, RenderResult, create_layout_context,
-        drain_chunked_stream, is_rari_page_not_found, pathname_from_router_state_header,
-        router_state_from_headers, shared_layout_paths_for_navigation,
-        tree_from_router_state_header,
+        ChunkedContentType, LayoutRenderContext, LayoutRenderer, PageData, RenderResult,
+        create_layout_context, drain_chunked_stream, is_rari_page_not_found,
+        pathname_from_router_state_header, router_state_from_headers,
+        shared_layout_paths_for_navigation, tree_from_router_state_header,
     },
     server::{
         ServerState,
@@ -56,8 +56,25 @@ use crate::{
             },
         },
         middleware::request_context::RequestContext,
+        routing::AppRouteMatch,
     },
 };
+
+async fn metadata_allows_cache_hit(
+    state: &ServerState,
+    route_match: &AppRouteMatch,
+    context: &mut LayoutRenderContext,
+    request_context: &Arc<RequestContext>,
+    collected: &mut bool,
+) -> bool {
+    if !*collected {
+        context.metadata =
+            collect_page_metadata(state, route_match, context, Some(Arc::clone(request_context)))
+                .await;
+        *collected = true;
+    }
+    context.metadata.is_some() && request_context.response_unavailable_after().is_none()
+}
 
 fn fast_cache_response(
     prebuilt: &response::PrebuiltResponse,
@@ -200,7 +217,7 @@ pub async fn handle_app_route(
             response::ResponseCache::generate_static_fast_cache_key(path, query_params_ref, None);
 
         if let Some(prebuilt) = state.static_fast_cache.get(&fast_key) {
-            if !prebuilt.has_page_data {
+            if !prebuilt.has_page_data && !prebuilt.has_dynamic_metadata {
                 return Ok(fast_cache_response(&prebuilt, &headers, accept_encoding));
             }
             deferred_fast_key = Some(fast_key);
@@ -309,13 +326,25 @@ pub async fn handle_app_route(
         }
     }
 
+    let mut metadata_collected = false;
     if route_match.not_found.is_none()
         && request_context.response_unavailable_after().is_none()
         && let Some(fast_key) = deferred_fast_key
         && let Some(prebuilt) = state.static_fast_cache.get(&fast_key)
+        && (!prebuilt.has_dynamic_metadata
+            || metadata_allows_cache_hit(
+                &state,
+                &route_match,
+                &mut context,
+                &request_context,
+                &mut metadata_collected,
+            )
+            .await)
+        && let Some(current) = state.static_fast_cache.get(&fast_key)
+        && Arc::ptr_eq(&prebuilt, &current)
     {
         return Ok(apply_request_no_store(
-            fast_cache_response(&prebuilt, &headers, accept_encoding),
+            fast_cache_response(&current, &headers, accept_encoding),
             &request_context,
         ));
     }
@@ -325,13 +354,15 @@ pub async fn handle_app_route(
             let use_streaming = should_use_streaming(&route_match, &state.config);
 
             if use_streaming {
-                context.metadata = collect_page_metadata(
-                    &state,
-                    &route_match,
-                    &context,
-                    Some(Arc::clone(&request_context)),
-                )
-                .await;
+                if !metadata_collected {
+                    context.metadata = collect_page_metadata(
+                        &state,
+                        &route_match,
+                        &context,
+                        Some(Arc::clone(&request_context)),
+                    )
+                    .await;
+                }
 
                 let response = render_rsc_navigation_streaming(
                     Arc::new(state),
@@ -349,7 +380,16 @@ pub async fn handle_app_route(
                 && context.template_navigation_id.is_none()
                 && !warmup_publication_in_progress
                 && request_context.response_unavailable_after().is_none()
-                && let Some(cached) = state.response_cache.get(&cache_key).await
+                && state.response_cache.get(&cache_key).await.is_some()
+                && metadata_allows_cache_hit(
+                    &state,
+                    &route_match,
+                    &mut context,
+                    &request_context,
+                    &mut metadata_collected,
+                )
+                .await
+                && let Some(cached) = state.response_cache.get_untracked(&cache_key).await
             {
                 let merged_vary = merge_vary_with_accept(cached.headers.get("vary"));
 
@@ -377,13 +417,15 @@ pub async fn handle_app_route(
                 ));
             }
 
-            context.metadata = collect_page_metadata(
-                &state,
-                &route_match,
-                &context,
-                Some(Arc::clone(&request_context)),
-            )
-            .await;
+            if !metadata_collected {
+                context.metadata = collect_page_metadata(
+                    &state,
+                    &route_match,
+                    &context,
+                    Some(Arc::clone(&request_context)),
+                )
+                .await;
+            }
 
             let rsc_result = layout_renderer
                 .render_route(&route_match, &context, Some(Arc::clone(&request_context)))
@@ -514,7 +556,16 @@ pub async fn handle_app_route(
             if route_match.not_found.is_none()
                 && !warmup_publication_in_progress
                 && request_context.response_unavailable_after().is_none()
-                && let Some(cached) = state.response_cache.get(&cache_key).await
+                && state.response_cache.get(&cache_key).await.is_some()
+                && metadata_allows_cache_hit(
+                    &state,
+                    &route_match,
+                    &mut context,
+                    &request_context,
+                    &mut metadata_collected,
+                )
+                .await
+                && let Some(cached) = state.response_cache.get_untracked(&cache_key).await
             {
                 if let (Some(cached_etag), Some(client_etag)) = (&cached.metadata.etag, client_etag)
                     && cached_etag == client_etag
@@ -611,13 +662,17 @@ pub async fn handle_app_route(
                 let metadata_context = context.clone();
                 let metadata_request_context = Arc::clone(&request_context);
                 let metadata_task = tokio::spawn(async move {
-                    let metadata = collect_page_metadata(
-                        &metadata_state,
-                        &metadata_route_match,
-                        &metadata_context,
-                        Some(metadata_request_context),
-                    )
-                    .await;
+                    let metadata = if metadata_collected {
+                        metadata_context.metadata.clone()
+                    } else {
+                        collect_page_metadata(
+                            &metadata_state,
+                            &metadata_route_match,
+                            &metadata_context,
+                            Some(metadata_request_context),
+                        )
+                        .await
+                    };
                     let _ = metadata_tx.send(metadata.clone());
                     metadata
                 });
@@ -780,14 +835,15 @@ pub async fn handle_app_route(
                 return Ok(response);
             }
 
-            let metadata = collect_page_metadata(
-                &state,
-                &route_match,
-                &context,
-                Some(Arc::clone(&request_context)),
-            )
-            .await;
-            context.metadata = metadata;
+            if !metadata_collected {
+                context.metadata = collect_page_metadata(
+                    &state,
+                    &route_match,
+                    &context,
+                    Some(Arc::clone(&request_context)),
+                )
+                .await;
+            }
 
             let render_result = match layout_renderer
                 .render_route_with_streaming(
@@ -989,6 +1045,7 @@ pub async fn handle_app_route(
                             cache_control: cache_control_value.to_string(),
                             is_not_found: route_match.not_found.is_some(),
                             has_page_data,
+                            has_dynamic_metadata: request_context.has_dynamic_metadata(),
                             tags: response_cache_tags.clone(),
                             cached_at: Instant::now(),
                             route: None,

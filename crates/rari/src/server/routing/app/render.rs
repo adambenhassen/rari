@@ -89,25 +89,12 @@ pub async fn collect_page_metadata(
     context: &LayoutRenderContext,
     request_context: Option<Arc<RequestContext>>,
 ) -> Option<PageMetadata> {
-    let dist_server_path = match env::current_dir() {
-        Ok(cwd) => {
-            let path = cwd.join("dist/server");
-            fs::canonicalize(&path).await.ok()
-        }
-        Err(_) => None,
-    };
-
-    let Some(base_path) = dist_server_path else {
-        tracing::debug!("Could not determine dist/server path for metadata collection");
-        return None;
-    };
+    let base_path = state.project_root.join("dist/server");
 
     let mut layout_paths = Vec::with_capacity(route_match.layouts.len());
     for layout in &route_match.layouts {
         let file_path = component_dist_path(&base_path, &layout.file_path);
-        if fs::try_exists(&file_path).await.unwrap_or(false) {
-            layout_paths.push(path_to_file_url(&file_path));
-        }
+        layout_paths.push(path_to_file_url(&file_path));
     }
 
     let page_source_path = route_match
@@ -116,10 +103,6 @@ pub async fn collect_page_metadata(
         .map(|entry| entry.file_path.as_str())
         .unwrap_or(route_match.route.file_path.as_str());
     let page_file_path = component_dist_path(&base_path, page_source_path);
-
-    if !fs::try_exists(&page_file_path).await.unwrap_or(false) {
-        return None;
-    }
 
     let page_path = path_to_file_url(&page_file_path);
 
@@ -130,6 +113,9 @@ pub async fn collect_page_metadata(
     let page_props = match create_page_props(route_match, context) {
         Ok(page_props) => page_props,
         Err(error) => {
+            if let Some(context) = request_context.as_ref() {
+                context.disable_cache_writes();
+            }
             tracing::error!("Failed to create page props for metadata collection: {}", error);
             return None;
         }
@@ -137,7 +123,7 @@ pub async fn collect_page_metadata(
 
     match runtime
         .collect_metadata(
-            request_context,
+            request_context.clone(),
             layout_paths,
             page_path.clone(),
             context.params.clone(),
@@ -158,11 +144,17 @@ pub async fn collect_page_metadata(
                 Some(metadata)
             }
             Err(e) => {
+                if let Some(context) = request_context.as_ref() {
+                    context.disable_cache_writes();
+                }
                 tracing::error!("Failed to deserialize metadata: {}", e);
                 None
             }
         },
         Err(e) => {
+            if let Some(context) = request_context.as_ref() {
+                context.disable_cache_writes();
+            }
             tracing::error!("Failed to collect metadata from runtime: {}", e);
             None
         }

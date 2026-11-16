@@ -1,4 +1,4 @@
-import type { Server, ServerResponse } from 'node:http'
+import type { ServerResponse } from 'node:http'
 import { spawn } from 'node:child_process'
 import { readdir, rename } from 'node:fs/promises'
 import { createServer } from 'node:http'
@@ -6,28 +6,7 @@ import { basename, resolve as resolvePath } from 'node:path'
 import process from 'node:process'
 import { expect, test } from '@playwright/test'
 import { getBinaryPath } from '../../../packages/rari/src/cli/platform'
-
-async function listen(server: Readonly<Server>): Promise<number> {
-  await new Promise<void>((resolve, reject) => {
-    server.once('error', reject)
-    server.listen(0, '127.0.0.1', () => {
-      server.off('error', reject)
-      resolve()
-    })
-  })
-  const address = server.address()
-  if (address == null || typeof address === 'string') throw new Error('Missing TCP address')
-  return address.port
-}
-
-async function close(server: Readonly<Server>): Promise<void> {
-  await new Promise<void>((resolve, reject) => {
-    server.close(error => {
-      if (error) reject(error)
-      else resolve()
-    })
-  })
-}
+import { close, listen } from './test-server'
 
 test('Cache warmup does not delay a slow request', async ({ request }) => {
   test.setTimeout(90_000)
