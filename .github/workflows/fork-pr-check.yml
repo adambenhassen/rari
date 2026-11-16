@@ -134,3 +134,10 @@ jobs:
           pnpm exec playwright test test/e2e/dynamic-routes.spec.ts test/e2e/cache-warmup.spec.ts
           --grep='getData props|does not cache a getData throw or invalid props|serves a cached response when getData fails|Cache warmup'
           --project='Desktop Chrome' --workers=1
+
+      - name: Test server actions
+        if: steps.jemalloc.outputs.enabled == 'true'
+        run: >-
+          pnpm exec playwright test test/e2e/server-actions.spec.ts
+          test/e2e/server-actions-progressive-enhancement.spec.ts
+          --project='Desktop Chrome' --workers=1

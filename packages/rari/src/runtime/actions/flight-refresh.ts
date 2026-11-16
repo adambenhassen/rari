@@ -38,9 +38,11 @@ export function scheduleActionFlightRefresh(
   if (shouldSkipRefreshForActionResult(actionResult)) return
 
   void Promise.resolve()
-    .then(() => {
-      const refreshElement = flightResponse.f
-      if (refreshElement == null) return
+    .then(async () => {
+      const flight = flightResponse.f
+      const refreshElement: unknown =
+        flight instanceof Promise && flight.constructor === Promise ? await flight : flight
+      if (refreshElement == null || refreshElement === '') return
 
       if (!isActionRefreshRoot(refreshElement)) return
 
