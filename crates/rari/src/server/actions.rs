@@ -33,11 +33,17 @@ use crate::{
     runtime::factory::JsRuntimeInterface,
     server::{
         ServerState,
-        cache::revalidate::{invalidate_route_caches, invalidate_route_caches_on},
+        cache::{
+            response::ResponseCache,
+            revalidate::{invalidate_route_caches, invalidate_route_caches_on},
+        },
         config::RedirectConfig,
         error_response,
         host::utils::http::{extract_headers, extract_search_params, is_origin_allowed},
         middleware::request_context::{PendingCookie, PendingCookieKey, RequestContext},
+        routing::app::cache::{
+            request_cookie_header, response_cache_key, route_query_params_for_cache,
+        },
     },
 };
 
@@ -558,6 +564,24 @@ async fn compose_action_refresh_route(
         })?,
     };
 
+    let cache_query = route_query_params_for_cache(&query_params);
+    let fast_key =
+        ResponseCache::generate_static_fast_cache_key(&pathname, cache_query.as_ref(), None);
+    let mut known_no_page_data =
+        state.static_fast_cache.get(&fast_key).is_some_and(|entry| !entry.has_page_data);
+    if !known_no_page_data {
+        let key = response_cache_key(
+            &pathname,
+            cache_query.as_ref(),
+            None,
+            request_cookie_header(headers),
+        );
+        known_no_page_data = state
+            .response_cache
+            .get_untracked(&key)
+            .await
+            .is_some_and(|entry| !entry.metadata.has_page_data);
+    }
     let search_params = extract_search_params(query_params);
     let request_headers = extract_headers(headers);
     let mut context = create_layout_context(
@@ -567,7 +591,7 @@ async fn compose_action_refresh_route(
         route_match.pathname.clone(),
     );
 
-    if route_match.not_found.is_none() {
+    if route_match.not_found.is_none() && !known_no_page_data {
         let layout_renderer = LayoutRenderer::with_shared_cache(
             Arc::clone(&state.renderer),
             Arc::clone(&state.layout_html_cache),

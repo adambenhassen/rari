@@ -3,7 +3,7 @@ use std::{
     env,
     sync::{
         Arc,
-        atomic::{AtomicUsize, Ordering},
+        atomic::{AtomicBool, AtomicUsize, Ordering},
     },
     time::{Duration, Instant},
 };
@@ -77,6 +77,14 @@ pub struct CacheMetadata {
     pub ttl: u64,
     pub etag: Option<String>,
     pub tags: Vec<String>,
+    #[serde(default = "default_true")]
+    pub has_page_data: bool,
+    #[serde(default = "default_true")]
+    pub has_dynamic_metadata: bool,
+}
+
+const fn default_true() -> bool {
+    true
 }
 
 #[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
@@ -436,6 +444,17 @@ pub struct CacheMetrics {
     pub memory_usage_bytes: usize,
 }
 
+pub(crate) struct CacheCandidate {
+    pub response: CachedResponse,
+    valid: Option<Arc<AtomicBool>>,
+}
+
+impl CacheCandidate {
+    pub(crate) fn is_guarded(&self) -> bool {
+        self.valid.is_some()
+    }
+}
+
 pub struct ResponseCache {
     handler: Arc<dyn CacheHandler>,
     pub config: CacheConfig,
@@ -558,6 +577,61 @@ impl ResponseCache {
         let hash = hasher.finish();
 
         format!("W/\"{hash:x}\"")
+    }
+
+    pub(crate) async fn candidate(&self, key: &str) -> Option<CacheCandidate> {
+        if !self.config.enabled {
+            return None;
+        }
+        let entry = match self.handler.get_guarded(&Self::ns(key)).await {
+            Ok(Some(entry)) => entry,
+            Ok(None) => return None,
+            Err(error) => {
+                tracing::debug!(%error, %key, "cache get failed");
+                return None;
+            }
+        };
+        let response: CachedResponse = match serde_json::from_slice(&entry.bytes) {
+            Ok(response) => response,
+            Err(error) => {
+                tracing::warn!(%error, %key, "cache deserialize failed; evicting");
+                let _ = self.handler.invalidate(&Self::ns(key)).await;
+                self.resync_entry_count();
+                return None;
+            }
+        };
+        if !response.is_valid() {
+            let _ = self.handler.invalidate(&Self::ns(key)).await;
+            self.resync_entry_count();
+            return None;
+        }
+        Some(CacheCandidate { response, valid: entry.valid })
+    }
+
+    pub(crate) async fn validate_candidate(
+        &self,
+        key: &str,
+        candidate: CacheCandidate,
+    ) -> Option<CachedResponse> {
+        if !candidate.response.is_valid() {
+            return None;
+        }
+        match candidate.valid {
+            Some(valid) if valid.load(Ordering::Acquire) => Some(candidate.response),
+            Some(_) => None,
+            None => self.get_untracked(key).await,
+        }
+    }
+
+    pub(crate) fn record_lookup(&self, hit: bool) {
+        if !self.config.enabled {
+            return;
+        }
+        if hit {
+            self.cache_hits.fetch_add(1, Ordering::Relaxed);
+        } else {
+            self.cache_misses.fetch_add(1, Ordering::Relaxed);
+        }
     }
 
     pub async fn get(&self, key: &str) -> Option<CachedResponse> {
@@ -849,7 +923,7 @@ mod tests {
     use tokio::time;
 
     use super::*;
-    use crate::server::cache::handler::{CacheError, SetOutcome};
+    use crate::server::cache::handler::{CacheError, CacheRead, SetOutcome};
 
     fn create_test_response(body: &str, ttl: u64) -> CachedResponse {
         CachedResponse {
@@ -860,11 +934,116 @@ mod tests {
                 ttl,
                 etag: Some("test-etag".to_string()),
                 tags: vec!["test-tag".to_string()],
+                has_page_data: true,
+                has_dynamic_metadata: true,
             },
             compressed_zstd: None,
             compressed_br: None,
             compressed_gzip: None,
         }
+    }
+
+    #[derive(Debug, Default)]
+    struct CountingMemoryHandler {
+        inner: MemoryCacheHandler,
+        reads: AtomicUsize,
+    }
+
+    #[async_trait::async_trait]
+    impl CacheHandler for CountingMemoryHandler {
+        async fn get(&self, key: &str) -> Result<Option<Vec<u8>>, CacheError> {
+            self.reads.fetch_add(1, Ordering::Relaxed);
+            self.inner.get(key).await
+        }
+        async fn get_guarded(&self, key: &str) -> Result<Option<CacheRead>, CacheError> {
+            self.reads.fetch_add(1, Ordering::Relaxed);
+            self.inner.get_guarded(key).await
+        }
+        async fn set(&self, key: &str, value: Vec<u8>, ttl: u64) -> Result<SetOutcome, CacheError> {
+            self.inner.set(key, value, ttl).await
+        }
+        async fn set_with_tags(
+            &self,
+            key: &str,
+            value: Vec<u8>,
+            ttl: u64,
+            tags: &[String],
+        ) -> Result<SetOutcome, CacheError> {
+            self.inner.set_with_tags(key, value, ttl, tags).await
+        }
+        async fn invalidate(&self, key: &str) -> Result<bool, CacheError> {
+            self.inner.invalidate(key).await
+        }
+        async fn invalidate_by_tag(&self, tag: &str) -> Result<(), CacheError> {
+            self.inner.invalidate_by_tag(tag).await
+        }
+        async fn clear(&self) -> Result<(), CacheError> {
+            self.inner.clear().await
+        }
+        fn get_all_keys(&self) -> Vec<String> {
+            self.inner.get_all_keys()
+        }
+    }
+
+    #[tokio::test]
+    async fn guarded_candidate_needs_only_one_backend_read() {
+        let handler = Arc::new(CountingMemoryHandler::default());
+        let cache = ResponseCache::new_with_handler(CacheConfig::default(), handler.clone());
+        cache.set("a".into(), create_test_response("cached", 60)).await;
+        let candidate = cache.candidate("a").await.unwrap();
+        assert_eq!(cache.validate_candidate("a", candidate).await.unwrap().body, "cached");
+        assert_eq!(handler.reads.load(Ordering::Relaxed), 1);
+    }
+
+    #[tokio::test]
+    async fn candidate_tracks_invalidation_and_unrelated_writes() {
+        let cache = ResponseCache::new(CacheConfig {
+            max_entries: 10,
+            default_ttl: 60,
+            enabled: true,
+            ..Default::default()
+        });
+        cache.set("a".into(), create_test_response("old", 60)).await;
+        let candidate = cache.candidate("a").await.unwrap();
+        cache.set("b".into(), create_test_response("other", 60)).await;
+        assert_eq!(cache.validate_candidate("a", candidate).await.unwrap().body, "old");
+        let candidate = cache.candidate("a").await.unwrap();
+        cache.invalidate_by_tag("test-tag").await;
+        assert!(cache.validate_candidate("a", candidate).await.is_none());
+        cache.record_lookup(false);
+        assert_eq!(cache.get_metrics().cache_hits, 0);
+        assert_eq!(cache.get_metrics().cache_misses, 1);
+    }
+
+    #[tokio::test]
+    async fn candidate_is_rejected_after_replacement_eviction_and_clear() {
+        let cache = ResponseCache::new(CacheConfig {
+            max_entries: 1,
+            default_ttl: 60,
+            enabled: true,
+            ..Default::default()
+        });
+        cache.set("a".into(), create_test_response("old", 60)).await;
+        let old = cache.candidate("a").await.unwrap();
+        cache.set("a".into(), create_test_response("new", 60)).await;
+        assert!(cache.validate_candidate("a", old).await.is_none());
+        let evicted = cache.candidate("a").await.unwrap();
+        cache.set("b".into(), create_test_response("b", 60)).await;
+        assert!(cache.validate_candidate("a", evicted).await.is_none());
+        let cleared = cache.candidate("b").await.unwrap();
+        cache.clear().await;
+        assert!(cache.validate_candidate("b", cleared).await.is_none());
+    }
+
+    #[test]
+    fn legacy_metadata_defaults_to_rechecking_modules() {
+        let mut value = serde_json::to_value(create_test_response("old", 60)).unwrap();
+        let metadata = value["metadata"].as_object_mut().unwrap();
+        metadata.remove("has_page_data");
+        metadata.remove("has_dynamic_metadata");
+        let cached: CachedResponse = serde_json::from_value(value).unwrap();
+        assert!(cached.metadata.has_page_data);
+        assert!(cached.metadata.has_dynamic_metadata);
     }
 
     #[test]
@@ -1369,6 +1548,8 @@ mod tests {
                 ttl: 120,
                 etag: Some("W/\"deadbeef\"".to_string()),
                 tags: vec!["alpha".to_string(), "beta".to_string()],
+                has_page_data: true,
+                has_dynamic_metadata: true,
             },
             compressed_zstd: Some(Bytes::from_static(b"zstd-bytes")),
             compressed_br: Some(Bytes::from_static(b"br-bytes")),

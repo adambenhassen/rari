@@ -669,7 +669,7 @@ impl LayoutRenderer {
                     }}
 
                     if (typeof module.getData !== 'function') {{
-                        return {{ hasGetData: false, notFound: false, failed: false, props: null }};
+                        return {{ hasGetData: 'getData' in module, notFound: false, failed: false, props: null }};
                     }}
 
                     const pageProps = {page_props_json};

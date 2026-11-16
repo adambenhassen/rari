@@ -16,7 +16,7 @@ use std::{
     num::NonZeroUsize,
     sync::{
         Arc,
-        atomic::{AtomicUsize, Ordering},
+        atomic::{AtomicBool, AtomicUsize, Ordering},
     },
     time::{Duration, Instant},
 };
@@ -42,9 +42,27 @@ pub enum CacheError {
     Backend(String),
 }
 
+/// A cache value and an optional token invalidated before the value is removed or replaced.
+#[derive(Debug)]
+#[non_exhaustive]
+pub struct CacheRead {
+    pub bytes: Vec<u8>,
+    pub valid: Option<Arc<AtomicBool>>,
+}
+
+impl CacheRead {
+    pub fn new(bytes: Vec<u8>, valid: Option<Arc<AtomicBool>>) -> Self {
+        Self { bytes, valid }
+    }
+}
+
 #[async_trait::async_trait]
 pub trait CacheHandler: Send + Sync + fmt::Debug {
     async fn get(&self, key: &str) -> Result<Option<Vec<u8>>, CacheError>;
+
+    async fn get_guarded(&self, key: &str) -> Result<Option<CacheRead>, CacheError> {
+        Ok(self.get(key).await?.map(|bytes| CacheRead { bytes, valid: None }))
+    }
 
     async fn set(&self, key: &str, value: Vec<u8>, ttl_secs: u64)
     -> Result<SetOutcome, CacheError>;
@@ -115,6 +133,7 @@ pub struct SetOutcome {
 
 #[derive(Debug)]
 struct MemEntry {
+    valid: Arc<AtomicBool>,
     bytes: Vec<u8>,
     expires_at: Option<Instant>,
     tags: Vec<String>,
@@ -210,6 +229,9 @@ impl MemoryCacheHandler {
     }
 
     fn remove_entry(&self, key: &str) -> Option<MemEntry> {
+        if let Some(entry) = self.cache.get(key) {
+            entry.valid.store(false, Ordering::Release);
+        }
         let (_key, entry) = self.cache.remove(key)?;
         self.remove_from_tag_index(key, &entry.tags);
         self.lru.lock().pop(key);
@@ -255,10 +277,21 @@ impl Default for MemoryCacheHandler {
 #[async_trait::async_trait]
 impl CacheHandler for MemoryCacheHandler {
     async fn get(&self, key: &str) -> Result<Option<Vec<u8>>, CacheError> {
+        Ok(self.get_guarded(key).await?.map(|entry| entry.bytes))
+    }
+
+    async fn get_guarded(&self, key: &str) -> Result<Option<CacheRead>, CacheError> {
         let (snapshot, observed_expires_at) = match self.cache.get(key) {
             Some(entry) => {
                 let expired = Self::entry_is_expired(&entry);
-                let bytes = if expired { None } else { Some(entry.bytes.clone()) };
+                let bytes = if expired {
+                    None
+                } else {
+                    Some(CacheRead {
+                        bytes: entry.bytes.clone(),
+                        valid: Some(Arc::clone(&entry.valid)),
+                    })
+                };
                 (bytes, Some((entry.expires_at, expired)))
             }
             None => (None, None),
@@ -267,7 +300,7 @@ impl CacheHandler for MemoryCacheHandler {
         match snapshot {
             Some(bytes) => {
                 self.touch_lru(key);
-                tracing::debug!(key = %key, size_bytes = bytes.len(), "memory cache hit");
+                tracing::debug!(key = %key, size_bytes = bytes.bytes.len(), "memory cache hit");
                 Ok(Some(bytes))
             }
             None => {
@@ -366,12 +399,17 @@ impl CacheHandler for MemoryCacheHandler {
         }
 
         self.total_bytes.fetch_add(value.len(), Ordering::Relaxed);
-        let entry =
-            MemEntry { bytes: value, expires_at: Self::expires_at(ttl_secs), tags: tags.to_vec() };
+        let entry = MemEntry {
+            valid: Arc::new(AtomicBool::new(true)),
+            bytes: value,
+            expires_at: Self::expires_at(ttl_secs),
+            tags: tags.to_vec(),
+        };
         // A concurrent set of the same key can land between the remove_entry
         // above and this insert; the overwritten entry's bytes must come off
         // the counter or they leak until the byte budget is exhausted.
         if let Some(old_entry) = self.cache.insert(key.to_string(), entry) {
+            old_entry.valid.store(false, Ordering::Release);
             let overwritten = old_entry.bytes.len();
             self.sub_stored_bytes(overwritten);
             self.remove_from_tag_index(key, &old_entry.tags);
@@ -427,6 +465,7 @@ impl CacheHandler for MemoryCacheHandler {
         // untracked (or tracked twice) forever.
         let mut removed_bytes = 0usize;
         self.cache.retain(|_, entry| {
+            entry.valid.store(false, Ordering::Release);
             removed_bytes = removed_bytes.saturating_add(entry.bytes.len());
             false
         });
@@ -444,6 +483,7 @@ impl CacheHandler for MemoryCacheHandler {
         let mut removed_bytes = 0usize;
         self.cache.retain(|key, entry| {
             if key.starts_with(&prefix) {
+                entry.valid.store(false, Ordering::Release);
                 removed_entries.push((key.clone(), entry.tags.clone()));
                 removed_bytes = removed_bytes.saturating_add(entry.bytes.len());
                 false

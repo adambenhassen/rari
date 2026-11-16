@@ -286,8 +286,34 @@ pub async fn handle_app_route(
         Arc::clone(&state.layout_html_cache),
     );
 
-    let mut has_page_data = true;
-    if route_match.not_found.is_none() {
+    let lookup_key = match render_mode {
+        RenderMode::Ssr => Some(response_cache_key(path, query_params_ref, None, cookie_header)),
+        RenderMode::RscNavigation
+            if !should_use_streaming(&route_match, &state.config)
+                && context.template_navigation_id.is_none() =>
+        {
+            Some(response_cache_key(path, query_params_ref, Some("rsc"), cookie_header))
+        }
+        _ => None,
+    };
+    let mut candidate = if !warmup_publication_in_progress
+        && deferred_fast_key.is_none()
+        && route_match.not_found.is_none()
+    {
+        if let Some(key) = lookup_key.as_deref() {
+            Some(state.response_cache.candidate(key).await)
+        } else {
+            None
+        }
+    } else {
+        None
+    };
+    let known_no_page_data = candidate
+        .as_ref()
+        .and_then(Option::as_ref)
+        .is_some_and(|entry| entry.is_guarded() && !entry.response.metadata.has_page_data);
+    let mut has_page_data = !known_no_page_data;
+    if route_match.not_found.is_none() && !known_no_page_data {
         match layout_renderer.get_page_data(&route_match, &context).await {
             Ok(page_data) => match page_data {
                 PageData::Missing => has_page_data = false,
@@ -376,21 +402,43 @@ pub async fn handle_app_route(
             }
             let cache_key = response_cache_key(path, query_params_ref, Some("rsc"), cookie_header);
 
-            if route_match.not_found.is_none()
-                && context.template_navigation_id.is_none()
+            let cached = if route_match.not_found.is_none()
                 && !warmup_publication_in_progress
                 && request_context.response_unavailable_after().is_none()
-                && state.response_cache.get(&cache_key).await.is_some()
-                && metadata_allows_cache_hit(
-                    &state,
-                    &route_match,
-                    &mut context,
-                    &request_context,
-                    &mut metadata_collected,
-                )
-                .await
-                && let Some(cached) = state.response_cache.get_untracked(&cache_key).await
+                && context.template_navigation_id.is_none()
             {
+                let entry = match candidate.take() {
+                    Some(entry) => entry,
+                    None => state.response_cache.candidate(&cache_key).await,
+                };
+                let allowed = if let Some(entry) = entry.as_ref() {
+                    (entry.is_guarded() && !entry.response.metadata.has_dynamic_metadata)
+                        || metadata_allows_cache_hit(
+                            &state,
+                            &route_match,
+                            &mut context,
+                            &request_context,
+                            &mut metadata_collected,
+                        )
+                        .await
+                } else {
+                    false
+                };
+                let cached = if allowed {
+                    if let Some(entry) = entry {
+                        state.response_cache.validate_candidate(&cache_key, entry).await
+                    } else {
+                        None
+                    }
+                } else {
+                    None
+                };
+                state.response_cache.record_lookup(cached.is_some());
+                cached
+            } else {
+                None
+            };
+            if let Some(cached) = cached {
                 let merged_vary = merge_vary_with_accept(cached.headers.get("vary"));
 
                 let mut response_builder = Response::builder()
@@ -524,6 +572,8 @@ pub async fn handle_app_route(
                             ttl: cache_policy.ttl,
                             etag: None,
                             tags: response_cache_tags,
+                            has_page_data,
+                            has_dynamic_metadata: request_context.has_dynamic_metadata(),
                         },
                         compressed_zstd: None,
                         compressed_br: None,
@@ -553,20 +603,42 @@ pub async fn handle_app_route(
 
             let client_etag = headers.get("if-none-match").and_then(|v| v.to_str().ok());
 
-            if route_match.not_found.is_none()
+            let cached = if route_match.not_found.is_none()
                 && !warmup_publication_in_progress
                 && request_context.response_unavailable_after().is_none()
-                && state.response_cache.get(&cache_key).await.is_some()
-                && metadata_allows_cache_hit(
-                    &state,
-                    &route_match,
-                    &mut context,
-                    &request_context,
-                    &mut metadata_collected,
-                )
-                .await
-                && let Some(cached) = state.response_cache.get_untracked(&cache_key).await
             {
+                let entry = match candidate.take() {
+                    Some(entry) => entry,
+                    None => state.response_cache.candidate(&cache_key).await,
+                };
+                let allowed = if let Some(entry) = entry.as_ref() {
+                    (entry.is_guarded() && !entry.response.metadata.has_dynamic_metadata)
+                        || metadata_allows_cache_hit(
+                            &state,
+                            &route_match,
+                            &mut context,
+                            &request_context,
+                            &mut metadata_collected,
+                        )
+                        .await
+                } else {
+                    false
+                };
+                let cached = if allowed {
+                    if let Some(entry) = entry {
+                        state.response_cache.validate_candidate(&cache_key, entry).await
+                    } else {
+                        None
+                    }
+                } else {
+                    None
+                };
+                state.response_cache.record_lookup(cached.is_some());
+                cached
+            } else {
+                None
+            };
+            if let Some(cached) = cached {
                 if let (Some(cached_etag), Some(client_etag)) = (&cached.metadata.etag, client_etag)
                     && cached_etag == client_etag
                 {
@@ -796,6 +868,8 @@ pub async fn handle_app_route(
                                 ttl: cache_policy.ttl,
                                 etag: Some(etag.clone()),
                                 tags: merged_tags,
+                                has_page_data,
+                                has_dynamic_metadata: request_context.has_dynamic_metadata(),
                             },
                             compressed_zstd,
                             compressed_br,
@@ -1062,6 +1136,8 @@ pub async fn handle_app_route(
                         ttl: cache_policy.ttl,
                         etag: Some(etag.clone()),
                         tags: response_cache_tags,
+                        has_page_data,
+                        has_dynamic_metadata: request_context.has_dynamic_metadata(),
                     },
                     compressed_zstd,
                     compressed_br,

@@ -63,6 +63,36 @@ test('Fast hits without getData do not wait for dynamic metadata', async ({ requ
     await expect
       .poll(() => logs.includes('Cache warmup: Completed'), { timeout: 60_000 })
       .toBe(true)
+    const staticCases = [
+      { path: '/cache-static/cookie', headers: { Cookie: 'rari-action-form-state=bnVsbA' } },
+      { path: '/cache-static/rsc', headers: { Accept: 'text/x-component' } },
+    ]
+    for (const { path, headers } of staticCases) {
+      const initial = await request.get(`${origin}${path}`, { headers })
+      expect(initial.status(), path).toBe(200)
+      expect(initial.headers()['x-cache'], path).toBe('MISS')
+    }
+    hold = true
+    const blockingStatic = request.get(`${origin}/cache-availability-metadata/block-static`, {
+      timeout: 15_000,
+    })
+    try {
+      await expect.poll(() => held.length, { timeout: 10_000 }).toBe(1)
+      for (const { path, headers } of staticCases) {
+        const hit = await request
+          .get(`${origin}${path}`, { headers, timeout: 3000 })
+          .catch(() => null)
+        expect.soft(hit, `${path}: response-cache hit timed out`).not.toBeNull()
+        if (hit != null) {
+          expect(hit.status(), path).toBe(200)
+          expect(hit.headers()['x-cache'], path).toBe('HIT')
+        }
+      }
+    } finally {
+      hold = false
+      for (const response of held.splice(0)) response.end('healthy')
+      await blockingStatic
+    }
     for (const path of ['/cache-availability-metadata/slow', '/cache-availability-layout/slow']) {
       hold = false
       const url = `${origin}${path}`
