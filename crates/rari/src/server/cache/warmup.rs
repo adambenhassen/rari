@@ -324,6 +324,7 @@ async fn warm_route(
             cache_control: cache_control.to_string(),
             is_not_found: false,
             has_page_data,
+            tags: merged_tags.clone(),
             cached_at: Instant::now(),
             route: None,
         });
@@ -519,6 +520,7 @@ mod tests {
             cache_control: "public, max-age=60".to_string(),
             is_not_found: false,
             has_page_data: false,
+            tags: Vec::new(),
             cached_at: Instant::now(),
             route: None,
         })

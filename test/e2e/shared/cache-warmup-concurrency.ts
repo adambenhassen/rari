@@ -295,3 +295,98 @@ test('Cache warmup cannot overwrite live renders or an action invalidation', asy
     await close(backend)
   }
 })
+
+test('Cache warmup invalidates fast hits by tag after publication', async ({ request }) => {
+  test.setTimeout(90_000)
+  let version = 'old'
+  const backend = createServer((_incoming, response) => {
+    response.end(version)
+  })
+  const backendPort = await listen(backend)
+  const reservation = createServer()
+  const port = await listen(reservation)
+  await close(reservation)
+  const origin = `http://127.0.0.1:${port}`
+  const child = spawn(
+    getBinaryPath(),
+    ['--mode', 'production', '--host', '127.0.0.1', '--port', String(port)],
+    {
+      cwd: resolvePath(import.meta.dirname, '../../fixtures/app'),
+      env: {
+        ...process.env,
+        NODE_ENV: 'production',
+        RARI_ORIGIN: origin,
+        RARI_JS_POOL_SIZE: '1',
+        RARI_TEST_RACE_BACKEND: `http://127.0.0.1:${backendPort}`,
+        RUST_LOG: 'info',
+      },
+      stdio: ['ignore', 'pipe', 'pipe'],
+    },
+  )
+  let logs = ''
+  child.stdout.on('data', chunk => {
+    logs += String(chunk)
+  })
+  child.stderr.on('data', chunk => {
+    logs += String(chunk)
+  })
+  const exited = new Promise<void>(resolve => {
+    child.once('exit', () => {
+      resolve()
+    })
+    child.once('error', error => {
+      logs += String(error)
+      resolve()
+    })
+  })
+
+  try {
+    await expect
+      .poll(() => logs.includes('Cache warmup: Completed'), { timeout: 60_000 })
+      .toBe(true)
+    const url = `${origin}/warmup-race/tagged`
+    const warmed = await request.get(url)
+    expect(warmed.headers()['x-cache']).toBe('HIT')
+    expect(await warmed.text()).toContain('>old</h1>')
+
+    const actionDir = resolvePath(
+      import.meta.dirname,
+      '../../fixtures/app/dist/server/app/get-data-props/_slug_',
+    )
+    const actionBundle = (await readdir(actionDir)).find(
+      name => name.startsWith('actions_') && name.endsWith('.js'),
+    )
+    if (actionBundle == null) throw new Error('Action bundle not found')
+    const actionId = `app/get-data-props/_slug_/${basename(actionBundle, '.js')}#refreshGetData`
+    const path = '/warmup-race/tag-target'
+    const refresh = async () => {
+      const action = await request.post(`${origin}${path}`, {
+        headers: {
+          'Content-Type': 'text/plain;charset=UTF-8',
+          'rsc-action-id': actionId,
+          'rari-router-state': JSON.stringify({ pathname: path, search: '' }),
+          'Origin': origin,
+        },
+        data: '[]',
+      })
+      expect(action.status()).toBe(200)
+      expect(action.headers()['x-action-revalidated-path']).toBe(path)
+    }
+
+    version = 'new'
+    await refresh()
+    const afterWarmupInvalidation = await request.get(url)
+    expect(afterWarmupInvalidation.headers()['x-cache']).toBe('MISS')
+    expect(await afterWarmupInvalidation.text()).toContain('>new</h1>')
+
+    version = 'newer'
+    await refresh()
+    const afterLiveInvalidation = await request.get(url)
+    expect(afterLiveInvalidation.headers()['x-cache']).toBe('MISS')
+    expect(await afterLiveInvalidation.text()).toContain('>newer</h1>')
+  } finally {
+    child.kill('SIGTERM')
+    await exited
+    await close(backend)
+  }
+})

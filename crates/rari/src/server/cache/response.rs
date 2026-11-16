@@ -32,6 +32,7 @@ pub struct PrebuiltResponse {
     pub is_not_found: bool,
     /// The page exports getData, even when it returns no props.
     pub has_page_data: bool,
+    pub tags: Vec<String>,
     pub cached_at: Instant,
     /// Matched route pattern, reported as `x-rari-route` on hits (guest
     /// renderers); `None` where the renderer does not label responses.
@@ -160,6 +161,21 @@ pub fn invalidate_static_fast_cache_for_path(cache: &StaticFastCache, path: &str
             let key = entry.key();
             key.starts_with(&query_prefix) || key.starts_with(&hash_prefix)
         })
+        .map(|entry| entry.key().clone())
+        .collect();
+    for key in keys {
+        if cache.map.remove(&key).is_some() {
+            cache.entry_count.fetch_sub(1, Ordering::Relaxed);
+        }
+    }
+}
+
+pub fn invalidate_static_fast_cache_by_tag(cache: &StaticFastCache, tag: &str) {
+    let _guard = cache.insert_lock.lock();
+    let keys: Vec<String> = cache
+        .map
+        .iter()
+        .filter(|entry| entry.tags.iter().any(|entry_tag| entry_tag == tag))
         .map(|entry| entry.key().clone())
         .collect();
     for key in keys {
@@ -1348,6 +1364,7 @@ mod tests {
                 cache_control: "public".to_string(),
                 is_not_found: false,
                 has_page_data: false,
+                tags: Vec::new(),
                 cached_at: Instant::now(),
                 route: None,
             })
@@ -1382,6 +1399,7 @@ mod tests {
                 cache_control: "public".to_string(),
                 is_not_found: false,
                 has_page_data: false,
+                tags: Vec::new(),
                 cached_at: Instant::now(),
                 route: None,
             })
@@ -1421,6 +1439,7 @@ mod tests {
                 cache_control: "public".to_string(),
                 is_not_found: false,
                 has_page_data: false,
+                tags: Vec::new(),
                 cached_at: Instant::now(),
                 route: None,
             })
@@ -1464,6 +1483,7 @@ mod tests {
                         cache_control: "public".to_string(),
                         is_not_found: false,
                         has_page_data: false,
+                        tags: Vec::new(),
                         cached_at: Instant::now(),
                         route: None,
                     });
@@ -1498,6 +1518,7 @@ mod tests {
                 cache_control: "public, max-age=1".to_string(),
                 is_not_found: false,
                 has_page_data: false,
+                tags: Vec::new(),
                 cached_at,
                 route: None,
             }),
@@ -1522,6 +1543,7 @@ mod tests {
                 cache_control: "public".to_string(),
                 is_not_found: false,
                 has_page_data: false,
+                tags: Vec::new(),
                 cached_at,
                 route: None,
             }),
@@ -1545,6 +1567,7 @@ mod tests {
             cache_control: "public, max-age=1".to_string(),
             is_not_found: false,
             has_page_data: false,
+            tags: Vec::new(),
             cached_at: stale_at,
             route: None,
         });
@@ -1560,6 +1583,7 @@ mod tests {
             cache_control: "public, max-age=60".to_string(),
             is_not_found: false,
             has_page_data: false,
+            tags: Vec::new(),
             cached_at: Instant::now(),
             route: None,
         });

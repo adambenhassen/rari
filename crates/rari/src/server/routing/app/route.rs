@@ -981,6 +981,7 @@ pub async fn handle_app_route(
                             cache_control: cache_control_value.to_string(),
                             is_not_found: route_match.not_found.is_some(),
                             has_page_data,
+                            tags: response_cache_tags.clone(),
                             cached_at: Instant::now(),
                             route: None,
                         }),
