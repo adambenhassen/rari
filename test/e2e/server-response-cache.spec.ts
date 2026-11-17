@@ -9,14 +9,73 @@ import { getBinaryPath } from '../../packages/rari/src/cli/platform'
 import { close, listen } from './shared/test-server'
 
 test('getData can mark a cold response unavailable without caching it', async ({ request }) => {
-  const url = `/get-data-response-unavailable/${Date.now()}-${Math.random()}?mode=unavailable`
+  test.setTimeout(90_000)
+  let available = false
+  const backend = createServer((_incoming, response) => {
+    response.writeHead(available ? 200 : 503)
+    response.end()
+  })
+  const backendPort = await listen(backend)
+  const reservation = createServer()
+  const port = await listen(reservation)
+  await close(reservation)
+  const origin = `http://127.0.0.1:${port}`
+  const child = spawn(
+    getBinaryPath(),
+    ['--mode', 'production', '--host', '127.0.0.1', '--port', String(port)],
+    {
+      cwd: resolvePath(import.meta.dirname, '../fixtures/app'),
+      env: {
+        ...process.env,
+        NODE_ENV: 'production',
+        RARI_ORIGIN: origin,
+        RARI_TEST_AVAILABILITY_BACKEND: `http://127.0.0.1:${backendPort}`,
+        RUST_LOG: 'info',
+      },
+      stdio: ['ignore', 'pipe', 'pipe'],
+    },
+  )
+  let logs = ''
+  child.stdout.on('data', chunk => {
+    logs += String(chunk)
+  })
+  child.stderr.on('data', chunk => {
+    logs += String(chunk)
+  })
+  const exited = new Promise<void>(resolve => {
+    child.once('exit', () => {
+      resolve()
+    })
+    child.once('error', error => {
+      logs += String(error)
+      resolve()
+    })
+  })
 
-  for (let index = 0; index < 2; index += 1) {
-    const response = await request.get(url)
-    expect(response.status()).toBe(503)
-    expect(response.headers()['cache-control']).toBe('no-store')
-    expect(response.headers()['retry-after']).toBe('17')
-    expect(response.headers()['x-cache']).not.toBe('HIT')
+  try {
+    await expect
+      .poll(() => logs.includes('Cache warmup: Completed'), { timeout: 60_000 })
+      .toBe(true)
+    const url = `${origin}/get-data-response-unavailable/${Date.now()}-${Math.random()}`
+    const unavailable = await request.get(url)
+    expect(unavailable.status()).toBe(503)
+    expect(unavailable.headers()['cache-control']).toBe('no-store')
+    expect(unavailable.headers()['retry-after']).toBe('17')
+    expect(unavailable.headers()['x-cache']).not.toBe('HIT')
+
+    available = true
+    const healthy = await request.get(url)
+    expect(healthy.status()).toBe(200)
+    expect(healthy.headers()['cache-control']).not.toBe('no-store')
+    expect(healthy.headers()['x-cache']).toBe('MISS')
+
+    const cachedHealthy = await request.get(url)
+    expect(cachedHealthy.status()).toBe(200)
+    expect(cachedHealthy.headers()['x-cache']).toBe('HIT')
+  } finally {
+    child.kill('SIGTERM')
+    await exited
+    await close(backend)
   }
 })
 
