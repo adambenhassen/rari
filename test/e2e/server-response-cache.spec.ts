@@ -134,7 +134,7 @@ test('Fast hits without getData do not wait for dynamic metadata', async ({ requ
   }
 })
 
-test('Cached responses run availability metadata before serving a hit', async ({ request }) => {
+test('Cached getData hits survive unavailable metadata', async ({ request }) => {
   test.setTimeout(90_000)
   let available = true
   let holdNext = false
@@ -190,37 +190,47 @@ test('Cached responses run availability metadata before serving a hit', async ({
     await expect
       .poll(() => logs.includes('Cache warmup: Completed'), { timeout: 60_000 })
       .toBe(true)
-    const cases: { path: string; headers: Record<string, string>; conditional: boolean }[] = [
-      { path: '/cache-availability/fast', headers: {}, conditional: false },
-      { path: '/cache-availability/fast-etag', headers: {}, conditional: true },
+    const cases: {
+      path: string
+      headers: Record<string, string>
+      conditional: boolean
+      hasGetData: boolean
+    }[] = [
+      { path: '/cache-availability/fast', headers: {}, conditional: false, hasGetData: true },
+      { path: '/cache-availability/fast-etag', headers: {}, conditional: true, hasGetData: true },
       {
         path: '/cache-availability/response',
         headers: { Cookie: 'rari-action-form-state=bnVsbA' },
         conditional: false,
+        hasGetData: true,
       },
       {
         path: '/cache-availability/response-etag',
         headers: { Cookie: 'rari-action-form-state=bnVsbA' },
         conditional: true,
+        hasGetData: true,
       },
       {
         path: '/cache-availability/rsc',
         headers: { Accept: 'text/x-component' },
         conditional: false,
+        hasGetData: true,
       },
       {
         path: '/cache-availability-metadata/page',
         headers: { Cookie: 'rari-action-form-state=bnVsbA' },
         conditional: false,
+        hasGetData: false,
       },
       {
         path: '/cache-availability-layout/page',
         headers: { Cookie: 'rari-action-form-state=bnVsbA' },
         conditional: false,
+        hasGetData: false,
       },
     ]
 
-    for (const { path, headers, conditional } of cases) {
+    for (const { path, headers, conditional, hasGetData } of cases) {
       const url = `${origin}${path}`
       available = true
       const initial = await request.get(url, { headers })
@@ -230,16 +240,22 @@ test('Cached responses run availability metadata before serving a hit', async ({
       expect.soft(healthy.status(), `${path}: healthy hit`).toBe(200)
       expect.soft(healthy.headers()['x-cache'], `${path}: healthy hit`).toBe('HIT')
       const etag = healthy.headers().etag
+      const healthyBody = await healthy.text()
       if (conditional) expect.soft(etag, `${path}: etag`).toBeDefined()
 
       available = false
-      const unavailable = await request.get(url, {
-        headers: conditional ? { ...headers, 'If-None-Match': etag } : headers,
-      })
-      expect.soft(unavailable.status(), `${path}: unavailable`).toBe(503)
-      expect.soft(unavailable.headers()['cache-control'], `${path}: unavailable`).toBe('no-store')
-      expect.soft(unavailable.headers()['retry-after'], `${path}: unavailable`).toBe('17')
-      expect.soft(unavailable.headers()['x-cache'], `${path}: unavailable`).not.toBe('HIT')
+      const staleHit = await request.get(url, { headers })
+      if (hasGetData) {
+        expect.soft(staleHit.status(), `${path}: unavailable`).toBe(200)
+        expect.soft(staleHit.headers()['cache-control'], `${path}: unavailable`).toBe('no-store')
+        expect.soft(staleHit.headers()['x-cache'], `${path}: unavailable`).toBe('HIT')
+        expect.soft(await staleHit.text(), `${path}: cached body`).toBe(healthyBody)
+      } else {
+        expect.soft(staleHit.status(), `${path}: unavailable`).toBe(503)
+        expect.soft(staleHit.headers()['cache-control'], `${path}: unavailable`).toBe('no-store')
+        expect.soft(staleHit.headers()['retry-after'], `${path}: unavailable`).toBe('17')
+        expect.soft(staleHit.headers()['x-cache'], `${path}: unavailable`).not.toBe('HIT')
+      }
 
       available = true
       const recovered = await request.get(url, { headers })
