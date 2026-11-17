@@ -73,7 +73,9 @@ async fn metadata_allows_cache_hit(
                 .await;
         *collected = true;
     }
-    context.metadata.is_some() && request_context.response_unavailable_after().is_none()
+    context.metadata.is_some()
+        && (request_context.response_unavailable_after().is_none()
+            || context.page_data_props.is_some())
 }
 
 fn fast_cache_response(
