@@ -240,7 +240,10 @@ async fn warm_route(
 
     let mut has_page_data = true;
     if route_match.not_found.is_none() {
-        match layout_renderer.get_page_data(&route_match, &context).await {
+        match layout_renderer
+            .get_page_data(&route_match, &context, Arc::clone(&request_context))
+            .await
+        {
             Ok(page_data) => match page_data {
                 PageData::Missing => has_page_data = false,
                 PageData::Failed(error) => {

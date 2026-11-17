@@ -7,8 +7,18 @@ export async function getData() {
   return { props: { unavailable: !response.ok } }
 }
 
-export function generateMetadata({ unavailable }: Readonly<{ unavailable: boolean }>): Metadata {
-  if (unavailable) globalThis.markResponseUnavailable(17)
+export async function generateMetadata({
+  unavailable,
+  params,
+}: Readonly<{ unavailable: boolean; params: Readonly<{ slug: string }> }>): Promise<Metadata> {
+  if (unavailable) {
+    globalThis.markResponseUnavailable(17)
+    if (params.slug === 'metadata-timeout') {
+      await new Promise<void>(resolve => {
+        setTimeout(resolve, 4_000)
+      })
+    }
+  }
   return { title: 'Availability' }
 }
 

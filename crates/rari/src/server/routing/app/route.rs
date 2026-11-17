@@ -73,9 +73,9 @@ async fn metadata_allows_cache_hit(
                 .await;
         *collected = true;
     }
-    context.metadata.is_some()
-        && (request_context.response_unavailable_after().is_none()
-            || context.page_data_props.is_some())
+    let unavailable = request_context.response_unavailable_after().is_some();
+    (context.metadata.is_some() || unavailable)
+        && (!unavailable || context.page_data_props.is_some())
 }
 
 fn fast_cache_response(
@@ -316,7 +316,10 @@ pub async fn handle_app_route(
         .is_some_and(|entry| entry.is_guarded() && !entry.response.metadata.has_page_data);
     let mut has_page_data = !known_no_page_data;
     if route_match.not_found.is_none() && !known_no_page_data {
-        match layout_renderer.get_page_data(&route_match, &context).await {
+        match layout_renderer
+            .get_page_data(&route_match, &context, Arc::clone(&request_context))
+            .await
+        {
             Ok(page_data) => match page_data {
                 PageData::Missing => has_page_data = false,
                 PageData::Failed(error) => {
