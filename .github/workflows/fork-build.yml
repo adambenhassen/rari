@@ -57,10 +57,6 @@ jobs:
             os: ubuntu-24.04-arm
             target: aarch64-unknown-linux-gnu
             name: rari-linux-arm64
-          - platform: darwin-arm64
-            os: macos-15
-            target: aarch64-apple-darwin
-            name: rari-darwin-arm64
     steps:
       - name: Checkout
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -98,12 +94,6 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y binutils mold pkg-config libfontconfig1-dev
 
-      - name: Install macOS build dependencies
-        if: runner.os == 'macOS'
-        run: |
-          brew list pkg-config &>/dev/null || brew install pkg-config
-          brew list fontconfig &>/dev/null || brew install fontconfig
-
       - name: Bundle React ESM vendor files
         run: pnpm --filter @rari/bundle-react-esm bundle
 
@@ -120,23 +110,11 @@ jobs:
         env:
           RUSTFLAGS: -C link-arg=-fuse-ld=mold -Cforce-frame-pointers=yes
 
-      - name: Generate V8 snapshot (macOS)
-        if: runner.os == 'macOS'
-        run: cargo run --release --manifest-path tools/snapshot/Cargo.toml -- crates/rari/snapshots
-        env:
-          RUSTFLAGS: -Cforce-frame-pointers=yes
-
       - name: Build binary (Linux)
         if: runner.os == 'Linux'
         run: cargo build --release --target ${{ matrix.target }} --bin rari --features ext-full,jemalloc
         env:
           RUSTFLAGS: -C link-arg=-fuse-ld=mold -Cforce-frame-pointers=yes
-
-      - name: Build binary (macOS)
-        if: runner.os == 'macOS'
-        run: cargo build --release --target ${{ matrix.target }} --bin rari --features ext-full,jemalloc
-        env:
-          RUSTFLAGS: -Cforce-frame-pointers=yes
 
       - name: Prepare Linux binary and debug sidecar
         if: runner.os == 'Linux'
@@ -147,20 +125,6 @@ jobs:
           objcopy --only-keep-debug "$BIN" "binaries/${{ matrix.name }}.debug"
           objcopy --strip-debug "$BIN" "binaries/${{ matrix.name }}"
           objcopy --add-gnu-debuglink="binaries/${{ matrix.name }}.debug" "binaries/${{ matrix.name }}"
-          chmod +x "binaries/${{ matrix.name }}"
-          ls -lh binaries/
-
-      - name: Prepare macOS binary and debug sidecar
-        if: runner.os == 'macOS'
-        run: |
-          set -euo pipefail
-          mkdir -p binaries
-          BIN=target/${{ matrix.target }}/release/rari
-          cp "$BIN" "binaries/${{ matrix.name }}"
-          dsymutil "$BIN" -o "binaries/${{ matrix.name }}.dSYM"
-          ditto -c -k --sequesterRsrc --keepParent "binaries/${{ matrix.name }}.dSYM" "binaries/${{ matrix.name }}.debug.zip"
-          rm -rf "binaries/${{ matrix.name }}.dSYM"
-          strip -S "binaries/${{ matrix.name }}"
           chmod +x "binaries/${{ matrix.name }}"
           ls -lh binaries/
 
@@ -232,7 +196,6 @@ jobs:
 
           build_platform linux-x64 linux x64 "Linux x64 binary"
           build_platform linux-arm64 linux arm64 "Linux ARM64 binary"
-          build_platform darwin-arm64 darwin arm64 "macOS ARM64 binary"
           ls -lh dist-tarballs
 
       - name: Create GitHub prerelease
@@ -248,7 +211,7 @@ jobs:
 
           Platform packages are version ${VERSION} and can be consumed through pnpm overrides using the attached tarball URLs.
 
-          Assets include stripped rari binaries and separate debug sidecars. Linux sidecars are .debug ELF files; the macOS sidecar is a zipped dSYM bundle.
+          Assets include stripped Linux rari binaries and separate .debug ELF sidecars.
           EOF
           gh release create "${TAG}" \
             --repo "${GITHUB_REPOSITORY}" \
