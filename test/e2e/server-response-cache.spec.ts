@@ -8,6 +8,18 @@ import { expect, test } from '@playwright/test'
 import { getBinaryPath } from '../../packages/rari/src/cli/platform'
 import { close, listen } from './shared/test-server'
 
+test('getData can mark a cold response unavailable without caching it', async ({ request }) => {
+  const url = `/get-data-response-unavailable/${Date.now()}-${Math.random()}?mode=unavailable`
+
+  for (let index = 0; index < 2; index += 1) {
+    const response = await request.get(url)
+    expect(response.status()).toBe(503)
+    expect(response.headers()['cache-control']).toBe('no-store')
+    expect(response.headers()['retry-after']).toBe('17')
+    expect(response.headers()['x-cache']).not.toBe('HIT')
+  }
+})
+
 test('Fast hits without getData do not wait for dynamic metadata', async ({ request }) => {
   test.setTimeout(90_000)
   let hold = false
@@ -163,6 +175,7 @@ test('Cached getData hits survive unavailable metadata', async ({ request }) => 
         NODE_ENV: 'production',
         RARI_ORIGIN: origin,
         RARI_JS_POOL_SIZE: '2',
+        RARI_JS_POOL_TIMEOUT_MS: '3000',
         RARI_TEST_AVAILABILITY_BACKEND: `http://127.0.0.1:${backendPort}`,
         RUST_LOG: 'info',
       },
@@ -213,6 +226,12 @@ test('Cached getData hits survive unavailable metadata', async ({ request }) => 
       {
         path: '/cache-availability/rsc',
         headers: { Accept: 'text/x-component' },
+        conditional: false,
+        hasGetData: true,
+      },
+      {
+        path: '/cache-availability/metadata-timeout',
+        headers: {},
         conditional: false,
         hasGetData: true,
       },
