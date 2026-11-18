@@ -8,7 +8,7 @@ import { expect, test } from '@playwright/test'
 import { getBinaryPath } from '../../packages/rari/src/cli/platform'
 import { close, listen } from './shared/test-server'
 
-test('getData can mark a cold response unavailable without caching it', async ({ request }) => {
+test('getData outage marks return 503 for cold and warm responses', async ({ request }) => {
   test.setTimeout(90_000)
   let available = false
   const backend = createServer((_incoming, response) => {
@@ -72,6 +72,13 @@ test('getData can mark a cold response unavailable without caching it', async ({
     const cachedHealthy = await request.get(url)
     expect(cachedHealthy.status()).toBe(200)
     expect(cachedHealthy.headers()['x-cache']).toBe('HIT')
+
+    available = false
+    const unavailableWarm = await request.get(url)
+    expect(unavailableWarm.status()).toBe(503)
+    expect(unavailableWarm.headers()['cache-control']).toBe('no-store')
+    expect(unavailableWarm.headers()['retry-after']).toBe('17')
+    expect(unavailableWarm.headers()['x-cache']).not.toBe('HIT')
   } finally {
     child.kill('SIGTERM')
     await exited
