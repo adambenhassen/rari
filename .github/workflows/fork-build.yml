@@ -74,7 +74,7 @@ jobs:
           sudo dpkg --add-architecture arm64
           sudo apt-get update
           sudo apt-get install -y \
-            binutils mold pkg-config libfontconfig1-dev \
+            binutils mold pkg-config libfontconfig1-dev libclang-dev \
             gcc-aarch64-linux-gnu g++-aarch64-linux-gnu binutils-aarch64-linux-gnu \
             qemu-user-static libfontconfig1:arm64 libfontconfig1-dev:arm64
 
