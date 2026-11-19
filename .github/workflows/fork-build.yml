@@ -26,8 +26,6 @@ jobs:
     name: Build Linux release
     runs-on: inference-x64
     timeout-minutes: 300
-    container:
-      image: ghcr.io/catthehacker/ubuntu:act-24.04
     permissions:
       contents: write
     env:
@@ -226,8 +224,6 @@ jobs:
     name: Delete test release
     runs-on: inference-x64
     timeout-minutes: 30
-    container:
-      image: ghcr.io/catthehacker/ubuntu:act-24.04
     permissions:
       contents: write
     steps:

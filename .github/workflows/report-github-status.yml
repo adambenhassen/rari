@@ -16,8 +16,6 @@ jobs:
     if: github.event.workflow_run.event == 'pull_request'
     runs-on: inference-x64
     timeout-minutes: 10
-    container:
-      image: ghcr.io/catthehacker/ubuntu:act-24.04
     permissions:
       contents: read
     steps:

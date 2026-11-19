@@ -12,8 +12,6 @@ jobs:
     name: rari checks
     runs-on: inference-x64
     timeout-minutes: 90
-    container:
-      image: ghcr.io/catthehacker/ubuntu:act-24.04
     permissions:
       contents: read
     env:
