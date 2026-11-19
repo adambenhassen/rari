@@ -7,15 +7,13 @@ on:
 
 permissions: {}
 
-concurrency:
-  group: ${{ github.workflow }}-${{ github.event.pull_request.number }}
-  cancel-in-progress: true
-
 jobs:
   check:
     name: rari checks
-    runs-on: ubuntu-latest
+    runs-on: inference-x64
     timeout-minutes: 90
+    container:
+      image: ghcr.io/catthehacker/ubuntu:act-24.04
     permissions:
       contents: read
     env:
@@ -34,7 +32,6 @@ jobs:
         uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
           node-version: 24.21.0
-          cache: pnpm
 
       - name: Install JavaScript dependencies
         run: pnpm install --frozen-lockfile
@@ -70,11 +67,6 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y pkg-config libfontconfig1-dev libclang-dev mold
-
-      - name: Cache Rust
-        uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
-        with:
-          shared-key: fork-main-pr-check
 
       - name: Create snapshot placeholder
         run: |
