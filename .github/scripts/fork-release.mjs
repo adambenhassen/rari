@@ -18,9 +18,11 @@ if (!giteaRepository || !giteaApiUrl || !giteaToken || !githubToken || !version)
 }
 if (!/^[a-f0-9]{40}$/i.test(sha ?? '')) throw new Error('A valid release commit SHA is required')
 if (deleting ? !isTestVersion(version) : !isReleaseVersion(version)) {
-  throw new Error(deleting
-    ? 'Only a test prerelease version can be deleted'
-    : 'Version must match 0.17.9-fork.<n> or 0.17.9-fork.<n>-test.<n>')
+  throw new Error(
+    deleting
+      ? 'Only a test prerelease version can be deleted'
+      : 'Version must match 0.17.9-fork.<n> or 0.17.9-fork.<n>-test.<n>',
+  )
 }
 
 function isReleaseVersion(value) {
@@ -32,7 +34,7 @@ function isTestVersion(value) {
 }
 
 function pause(milliseconds) {
-  return new Promise((resolve) => setTimeout(resolve, milliseconds))
+  return new Promise(resolve => setTimeout(resolve, milliseconds))
 }
 
 async function readResponse(response) {
@@ -49,8 +51,8 @@ async function githubRequest(path, options = {}) {
   const response = await fetch(`https://api.github.com${path}`, {
     ...options,
     headers: {
-      Accept: 'application/vnd.github+json',
-      Authorization: `Bearer ${githubToken}`,
+      'Accept': 'application/vnd.github+json',
+      'Authorization': `Bearer ${githubToken}`,
       'X-GitHub-Api-Version': '2022-11-28',
       ...(options.body ? { 'Content-Type': 'application/json' } : {}),
       ...options.headers,
@@ -117,40 +119,50 @@ async function uploadAsset(uploadUrl, filePath) {
   url.searchParams.set('name', basename(filePath))
 
   return new Promise((resolve, reject) => {
-    const request = https.request(url, {
-      method: 'POST',
-      headers: {
-        Accept: 'application/vnd.github+json',
-        Authorization: `Bearer ${githubToken}`,
-        'Content-Type': filePath.endsWith('.tgz') ? 'application/gzip' : 'application/octet-stream',
-        'Content-Length': fileStat.size,
-        'X-GitHub-Api-Version': '2022-11-28',
+    const request = https.request(
+      url,
+      {
+        method: 'POST',
+        headers: {
+          'Accept': 'application/vnd.github+json',
+          'Authorization': `Bearer ${githubToken}`,
+          'Content-Type': filePath.endsWith('.tgz')
+            ? 'application/gzip'
+            : 'application/octet-stream',
+          'Content-Length': fileStat.size,
+          'X-GitHub-Api-Version': '2022-11-28',
+        },
       },
-    }, (response) => {
-      const chunks = []
-      response.on('data', (chunk) => chunks.push(chunk))
-      response.on('end', () => {
-        const text = Buffer.concat(chunks).toString('utf8')
-        let data
-        try {
-          data = text === '' ? null : JSON.parse(text)
-        } catch {
-          data = text
-        }
-        if (response.statusCode !== 201) {
-          reject(new Error(`GitHub asset upload failed (${response.statusCode}): ${JSON.stringify(data)}`))
-          return
-        }
-        resolve(data)
-      })
-    })
+      response => {
+        const chunks = []
+        response.on('data', chunk => chunks.push(chunk))
+        response.on('end', () => {
+          const text = Buffer.concat(chunks).toString('utf8')
+          let data
+          try {
+            data = text === '' ? null : JSON.parse(text)
+          } catch {
+            data = text
+          }
+          if (response.statusCode !== 201) {
+            reject(
+              new Error(
+                `GitHub asset upload failed (${response.statusCode}): ${JSON.stringify(data)}`,
+              ),
+            )
+            return
+          }
+          resolve(data)
+        })
+      },
+    )
     request.on('error', reject)
     createReadStream(filePath).on('error', reject).pipe(request)
   })
 }
 
 async function verifyTarballDownloads(files) {
-  for (const file of files.filter((path) => path.endsWith('.tgz'))) {
+  for (const file of files.filter(path => path.endsWith('.tgz'))) {
     const url = `https://github.com/${githubRepository}/releases/download/${tag}/${basename(file)}`
     let downloaded = false
     for (let attempt = 0; attempt < 12; attempt += 1) {
@@ -195,7 +207,7 @@ async function publishRelease() {
     'release-assets/rari-linux-x64.debug',
     'release-assets/rari-linux-arm64',
     'release-assets/rari-linux-arm64.debug',
-  ].map((path) => join(process.cwd(), path))
+  ].map(path => join(process.cwd(), path))
   for (const asset of assets) await stat(asset)
 
   const releaseBody = [

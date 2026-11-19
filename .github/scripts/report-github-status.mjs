@@ -20,13 +20,14 @@ if (typeof sha !== 'string' || !/^[a-f0-9]{40}$/i.test(sha)) {
   throw new Error('Workflow run did not provide a valid commit SHA')
 }
 
-const status = event.action === 'in_progress'
-  ? 'pending'
-  : run.conclusion === 'success'
-    ? 'success'
-    : ['failure', 'timed_out'].includes(run.conclusion)
-      ? 'failure'
-      : 'error'
+const status =
+  event.action === 'in_progress'
+    ? 'pending'
+    : run.conclusion === 'success'
+      ? 'success'
+      : ['failure', 'timed_out'].includes(run.conclusion)
+        ? 'failure'
+        : 'error'
 
 const payload = {
   state: status,
@@ -40,8 +41,8 @@ for (let attempt = 0; attempt < 30; attempt += 1) {
   const response = await fetch(url, {
     method: 'POST',
     headers: {
-      Accept: 'application/vnd.github+json',
-      Authorization: `Bearer ${token}`,
+      'Accept': 'application/vnd.github+json',
+      'Authorization': `Bearer ${token}`,
       'Content-Type': 'application/json',
       'X-GitHub-Api-Version': '2022-11-28',
     },
@@ -58,5 +59,5 @@ for (let attempt = 0; attempt < 30; attempt += 1) {
     throw new Error(`GitHub status request failed (${response.status}): ${responseText}`)
   }
 
-  await new Promise((resolve) => setTimeout(resolve, 10_000))
+  await new Promise(resolve => setTimeout(resolve, 10_000))
 }
