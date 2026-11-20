@@ -336,7 +336,7 @@ jobs:
         with:
           name: fork-release-assets
 
-      - name: Publish Gitea prerelease after the tag reaches GitHub
+      - name: Publish Gitea prerelease and wait for the mirrored tag
         env:
           GITEA_API_URL: ${{ github.api_url }}
           GITEA_REPOSITORY: ${{ github.repository }}

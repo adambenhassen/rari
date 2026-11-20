@@ -2,6 +2,7 @@ import { createReadStream } from 'node:fs'
 import { stat } from 'node:fs/promises'
 import https from 'node:https'
 import { basename, join } from 'node:path'
+import { pathToFileURL } from 'node:url'
 
 const giteaRepository = process.env.GITEA_REPOSITORY
 const giteaApiUrl = process.env.GITEA_API_URL?.replace(/\/$/, '')
@@ -91,10 +92,10 @@ async function waitForGithubMirrorTag({ shouldExist, expectedSha }) {
   throw new Error(`GitHub mirror did not ${shouldExist ? 'receive' : 'remove'} tag ${tag} in time`)
 }
 
-async function findGiteaRelease() {
+async function findGiteaRelease(request = giteaRequest) {
   for (let page = 1; ; page += 1) {
     const path = `/repos/${giteaRepository}/releases?limit=50&page=${page}`
-    const { response, data } = await giteaRequest(path)
+    const { response, data } = await request(path)
     assertOk(response, data, 'Gitea release listing')
     if (!Array.isArray(data)) throw new Error('Gitea release listing was not an array')
 
@@ -148,9 +149,9 @@ async function uploadGiteaAsset(releaseId, filePath) {
   })
 }
 
-async function verifyReleaseAssets(releaseId, files) {
+async function verifyReleaseAssets(releaseId, files, request = giteaRequest) {
   const path = `/repos/${giteaRepository}/releases/${releaseId}/assets`
-  const { response, data } = await giteaRequest(path)
+  const { response, data } = await request(path)
   assertOk(response, data, 'Gitea release asset listing')
   if (!Array.isArray(data)) throw new Error('Gitea release asset listing was not an array')
 
@@ -161,27 +162,23 @@ async function verifyReleaseAssets(releaseId, files) {
   }
 }
 
-async function publishRelease() {
-  const existingRelease = await findGiteaRelease()
-  if (existingRelease) throw new Error(`Gitea release already exists for ${tag}`)
-
-  const createTagPath = `/repos/${giteaRepository}/tags`
-  const { response: tagResponse, data: tagData } = await giteaRequest(createTagPath, {
-    method: 'POST',
-    body: JSON.stringify({ tag_name: tag, target: sha }),
-  })
-  assertOk(tagResponse, tagData, `Create Gitea tag ${tag}`)
-
-  await waitForGithubMirrorTag({ shouldExist: true, expectedSha: sha })
-
-  const assets = [
+export async function publishRelease({
+  request = giteaRequest,
+  uploadAsset = uploadGiteaAsset,
+  waitForMirrorTag = waitForGithubMirrorTag,
+  assets = [
     `dist-tarballs/rari-linux-x64-${version}.tgz`,
     `dist-tarballs/rari-linux-arm64-${version}.tgz`,
     'release-assets/rari-linux-x64',
     'release-assets/rari-linux-x64.debug',
     'release-assets/rari-linux-arm64',
     'release-assets/rari-linux-arm64.debug',
-  ].map(path => join(process.cwd(), path))
+  ].map(path => join(process.cwd(), path)),
+  log = console.log,
+} = {}) {
+  const existingRelease = await findGiteaRelease(request)
+  if (existingRelease) throw new Error(`Gitea release already exists for ${tag}`)
+
   for (const asset of assets) await stat(asset)
 
   const releaseBody = [
@@ -189,7 +186,7 @@ async function publishRelease() {
     '',
     'Includes Linux x64 and ARM64 npm tarballs, binaries, and debug sidecars.',
   ].join('\n')
-  const { response: createResponse, data: release } = await giteaRequest(
+  const { response: createResponse, data: release } = await request(
     `/repos/${giteaRepository}/releases`,
     {
       method: 'POST',
@@ -209,19 +206,20 @@ async function publishRelease() {
   }
 
   for (const asset of assets) {
-    const uploaded = await uploadGiteaAsset(release.id, asset)
-    console.log(`Uploaded ${uploaded.name}`)
+    const uploaded = await uploadAsset(release.id, asset)
+    log(`Uploaded ${uploaded.name}`)
   }
 
-  await verifyReleaseAssets(release.id, assets)
+  await verifyReleaseAssets(release.id, assets, request)
 
-  const { response: publishResponse, data: published } = await giteaRequest(
+  const { response: publishResponse, data: published } = await request(
     `/repos/${giteaRepository}/releases/${release.id}`,
     { method: 'PATCH', body: JSON.stringify({ draft: false }) },
   )
   assertOk(publishResponse, published, `Publish Gitea release ${tag}`)
   if (published?.draft !== false) throw new Error(`Gitea release ${tag} is still a draft`)
-  console.log(`Published Gitea prerelease ${tag}`)
+  await waitForMirrorTag({ shouldExist: true, expectedSha: sha })
+  log(`Published Gitea prerelease ${tag}`)
 }
 
 async function deleteTestRelease() {
@@ -254,5 +252,7 @@ async function deleteTestRelease() {
   console.log(`Deleted Gitea test release and mirrored tag ${tag}`)
 }
 
-if (deleting) await deleteTestRelease()
-else await publishRelease()
+if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
+  if (deleting) await deleteTestRelease()
+  else await publishRelease()
+}
