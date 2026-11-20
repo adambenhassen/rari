@@ -27,7 +27,7 @@ jobs:
     runs-on: inference-x64
     timeout-minutes: 300
     permissions:
-      contents: write
+      contents: read
     env:
       CARGO_PROFILE_RELEASE_DEBUG: line-tables-only
       CARGO_PROFILE_RELEASE_STRIP: none
@@ -269,7 +269,7 @@ jobs:
     runs-on: inference-x64
     timeout-minutes: 30
     permissions:
-      contents: write
+      contents: read
     steps:
       - name: Checkout
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
