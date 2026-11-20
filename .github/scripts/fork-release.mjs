@@ -190,10 +190,10 @@ async function publishRelease() {
     throw new Error(`GitHub release lookup failed (${existingRelease.response.status})`)
   }
 
-  const createTagPath = `/repos/${giteaRepository}/git/refs`
+  const createTagPath = `/repos/${giteaRepository}/tags`
   const { response: tagResponse, data: tagData } = await giteaRequest(createTagPath, {
     method: 'POST',
-    body: JSON.stringify({ ref: `refs/tags/${tag}`, sha }),
+    body: JSON.stringify({ tag_name: tag, target: sha }),
   })
   assertOk(tagResponse, tagData, `Create Gitea tag ${tag}`)
 
@@ -254,7 +254,7 @@ async function deleteTestRelease() {
     throw new Error(`GitHub release lookup failed (${releaseResponse.status})`)
   }
 
-  const tagPath = `/repos/${giteaRepository}/git/refs/tags/${encodeURIComponent(tag)}`
+  const tagPath = `/repos/${giteaRepository}/tags/${encodeURIComponent(tag)}`
   const { response: deleteTagResponse, data: deleteTagData } = await giteaRequest(tagPath, {
     method: 'DELETE',
   })

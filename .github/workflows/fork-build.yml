@@ -209,6 +209,50 @@ jobs:
           build_platform linux-arm64 arm64 'Linux ARM64 binary'
           ls -lh dist-tarballs release-assets
 
+      - name: Smoke-test packaged Linux x64 binary on the production base image
+        env:
+          VERSION: ${{ inputs.version }}
+        run: |
+          set -euo pipefail
+          docker run --rm --platform linux/amd64 \
+            -e VERSION="$VERSION" \
+            -v "$GITHUB_WORKSPACE:/workspace:ro" \
+            node:24-trixie-slim sh -euc '
+              apt-get update -qq
+              apt-get install -y -qq ca-certificates curl libfontconfig1
+              mkdir -p /tmp/rari-package
+              tar -xzf "/workspace/dist-tarballs/rari-linux-x64-${VERSION}.tgz" \
+                -C /tmp/rari-package --strip-components=1
+              cd /workspace/test/fixtures/app
+              /tmp/rari-package/bin/rari --version
+              /tmp/rari-package/bin/rari --mode production --host 127.0.0.1 --port 43820 \
+                > /tmp/rari-x64-smoke.log 2>&1 &
+              server_pid=$!
+              cleanup() {
+                kill "$server_pid" 2>/dev/null || true
+                wait "$server_pid" 2>/dev/null || true
+              }
+              trap cleanup EXIT
+              rendered=false
+              for attempt in $(seq 1 60); do
+                if curl --fail --silent http://127.0.0.1:43820/ \
+                  --output /tmp/rari-x64-render.html; then
+                  rendered=true
+                  break
+                fi
+                if ! kill -0 "$server_pid" 2>/dev/null; then
+                  cat /tmp/rari-x64-smoke.log
+                  exit 1
+                fi
+                sleep 1
+              done
+              if [ "$rendered" != true ] || ! grep -Fq "Test App Home" /tmp/rari-x64-render.html; then
+                cat /tmp/rari-x64-smoke.log
+                echo "Packaged x64 binary did not render the smoke-test page" >&2
+                exit 1
+              fi
+            '
+
       - name: Publish prerelease to GitHub after mirroring its Gitea tag
         env:
           GITEA_API_URL: ${{ github.api_url }}
