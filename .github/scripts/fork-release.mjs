@@ -222,11 +222,15 @@ export async function publishRelease({
   log(`Published Gitea prerelease ${tag}`)
 }
 
-async function deleteTestRelease() {
-  const release = await findGiteaRelease()
+export async function deleteTestRelease({
+  request = giteaRequest,
+  waitForMirrorTag = waitForGithubMirrorTag,
+  log = console.log,
+} = {}) {
+  const release = await findGiteaRelease(request)
 
   if (release) {
-    const { response, data } = await giteaRequest(
+    const { response, data } = await request(
       `/repos/${giteaRepository}/releases/${release.id}`,
       { method: 'DELETE' },
     )
@@ -236,20 +240,20 @@ async function deleteTestRelease() {
   }
 
   const tagPath = `/repos/${giteaRepository}/tags/${encodeURIComponent(tag)}`
-  const { response: deleteTagResponse, data: deleteTagData } = await giteaRequest(tagPath, {
+  const { response: deleteTagResponse, data: deleteTagData } = await request(tagPath, {
     method: 'DELETE',
   })
   if (!deleteTagResponse.ok && deleteTagResponse.status !== 404) {
     assertOk(deleteTagResponse, deleteTagData, `Delete Gitea test tag ${tag}`)
   }
 
-  await waitForGithubMirrorTag({ shouldExist: false })
+  await waitForMirrorTag({ shouldExist: false })
 
-  const verification = await findGiteaRelease()
+  const verification = await findGiteaRelease(request)
   if (verification) {
     throw new Error(`Gitea test release ${tag} still exists after cleanup`)
   }
-  console.log(`Deleted Gitea test release and mirrored tag ${tag}`)
+  log(`Deleted Gitea test release and mirrored tag ${tag}`)
 }
 
 if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {

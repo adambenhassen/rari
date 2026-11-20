@@ -346,7 +346,7 @@ jobs:
         run: node .github/scripts/fork-release.mjs
 
   delete-test-release:
-    if: inputs.delete_test_release == true && github.ref == 'refs/heads/fork/main'
+    if: inputs.delete_test_release == true
     name: Delete test release
     runs-on: inference-x64
     timeout-minutes: 30
