@@ -230,10 +230,9 @@ export async function deleteTestRelease({
   const release = await findGiteaRelease(request)
 
   if (release) {
-    const { response, data } = await request(
-      `/repos/${giteaRepository}/releases/${release.id}`,
-      { method: 'DELETE' },
-    )
+    const { response, data } = await request(`/repos/${giteaRepository}/releases/${release.id}`, {
+      method: 'DELETE',
+    })
     if (response.status !== 204 && response.status !== 404) {
       assertOk(response, data, `Delete Gitea test release ${tag}`)
     }
