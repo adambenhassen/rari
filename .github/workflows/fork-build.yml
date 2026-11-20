@@ -235,6 +235,28 @@ jobs:
           build_platform linux-arm64 arm64 'Linux ARM64 binary'
           ls -lh dist-tarballs release-assets
 
+      - name: Record Linux tarball checksums
+        env:
+          VERSION: ${{ inputs.version }}
+        run: |
+          set -euo pipefail
+          mkdir -p build-provenance
+          (
+            cd dist-tarballs
+            sha256sum \
+              "rari-linux-x64-${VERSION}.tgz" \
+              "rari-linux-arm64-${VERSION}.tgz"
+          ) > build-provenance/SHA256SUMS
+          cat build-provenance/SHA256SUMS >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload Linux build provenance
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: fork-build-provenance-${{ inputs.version }}
+          path: build-provenance/SHA256SUMS
+          if-no-files-found: error
+          retention-days: 90
+
       - name: Upload release assets for the trusted publisher
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
