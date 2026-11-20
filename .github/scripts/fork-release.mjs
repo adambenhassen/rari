@@ -106,9 +106,7 @@ async function findGiteaRelease() {
 
 async function uploadGiteaAsset(releaseId, filePath) {
   const fileStat = await stat(filePath)
-  const url = new URL(
-    `${giteaApiUrl}/repos/${giteaRepository}/releases/${releaseId}/assets`,
-  )
+  const url = new URL(`${giteaApiUrl}/repos/${giteaRepository}/releases/${releaseId}/assets`)
   url.searchParams.set('name', basename(filePath))
 
   return new Promise((resolve, reject) => {
