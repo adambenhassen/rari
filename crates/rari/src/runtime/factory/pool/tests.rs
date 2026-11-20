@@ -1,5 +1,5 @@
 use std::{
-    future::{pending, Future},
+    future::{Future, pending},
     pin::Pin,
     sync::{
         Arc, Mutex,
