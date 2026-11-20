@@ -10,14 +10,17 @@ if (!token) throw new Error('RARI_GITHUB_TOKEN is required')
 
 const event = JSON.parse(await readFile(eventPath, 'utf8'))
 const run = event.workflow_run
-if (!run || run.event !== 'pull_request') {
+if (!run || run.event !== 'pull_request_target') {
   console.log('No pull request workflow run to report')
   process.exit(0)
 }
 
-const sha = run.head_sha
+const sha =
+  run.event === 'pull_request_target'
+    ? event.pull_request?.head?.sha
+    : run.head_sha
 if (typeof sha !== 'string' || !/^[a-f0-9]{40}$/i.test(sha)) {
-  throw new Error('Workflow run did not provide a valid commit SHA')
+  throw new Error('Workflow run did not provide a valid pull request head SHA')
 }
 
 const status =
