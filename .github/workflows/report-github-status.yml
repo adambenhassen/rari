@@ -5,7 +5,6 @@ on:
     workflows:
       - Fork PR check
     types:
-      - in_progress
       - completed
 
 permissions: {}

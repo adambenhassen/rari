@@ -72,6 +72,15 @@ jobs:
         run: |
           set -euo pipefail
           sudo dpkg --add-architecture arm64
+          sudo sed -i '/^Types: deb$/a Architectures: amd64' /etc/apt/sources.list.d/ubuntu.sources
+          sudo tee /etc/apt/sources.list.d/ubuntu-arm64-ports.sources >/dev/null <<'EOF'
+          Types: deb
+          URIs: http://ports.ubuntu.com/ubuntu-ports
+          Suites: noble noble-updates noble-backports noble-security
+          Components: main restricted universe multiverse
+          Architectures: arm64
+          Signed-By: /usr/share/keyrings/ubuntu-archive-keyring.gpg
+          EOF
           sudo apt-get update
           sudo apt-get install -y \
             binutils mold pkg-config libfontconfig1-dev libclang-dev \
@@ -106,6 +115,23 @@ jobs:
         run: cargo build --release --target x86_64-unknown-linux-gnu --bin rari --features ext-full,jemalloc
         env:
           RUSTFLAGS: -C link-arg=-fuse-ld=mold -Cforce-frame-pointers=yes
+
+      - name: Build and run the ARM64 snapshot generator
+        run: |
+          set -euo pipefail
+          export CC_aarch64_unknown_linux_gnu=aarch64-linux-gnu-gcc
+          export CXX_aarch64_unknown_linux_gnu=aarch64-linux-gnu-g++
+          export AR_aarch64_unknown_linux_gnu=aarch64-linux-gnu-ar
+          export CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER=aarch64-linux-gnu-gcc
+          export PKG_CONFIG_ALLOW_CROSS=1
+          export PKG_CONFIG_LIBDIR=/usr/lib/aarch64-linux-gnu/pkgconfig:/usr/share/pkgconfig
+          export PKG_CONFIG_PATH=/usr/lib/aarch64-linux-gnu/pkgconfig
+          export PKG_CONFIG_SYSROOT_DIR=/
+          export RUSTFLAGS='-Cforce-frame-pointers=yes'
+          cargo build --release --manifest-path tools/snapshot/Cargo.toml \
+            --target aarch64-unknown-linux-gnu
+          qemu-aarch64-static -L /usr/aarch64-linux-gnu \
+            target/aarch64-unknown-linux-gnu/release/rari-snapshot crates/rari/snapshots
 
       - name: Build Linux ARM64 binary
         run: |
@@ -209,6 +235,16 @@ jobs:
           build_platform linux-arm64 arm64 'Linux ARM64 binary'
           ls -lh dist-tarballs release-assets
 
+      - name: Upload release assets for the trusted publisher
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: fork-release-assets
+          path: |
+            dist-tarballs/
+            release-assets/
+          if-no-files-found: error
+          retention-days: 1
+
       - name: Smoke-test packaged Linux x64 binary on the production base image
         env:
           VERSION: ${{ inputs.version }}
@@ -253,11 +289,36 @@ jobs:
               fi
             '
 
+  publish-release:
+    if: inputs.delete_test_release != true
+    name: Publish Linux release
+    needs: build
+    runs-on: inference-x64
+    timeout-minutes: 30
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout trusted workflow code
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+
+      - name: Install Node.js
+        uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: 24.21.0
+
+      - name: Download release assets
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: fork-release-assets
+
       - name: Publish prerelease to GitHub after mirroring its Gitea tag
         env:
           GITEA_API_URL: ${{ github.api_url }}
           GITEA_REPOSITORY: ${{ github.repository }}
-          GITEA_TOKEN: ${{ secrets.GITEA_TOKEN }}
+          GITEA_PUBLISH_TOKEN: ${{ secrets.RARI_GITEA_PUBLISH_TOKEN }}
           GITHUB_RELEASE_TOKEN: ${{ secrets.RARI_GITHUB_TOKEN }}
           RELEASE_VERSION: ${{ inputs.version }}
           RELEASE_SHA: ${{ github.sha }}
@@ -296,7 +357,7 @@ jobs:
         env:
           GITEA_API_URL: ${{ github.api_url }}
           GITEA_REPOSITORY: ${{ github.repository }}
-          GITEA_TOKEN: ${{ secrets.GITEA_TOKEN }}
+          GITEA_PUBLISH_TOKEN: ${{ secrets.RARI_GITEA_PUBLISH_TOKEN }}
           GITHUB_RELEASE_TOKEN: ${{ secrets.RARI_GITHUB_TOKEN }}
           RELEASE_VERSION: ${{ inputs.version }}
           RELEASE_SHA: ${{ github.sha }}

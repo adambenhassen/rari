@@ -5,7 +5,7 @@ import { basename, join } from 'node:path'
 
 const giteaRepository = process.env.GITEA_REPOSITORY
 const giteaApiUrl = process.env.GITEA_API_URL?.replace(/\/$/, '')
-const giteaToken = process.env.GITEA_TOKEN
+const giteaToken = process.env.GITEA_PUBLISH_TOKEN
 const githubToken = process.env.GITHUB_RELEASE_TOKEN
 const version = process.env.RELEASE_VERSION
 const sha = process.env.RELEASE_SHA
@@ -94,6 +94,10 @@ async function waitForGithubTag({ shouldExist, expectedSha }) {
       return
     }
     if (!shouldExist && response.status === 404) return
+    if (!shouldExist && response.ok) {
+      await pause(10_000)
+      continue
+    }
     if (response.status !== 404) {
       throw new Error(`GitHub tag lookup failed (${response.status}): ${JSON.stringify(data)}`)
     }
@@ -108,9 +112,17 @@ async function syncGiteaPushMirror() {
   assertOk(response, data, 'Gitea push mirror sync')
 }
 
-async function getGithubRelease() {
-  const path = `/repos/${githubRepository}/releases/tags/${encodeURIComponent(tag)}`
-  return githubRequest(path)
+async function findGithubRelease() {
+  for (let page = 1; ; page += 1) {
+    const path = `/repos/${githubRepository}/releases?per_page=100&page=${page}`
+    const { response, data } = await githubRequest(path)
+    assertOk(response, data, 'GitHub release listing')
+    if (!Array.isArray(data)) throw new Error('GitHub release listing was not an array')
+
+    const release = data.find(item => item.tag_name === tag)
+    if (release) return release
+    if (data.length < 100) return null
+  }
 }
 
 async function uploadAsset(uploadUrl, filePath) {
@@ -184,11 +196,8 @@ async function verifyTarballDownloads(files) {
 }
 
 async function publishRelease() {
-  const existingRelease = await getGithubRelease()
-  if (existingRelease.response.ok) throw new Error(`GitHub release already exists for ${tag}`)
-  if (existingRelease.response.status !== 404) {
-    throw new Error(`GitHub release lookup failed (${existingRelease.response.status})`)
-  }
+  const existingRelease = await findGithubRelease()
+  if (existingRelease) throw new Error(`GitHub release already exists for ${tag}`)
 
   const createTagPath = `/repos/${giteaRepository}/tags`
   const { response: tagResponse, data: tagData } = await giteaRequest(createTagPath, {
@@ -249,10 +258,7 @@ async function publishRelease() {
 }
 
 async function deleteTestRelease() {
-  const { response: releaseResponse, data: release } = await getGithubRelease()
-  if (!releaseResponse.ok && releaseResponse.status !== 404) {
-    throw new Error(`GitHub release lookup failed (${releaseResponse.status})`)
-  }
+  const release = await findGithubRelease()
 
   const tagPath = `/repos/${giteaRepository}/tags/${encodeURIComponent(tag)}`
   const { response: deleteTagResponse, data: deleteTagData } = await giteaRequest(tagPath, {
@@ -265,7 +271,7 @@ async function deleteTestRelease() {
   await syncGiteaPushMirror()
   await waitForGithubTag({ shouldExist: false })
 
-  if (releaseResponse.ok) {
+  if (release) {
     const { response, data } = await githubRequest(
       `/repos/${githubRepository}/releases/${release.id}`,
       { method: 'DELETE' },
@@ -275,8 +281,8 @@ async function deleteTestRelease() {
     }
   }
 
-  const verification = await getGithubRelease()
-  if (verification.response.status !== 404) {
+  const verification = await findGithubRelease()
+  if (verification) {
     throw new Error(`GitHub test release ${tag} still exists after cleanup`)
   }
   console.log(`Deleted test release and mirrored tag ${tag}`)

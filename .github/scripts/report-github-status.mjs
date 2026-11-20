@@ -21,13 +21,11 @@ if (typeof sha !== 'string' || !/^[a-f0-9]{40}$/i.test(sha)) {
 }
 
 const status =
-  event.action === 'in_progress'
-    ? 'pending'
-    : run.conclusion === 'success'
-      ? 'success'
-      : ['failure', 'timed_out'].includes(run.conclusion)
-        ? 'failure'
-        : 'error'
+  run.conclusion === 'success'
+    ? 'success'
+    : ['failure', 'timed_out'].includes(run.conclusion)
+      ? 'failure'
+      : 'error'
 
 const payload = {
   state: status,
