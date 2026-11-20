@@ -5,16 +5,15 @@ import { basename, join } from 'node:path'
 
 const giteaRepository = process.env.GITEA_REPOSITORY
 const giteaApiUrl = process.env.GITEA_API_URL?.replace(/\/$/, '')
-const giteaToken = process.env.GITEA_PUBLISH_TOKEN
-const githubToken = process.env.GITHUB_RELEASE_TOKEN
+const giteaToken = process.env.GITEA_TOKEN
 const version = process.env.RELEASE_VERSION
 const sha = process.env.RELEASE_SHA
 const deleting = process.env.DELETE_TEST_RELEASE === 'true'
-const githubRepository = 'adambenhassen/rari'
+const githubMirrorRepository = 'adambenhassen/rari'
 const tag = `build-${version}`
 
-if (!giteaRepository || !giteaApiUrl || !giteaToken || !githubToken || !version) {
-  throw new Error('Gitea and GitHub release credentials and a version are required')
+if (!giteaRepository || !giteaApiUrl || !giteaToken || !version) {
+  throw new Error('Gitea API URL, repository, job token, and version are required')
 }
 if (!/^[a-f0-9]{40}$/i.test(sha ?? '')) throw new Error('A valid release commit SHA is required')
 if (deleting ? !isTestVersion(version) : !isReleaseVersion(version)) {
@@ -47,21 +46,6 @@ async function readResponse(response) {
   }
 }
 
-async function githubRequest(path, options = {}) {
-  const response = await fetch(`https://api.github.com${path}`, {
-    ...options,
-    headers: {
-      'Accept': 'application/vnd.github+json',
-      'Authorization': `Bearer ${githubToken}`,
-      'X-GitHub-Api-Version': '2022-11-28',
-      ...(options.body ? { 'Content-Type': 'application/json' } : {}),
-      ...options.headers,
-    },
-  })
-  const data = await readResponse(response)
-  return { response, data }
-}
-
 async function giteaRequest(path, options = {}) {
   const response = await fetch(`${giteaApiUrl}${path}`, {
     ...options,
@@ -82,10 +66,11 @@ function assertOk(response, data, description) {
   }
 }
 
-async function waitForGithubTag({ shouldExist, expectedSha }) {
-  const path = `/repos/${githubRepository}/git/ref/tags/${encodeURIComponent(tag)}`
-  for (let attempt = 0; attempt < 60; attempt += 1) {
-    const { response, data } = await githubRequest(path)
+async function waitForGithubMirrorTag({ shouldExist, expectedSha }) {
+  const url = `https://api.github.com/repos/${githubMirrorRepository}/git/ref/tags/${encodeURIComponent(tag)}`
+  for (let attempt = 0; attempt < 20; attempt += 1) {
+    const response = await fetch(url)
+    const data = await readResponse(response)
     if (shouldExist && response.ok) {
       const actualSha = data?.object?.sha
       if (actualSha !== expectedSha) {
@@ -95,39 +80,35 @@ async function waitForGithubTag({ shouldExist, expectedSha }) {
     }
     if (!shouldExist && response.status === 404) return
     if (!shouldExist && response.ok) {
-      await pause(10_000)
+      await pause(30_000)
       continue
     }
     if (response.status !== 404) {
       throw new Error(`GitHub tag lookup failed (${response.status}): ${JSON.stringify(data)}`)
     }
-    await pause(10_000)
+    await pause(30_000)
   }
   throw new Error(`GitHub mirror did not ${shouldExist ? 'receive' : 'remove'} tag ${tag} in time`)
 }
 
-async function syncGiteaPushMirror() {
-  const path = `/repos/${giteaRepository}/push_mirrors-sync`
-  const { response, data } = await giteaRequest(path, { method: 'POST' })
-  assertOk(response, data, 'Gitea push mirror sync')
-}
-
-async function findGithubRelease() {
+async function findGiteaRelease() {
   for (let page = 1; ; page += 1) {
-    const path = `/repos/${githubRepository}/releases?per_page=100&page=${page}`
-    const { response, data } = await githubRequest(path)
-    assertOk(response, data, 'GitHub release listing')
-    if (!Array.isArray(data)) throw new Error('GitHub release listing was not an array')
+    const path = `/repos/${giteaRepository}/releases?limit=50&page=${page}`
+    const { response, data } = await giteaRequest(path)
+    assertOk(response, data, 'Gitea release listing')
+    if (!Array.isArray(data)) throw new Error('Gitea release listing was not an array')
 
     const release = data.find(item => item.tag_name === tag)
     if (release) return release
-    if (data.length < 100) return null
+    if (data.length < 50) return null
   }
 }
 
-async function uploadAsset(uploadUrl, filePath) {
+async function uploadGiteaAsset(releaseId, filePath) {
   const fileStat = await stat(filePath)
-  const url = new URL(uploadUrl.replace(/\{\?name,label\}$/, ''))
+  const url = new URL(
+    `${giteaApiUrl}/repos/${giteaRepository}/releases/${releaseId}/assets`,
+  )
   url.searchParams.set('name', basename(filePath))
 
   return new Promise((resolve, reject) => {
@@ -136,13 +117,9 @@ async function uploadAsset(uploadUrl, filePath) {
       {
         method: 'POST',
         headers: {
-          'Accept': 'application/vnd.github+json',
-          'Authorization': `Bearer ${githubToken}`,
-          'Content-Type': filePath.endsWith('.tgz')
-            ? 'application/gzip'
-            : 'application/octet-stream',
+          'Authorization': `token ${giteaToken}`,
+          'Content-Type': 'application/octet-stream',
           'Content-Length': fileStat.size,
-          'X-GitHub-Api-Version': '2022-11-28',
         },
       },
       response => {
@@ -159,7 +136,7 @@ async function uploadAsset(uploadUrl, filePath) {
           if (response.statusCode !== 201) {
             reject(
               new Error(
-                `GitHub asset upload failed (${response.statusCode}): ${JSON.stringify(data)}`,
+                `Gitea release asset upload failed (${response.statusCode}): ${JSON.stringify(data)}`,
               ),
             )
             return
@@ -173,31 +150,22 @@ async function uploadAsset(uploadUrl, filePath) {
   })
 }
 
-async function verifyTarballDownloads(files) {
-  for (const file of files.filter(path => path.endsWith('.tgz'))) {
-    const url = `https://github.com/${githubRepository}/releases/download/${tag}/${basename(file)}`
-    let downloaded = false
-    for (let attempt = 0; attempt < 12; attempt += 1) {
-      const response = await fetch(url, { method: 'GET', redirect: 'follow' })
-      if (response.ok) {
-        await response.body?.cancel()
-        downloaded = true
-        break
-      }
-      await response.body?.cancel()
-      if (response.status !== 404) {
-        throw new Error(`Tarball URL check failed (${response.status}): ${url}`)
-      }
-      await pause(5_000)
-    }
-    if (!downloaded) throw new Error(`Published tarball did not become downloadable: ${url}`)
-    console.log(`Verified download URL: ${url}`)
+async function verifyReleaseAssets(releaseId, files) {
+  const path = `/repos/${giteaRepository}/releases/${releaseId}/assets`
+  const { response, data } = await giteaRequest(path)
+  assertOk(response, data, 'Gitea release asset listing')
+  if (!Array.isArray(data)) throw new Error('Gitea release asset listing was not an array')
+
+  const uploadedNames = new Set(data.map(asset => asset.name))
+  const missing = files.map(file => basename(file)).filter(name => !uploadedNames.has(name))
+  if (missing.length > 0) {
+    throw new Error(`Gitea release is missing assets: ${missing.join(', ')}`)
   }
 }
 
 async function publishRelease() {
-  const existingRelease = await findGithubRelease()
-  if (existingRelease) throw new Error(`GitHub release already exists for ${tag}`)
+  const existingRelease = await findGiteaRelease()
+  if (existingRelease) throw new Error(`Gitea release already exists for ${tag}`)
 
   const createTagPath = `/repos/${giteaRepository}/tags`
   const { response: tagResponse, data: tagData } = await giteaRequest(createTagPath, {
@@ -206,8 +174,7 @@ async function publishRelease() {
   })
   assertOk(tagResponse, tagData, `Create Gitea tag ${tag}`)
 
-  await syncGiteaPushMirror()
-  await waitForGithubTag({ shouldExist: true, expectedSha: sha })
+  await waitForGithubMirrorTag({ shouldExist: true, expectedSha: sha })
 
   const assets = [
     `dist-tarballs/rari-linux-x64-${version}.tgz`,
@@ -224,8 +191,8 @@ async function publishRelease() {
     '',
     'Includes Linux x64 and ARM64 npm tarballs, binaries, and debug sidecars.',
   ].join('\n')
-  const { response: createResponse, data: release } = await githubRequest(
-    `/repos/${githubRepository}/releases`,
+  const { response: createResponse, data: release } = await giteaRequest(
+    `/repos/${giteaRepository}/releases`,
     {
       method: 'POST',
       body: JSON.stringify({
@@ -238,27 +205,39 @@ async function publishRelease() {
       }),
     },
   )
-  assertOk(createResponse, release, `Create GitHub draft release ${tag}`)
-  if (typeof release?.upload_url !== 'string' || typeof release?.id !== 'number') {
-    throw new Error('GitHub draft release response did not include an upload URL and release ID')
+  assertOk(createResponse, release, `Create Gitea draft release ${tag}`)
+  if (typeof release?.id !== 'number') {
+    throw new Error('Gitea draft release response did not include a release ID')
   }
 
   for (const asset of assets) {
-    const uploaded = await uploadAsset(release.upload_url, asset)
+    const uploaded = await uploadGiteaAsset(release.id, asset)
     console.log(`Uploaded ${uploaded.name}`)
   }
 
-  const { response: publishResponse, data: published } = await githubRequest(
-    `/repos/${githubRepository}/releases/${release.id}`,
+  await verifyReleaseAssets(release.id, assets)
+
+  const { response: publishResponse, data: published } = await giteaRequest(
+    `/repos/${giteaRepository}/releases/${release.id}`,
     { method: 'PATCH', body: JSON.stringify({ draft: false }) },
   )
-  assertOk(publishResponse, published, `Publish GitHub release ${tag}`)
-  await verifyTarballDownloads(assets)
-  console.log(`Published prerelease ${tag}`)
+  assertOk(publishResponse, published, `Publish Gitea release ${tag}`)
+  if (published?.draft !== false) throw new Error(`Gitea release ${tag} is still a draft`)
+  console.log(`Published Gitea prerelease ${tag}`)
 }
 
 async function deleteTestRelease() {
-  const release = await findGithubRelease()
+  const release = await findGiteaRelease()
+
+  if (release) {
+    const { response, data } = await giteaRequest(
+      `/repos/${giteaRepository}/releases/${release.id}`,
+      { method: 'DELETE' },
+    )
+    if (response.status !== 204 && response.status !== 404) {
+      assertOk(response, data, `Delete Gitea test release ${tag}`)
+    }
+  }
 
   const tagPath = `/repos/${giteaRepository}/tags/${encodeURIComponent(tag)}`
   const { response: deleteTagResponse, data: deleteTagData } = await giteaRequest(tagPath, {
@@ -268,24 +247,13 @@ async function deleteTestRelease() {
     assertOk(deleteTagResponse, deleteTagData, `Delete Gitea test tag ${tag}`)
   }
 
-  await syncGiteaPushMirror()
-  await waitForGithubTag({ shouldExist: false })
+  await waitForGithubMirrorTag({ shouldExist: false })
 
-  if (release) {
-    const { response, data } = await githubRequest(
-      `/repos/${githubRepository}/releases/${release.id}`,
-      { method: 'DELETE' },
-    )
-    if (response.status !== 204 && response.status !== 404) {
-      assertOk(response, data, `Delete GitHub test release ${tag}`)
-    }
-  }
-
-  const verification = await findGithubRelease()
+  const verification = await findGiteaRelease()
   if (verification) {
-    throw new Error(`GitHub test release ${tag} still exists after cleanup`)
+    throw new Error(`Gitea test release ${tag} still exists after cleanup`)
   }
-  console.log(`Deleted test release and mirrored tag ${tag}`)
+  console.log(`Deleted Gitea test release and mirrored tag ${tag}`)
 }
 
 if (deleting) await deleteTestRelease()
