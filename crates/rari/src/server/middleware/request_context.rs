@@ -503,7 +503,7 @@ impl RequestContext {
 
 #[cfg(test)]
 mod tests {
-    use std::io;
+    use std::{env, io, process::Command};
 
     use tracing::subscriber;
 
@@ -557,7 +557,32 @@ mod tests {
     }
 
     #[test]
-    fn unavailable_response_logs_route_and_retry_after_at_info_level() {
+    fn unavailable_response_logs_route_and_retry_after_at_info_level() -> io::Result<()> {
+        const ISOLATED_TEST: &str = "RARI_UNAVAILABLE_RESPONSE_LOG_TEST";
+
+        if env::var_os(ISOLATED_TEST).is_none() {
+            // The callsite interest cache is process-wide, while this subscriber is thread-local.
+            let output = Command::new(env::current_exe()?)
+                .arg("--exact")
+                .arg("server::middleware::request_context::tests::unavailable_response_logs_route_and_retry_after_at_info_level")
+                .arg("--nocapture")
+                .env(ISOLATED_TEST, "1")
+                .output()?;
+
+            assert!(
+                output.status.success(),
+                "isolated log test failed:\n{}{}",
+                String::from_utf8_lossy(&output.stdout),
+                String::from_utf8_lossy(&output.stderr)
+            );
+            assert!(
+                String::from_utf8_lossy(&output.stdout).contains("1 passed"),
+                "isolated log test did not run:\n{}",
+                String::from_utf8_lossy(&output.stdout)
+            );
+            return Ok(());
+        }
+
         let output = Arc::new(Mutex::new(Vec::new()));
         let output_for_writer = Arc::clone(&output);
         let subscriber = tracing_subscriber::fmt()
@@ -576,6 +601,8 @@ mod tests {
         assert!(log.contains("Page marked response unavailable"));
         assert!(log.contains("route=/maintenance"));
         assert!(log.contains("retry_after_seconds=60"));
+
+        Ok(())
     }
 
     #[test]
