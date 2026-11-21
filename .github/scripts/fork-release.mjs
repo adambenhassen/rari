@@ -1,3 +1,4 @@
+import { createHash } from 'node:crypto'
 import { createReadStream } from 'node:fs'
 import { stat } from 'node:fs/promises'
 import https from 'node:https'
@@ -177,6 +178,30 @@ async function removeGiteaAsset(releaseId, asset, request) {
   }
 }
 
+async function sha256Stream(stream) {
+  const hash = createHash('sha256')
+  for await (const chunk of stream) hash.update(chunk)
+  return hash.digest('hex')
+}
+
+async function downloadGiteaAsset(asset) {
+  if (typeof asset.browser_download_url !== 'string') {
+    throw new Error(`Gitea release asset ${asset.name} has no download URL`)
+  }
+  const url = new URL(asset.browser_download_url)
+  if (url.origin !== new URL(giteaApiUrl).origin) {
+    throw new Error(`Gitea release asset ${asset.name} has an unexpected download origin`)
+  }
+
+  const response = await fetch(url)
+  if (!response.ok) {
+    const data = await readResponse(response)
+    assertOk(response, data, `Download Gitea release asset ${asset.name}`)
+  }
+  if (!response.body) throw new Error(`Gitea release asset ${asset.name} has no response body`)
+  return sha256Stream(response.body)
+}
+
 async function verifyReleaseAssets(releaseId, files, request = giteaRequest) {
   const uploadedAssets = await listGiteaReleaseAssets(releaseId, request)
   const missing = []
@@ -192,9 +217,36 @@ async function verifyReleaseAssets(releaseId, files, request = giteaRequest) {
   }
 }
 
+async function verifyPublishedTarballs(release, files, request, downloadAsset) {
+  if (!Number.isSafeInteger(release.id)) {
+    throw new Error(`Gitea published release ${tag} has no valid release ID`)
+  }
+
+  const requiredNames = [`rari-linux-x64-${version}.tgz`, `rari-linux-arm64-${version}.tgz`]
+  const filesByName = new Map(files.map(file => [basename(file), file]))
+  const publishedAssets = await listGiteaReleaseAssets(release.id, request)
+
+  for (const name of requiredNames) {
+    const file = filesByName.get(name)
+    if (!file) throw new Error(`Current build is missing release tarball ${name}`)
+
+    const matches = publishedAssets.filter(asset => asset.name === name)
+    if (matches.length !== 1) {
+      throw new Error(`Published Gitea release ${tag} must contain exactly one ${name}`)
+    }
+
+    const buildHash = await sha256Stream(createReadStream(file))
+    const publishedHash = await downloadAsset(matches[0])
+    if (publishedHash !== buildHash) {
+      throw new Error(`Published Gitea release asset ${name} does not match this build`)
+    }
+  }
+}
+
 export async function publishRelease({
   request = giteaRequest,
   uploadAsset = uploadGiteaAsset,
+  downloadAsset = downloadGiteaAsset,
   waitForMirrorTag = waitForGithubMirrorTag,
   assets = [
     `dist-tarballs/rari-linux-x64-${version}.tgz`,
@@ -213,6 +265,7 @@ export async function publishRelease({
       throw new Error(`Gitea release ${tag} targets a different commit than ${sha}`)
     }
     if (existingRelease.draft === false) {
+      await verifyPublishedTarballs(existingRelease, assets, request, downloadAsset)
       await waitForMirrorTag({ shouldExist: true, expectedSha: sha })
       log(`Verified mirrored tag for published Gitea prerelease ${tag}`)
       return

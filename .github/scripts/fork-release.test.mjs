@@ -255,40 +255,152 @@ test('retry replaces same-size stale assets after a failed upload', async () => 
   }
 })
 
-test('a published same-commit release only retries mirror verification', async () => {
+test('a published same-commit release verifies both rebuilt tarballs before mirror retry', async () => {
+  const directory = await mkdtemp(join(tmpdir(), 'rari-fork-release-published-match-'))
+  const tarballs = [
+    { name: 'rari-linux-x64-0.17.9-fork.99-test.1.tgz', contents: 'x64 tarball' },
+    { name: 'rari-linux-arm64-0.17.9-fork.99-test.1.tgz', contents: 'arm64 tarball' },
+  ]
+  const files = await Promise.all(
+    tarballs.map(async tarball => {
+      const file = join(directory, tarball.name)
+      await writeFile(file, tarball.contents)
+      return file
+    }),
+  )
+  const publishedHashes = new Map(
+    tarballs.map(tarball => [
+      tarball.name,
+      createHash('sha256').update(tarball.contents).digest('hex'),
+    ]),
+  )
+  const publishedAssets = tarballs.map((tarball, index) => ({
+    id: index + 1,
+    name: tarball.name,
+    browser_download_url: `https://gitea.example/adambenhassen/rari/releases/download/${tarball.name}`,
+  }))
   const events = []
-  await publishRelease({
-    request: async (path, options = {}) => {
-      const method = options.method ?? 'GET'
-      events.push(`${method} ${path}`)
-      assert.equal(method, 'GET')
-      assert.equal(path, '/repos/adambenhassen/rari/releases?limit=50&page=1')
-      return {
-        response: { ok: true, status: 200 },
-        data: [
-          {
-            id: 42,
-            tag_name: 'build-0.17.9-fork.99-test.1',
-            target_commitish: process.env.RELEASE_SHA,
-            draft: false,
-          },
-        ],
-      }
-    },
-    uploadAsset: async () => assert.fail('published releases must not upload assets'),
-    waitForMirrorTag: async ({ shouldExist, expectedSha }) => {
-      events.push('wait for mirror')
-      assert.equal(shouldExist, true)
-      assert.equal(expectedSha, process.env.RELEASE_SHA)
-    },
-    assets: ['/missing/build-output.tgz'],
-    log: () => {},
-  })
 
-  assert.deepEqual(events, [
-    'GET /repos/adambenhassen/rari/releases?limit=50&page=1',
-    'wait for mirror',
+  try {
+    await publishRelease({
+      request: async (path, options = {}) => {
+        const method = options.method ?? 'GET'
+        if (method === 'GET' && path.endsWith('/releases?limit=50&page=1')) {
+          events.push('list releases')
+          return {
+            response: { ok: true, status: 200 },
+            data: [
+              {
+                id: 42,
+                tag_name: 'build-0.17.9-fork.99-test.1',
+                target_commitish: process.env.RELEASE_SHA,
+                draft: false,
+              },
+            ],
+          }
+        }
+        if (method === 'GET' && path.endsWith('/releases/42/assets')) {
+          events.push('list assets')
+          return { response: { ok: true, status: 200 }, data: publishedAssets }
+        }
+        assert.fail(`Unexpected Gitea request: ${method} ${path}`)
+      },
+      downloadAsset: async asset => {
+        events.push(`download ${asset.name}`)
+        return publishedHashes.get(asset.name)
+      },
+      uploadAsset: async () => assert.fail('published releases must not upload assets'),
+      waitForMirrorTag: async ({ shouldExist, expectedSha }) => {
+        events.push('wait for mirror')
+        assert.equal(shouldExist, true)
+        assert.equal(expectedSha, process.env.RELEASE_SHA)
+      },
+      assets: files,
+      log: () => {},
+    })
+
+    assert.deepEqual(events, [
+      'list releases',
+      'list assets',
+      `download ${tarballs[0].name}`,
+      `download ${tarballs[1].name}`,
+      'wait for mirror',
+    ])
+  } finally {
+    await rm(directory, { recursive: true, force: true })
+  }
+})
+
+test('a published same-commit retry rejects a rebuilt tarball with different bytes', async () => {
+  const directory = await mkdtemp(join(tmpdir(), 'rari-fork-release-published-mismatch-'))
+  const tarballs = [
+    { name: 'rari-linux-x64-0.17.9-fork.99-test.1.tgz', contents: 'x64 tarball' },
+    { name: 'rari-linux-arm64-0.17.9-fork.99-test.1.tgz', contents: 'new arm64 tarball' },
+  ]
+  const files = await Promise.all(
+    tarballs.map(async tarball => {
+      const file = join(directory, tarball.name)
+      await writeFile(file, tarball.contents)
+      return file
+    }),
+  )
+  const publishedHashes = new Map([
+    [tarballs[0].name, createHash('sha256').update('x64 tarball').digest('hex')],
+    [tarballs[1].name, createHash('sha256').update('original arm64 tarball').digest('hex')],
   ])
+  const publishedAssets = tarballs.map((tarball, index) => ({
+    id: index + 1,
+    name: tarball.name,
+    browser_download_url: `https://gitea.example/adambenhassen/rari/releases/download/${tarball.name}`,
+  }))
+  const events = []
+
+  try {
+    await assert.rejects(
+      publishRelease({
+        request: async (path, options = {}) => {
+          const method = options.method ?? 'GET'
+          if (method === 'GET' && path.endsWith('/releases?limit=50&page=1')) {
+            events.push('list releases')
+            return {
+              response: { ok: true, status: 200 },
+              data: [
+                {
+                  id: 42,
+                  tag_name: 'build-0.17.9-fork.99-test.1',
+                  target_commitish: process.env.RELEASE_SHA,
+                  draft: false,
+                },
+              ],
+            }
+          }
+          if (method === 'GET' && path.endsWith('/releases/42/assets')) {
+            events.push('list assets')
+            return { response: { ok: true, status: 200 }, data: publishedAssets }
+          }
+          assert.fail(`Unexpected Gitea request: ${method} ${path}`)
+        },
+        downloadAsset: async asset => {
+          events.push(`download ${asset.name}`)
+          return publishedHashes.get(asset.name)
+        },
+        uploadAsset: async () => assert.fail('published releases must not upload assets'),
+        waitForMirrorTag: async () => events.push('wait for mirror'),
+        assets: files,
+        log: () => {},
+      }),
+      /does not match this build/,
+    )
+
+    assert.deepEqual(events, [
+      'list releases',
+      'list assets',
+      `download ${tarballs[0].name}`,
+      `download ${tarballs[1].name}`,
+    ])
+  } finally {
+    await rm(directory, { recursive: true, force: true })
+  }
 })
 
 test('rejects a draft for a different commit before uploading assets', async () => {
