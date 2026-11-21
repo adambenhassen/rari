@@ -9,6 +9,7 @@ pub(crate) mod utils;
 
 use std::sync::Arc;
 
+#[cfg(test)]
 pub(crate) use create_params::runtime_create_params;
 pub use interface::JsRuntimeInterface;
 pub use pool::{
