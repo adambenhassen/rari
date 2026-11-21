@@ -628,8 +628,9 @@ impl LayoutRenderer {
         &self,
         route_match: &AppRouteMatch,
         context: &LayoutRenderContext,
+        request_context: Arc<RequestContext>,
     ) -> Result<PageData, RariError> {
-        self.get_page_data_on(route_match, context, None).await
+        self.get_page_data_on_with_context(route_match, context, None, Some(request_context)).await
     }
 
     /// Prefer this method with a sticky runtime when the caller already holds a pool slot lease.
@@ -638,6 +639,16 @@ impl LayoutRenderer {
         route_match: &AppRouteMatch,
         context: &LayoutRenderContext,
         sticky_runtime: Option<&Arc<dyn JsRuntimeInterface>>,
+    ) -> Result<PageData, RariError> {
+        self.get_page_data_on_with_context(route_match, context, sticky_runtime, None).await
+    }
+
+    async fn get_page_data_on_with_context(
+        &self,
+        route_match: &AppRouteMatch,
+        context: &LayoutRenderContext,
+        sticky_runtime: Option<&Arc<dyn JsRuntimeInterface>>,
+        request_context: Option<Arc<RequestContext>>,
     ) -> Result<PageData, RariError> {
         let page_props = utils::create_page_props(route_match, context)?;
         let page_props_json = serde_json::to_string(&page_props)?;
@@ -702,13 +713,20 @@ impl LayoutRenderer {
             "
         );
 
+        let script_name = "get_page_data".to_string();
         let result = if let Some(runtime) = sticky_runtime {
-            runtime.execute_script("get_page_data".to_string(), check_script).await?
+            runtime.execute_script(script_name, check_script).await?
         } else {
             let renderer = self.renderer.lock().await;
             let runtime = Arc::clone(&renderer.runtime);
             drop(renderer);
-            runtime.execute_script("get_page_data".to_string(), check_script).await?
+            if let Some(request_context) = request_context {
+                runtime
+                    .execute_script_with_request_context(request_context, script_name, check_script)
+                    .await?
+            } else {
+                runtime.execute_script(script_name, check_script).await?
+            }
         };
 
         Ok(parse_page_data_result(&result))

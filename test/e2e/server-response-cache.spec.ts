@@ -8,6 +8,84 @@ import { expect, test } from '@playwright/test'
 import { getBinaryPath } from '../../packages/rari/src/cli/platform'
 import { close, listen } from './shared/test-server'
 
+test('getData outage marks return 503 for cold and warm responses', async ({ request }) => {
+  test.setTimeout(90_000)
+  let available = false
+  const backend = createServer((_incoming, response) => {
+    response.writeHead(available ? 200 : 503)
+    response.end()
+  })
+  const backendPort = await listen(backend)
+  const reservation = createServer()
+  const port = await listen(reservation)
+  await close(reservation)
+  const origin = `http://127.0.0.1:${port}`
+  const child = spawn(
+    getBinaryPath(),
+    ['--mode', 'production', '--host', '127.0.0.1', '--port', String(port)],
+    {
+      cwd: resolvePath(import.meta.dirname, '../fixtures/app'),
+      env: {
+        ...process.env,
+        NODE_ENV: 'production',
+        RARI_ORIGIN: origin,
+        RARI_TEST_AVAILABILITY_BACKEND: `http://127.0.0.1:${backendPort}`,
+        RUST_LOG: 'info',
+      },
+      stdio: ['ignore', 'pipe', 'pipe'],
+    },
+  )
+  let logs = ''
+  child.stdout.on('data', chunk => {
+    logs += String(chunk)
+  })
+  child.stderr.on('data', chunk => {
+    logs += String(chunk)
+  })
+  const exited = new Promise<void>(resolve => {
+    child.once('exit', () => {
+      resolve()
+    })
+    child.once('error', error => {
+      logs += String(error)
+      resolve()
+    })
+  })
+
+  try {
+    await expect
+      .poll(() => logs.includes('Cache warmup: Completed'), { timeout: 60_000 })
+      .toBe(true)
+    const url = `${origin}/get-data-response-unavailable/${Date.now()}-${Math.random()}`
+    const unavailable = await request.get(url)
+    expect(unavailable.status()).toBe(503)
+    expect(unavailable.headers()['cache-control']).toBe('no-store')
+    expect(unavailable.headers()['retry-after']).toBe('17')
+    expect(unavailable.headers()['x-cache']).not.toBe('HIT')
+
+    available = true
+    const healthy = await request.get(url)
+    expect(healthy.status()).toBe(200)
+    expect(healthy.headers()['cache-control']).not.toBe('no-store')
+    expect(healthy.headers()['x-cache']).toBe('MISS')
+
+    const cachedHealthy = await request.get(url)
+    expect(cachedHealthy.status()).toBe(200)
+    expect(cachedHealthy.headers()['x-cache']).toBe('HIT')
+
+    available = false
+    const unavailableWarm = await request.get(url)
+    expect(unavailableWarm.status()).toBe(503)
+    expect(unavailableWarm.headers()['cache-control']).toBe('no-store')
+    expect(unavailableWarm.headers()['retry-after']).toBe('17')
+    expect(unavailableWarm.headers()['x-cache']).not.toBe('HIT')
+  } finally {
+    child.kill('SIGTERM')
+    await exited
+    await close(backend)
+  }
+})
+
 test('Fast hits without getData do not wait for dynamic metadata', async ({ request }) => {
   test.setTimeout(90_000)
   let hold = false
@@ -134,7 +212,7 @@ test('Fast hits without getData do not wait for dynamic metadata', async ({ requ
   }
 })
 
-test('Cached responses run availability metadata before serving a hit', async ({ request }) => {
+test('Cached getData hits survive unavailable metadata', async ({ request }) => {
   test.setTimeout(90_000)
   let available = true
   let holdNext = false
@@ -163,6 +241,7 @@ test('Cached responses run availability metadata before serving a hit', async ({
         NODE_ENV: 'production',
         RARI_ORIGIN: origin,
         RARI_JS_POOL_SIZE: '2',
+        RARI_JS_POOL_TIMEOUT_MS: '3000',
         RARI_TEST_AVAILABILITY_BACKEND: `http://127.0.0.1:${backendPort}`,
         RUST_LOG: 'info',
       },
@@ -190,37 +269,53 @@ test('Cached responses run availability metadata before serving a hit', async ({
     await expect
       .poll(() => logs.includes('Cache warmup: Completed'), { timeout: 60_000 })
       .toBe(true)
-    const cases: { path: string; headers: Record<string, string>; conditional: boolean }[] = [
-      { path: '/cache-availability/fast', headers: {}, conditional: false },
-      { path: '/cache-availability/fast-etag', headers: {}, conditional: true },
+    const cases: {
+      path: string
+      headers: Record<string, string>
+      conditional: boolean
+      hasGetData: boolean
+    }[] = [
+      { path: '/cache-availability/fast', headers: {}, conditional: false, hasGetData: true },
+      { path: '/cache-availability/fast-etag', headers: {}, conditional: true, hasGetData: true },
       {
         path: '/cache-availability/response',
         headers: { Cookie: 'rari-action-form-state=bnVsbA' },
         conditional: false,
+        hasGetData: true,
       },
       {
         path: '/cache-availability/response-etag',
         headers: { Cookie: 'rari-action-form-state=bnVsbA' },
         conditional: true,
+        hasGetData: true,
       },
       {
         path: '/cache-availability/rsc',
         headers: { Accept: 'text/x-component' },
         conditional: false,
+        hasGetData: true,
+      },
+      {
+        path: '/cache-availability/metadata-timeout',
+        headers: {},
+        conditional: false,
+        hasGetData: true,
       },
       {
         path: '/cache-availability-metadata/page',
         headers: { Cookie: 'rari-action-form-state=bnVsbA' },
         conditional: false,
+        hasGetData: false,
       },
       {
         path: '/cache-availability-layout/page',
         headers: { Cookie: 'rari-action-form-state=bnVsbA' },
         conditional: false,
+        hasGetData: false,
       },
     ]
 
-    for (const { path, headers, conditional } of cases) {
+    for (const { path, headers, conditional, hasGetData } of cases) {
       const url = `${origin}${path}`
       available = true
       const initial = await request.get(url, { headers })
@@ -230,16 +325,22 @@ test('Cached responses run availability metadata before serving a hit', async ({
       expect.soft(healthy.status(), `${path}: healthy hit`).toBe(200)
       expect.soft(healthy.headers()['x-cache'], `${path}: healthy hit`).toBe('HIT')
       const etag = healthy.headers().etag
+      const healthyBody = await healthy.text()
       if (conditional) expect.soft(etag, `${path}: etag`).toBeDefined()
 
       available = false
-      const unavailable = await request.get(url, {
-        headers: conditional ? { ...headers, 'If-None-Match': etag } : headers,
-      })
-      expect.soft(unavailable.status(), `${path}: unavailable`).toBe(503)
-      expect.soft(unavailable.headers()['cache-control'], `${path}: unavailable`).toBe('no-store')
-      expect.soft(unavailable.headers()['retry-after'], `${path}: unavailable`).toBe('17')
-      expect.soft(unavailable.headers()['x-cache'], `${path}: unavailable`).not.toBe('HIT')
+      const staleHit = await request.get(url, { headers })
+      if (hasGetData) {
+        expect.soft(staleHit.status(), `${path}: unavailable`).toBe(200)
+        expect.soft(staleHit.headers()['cache-control'], `${path}: unavailable`).toBe('no-store')
+        expect.soft(staleHit.headers()['x-cache'], `${path}: unavailable`).toBe('HIT')
+        expect.soft(await staleHit.text(), `${path}: cached body`).toBe(healthyBody)
+      } else {
+        expect.soft(staleHit.status(), `${path}: unavailable`).toBe(503)
+        expect.soft(staleHit.headers()['cache-control'], `${path}: unavailable`).toBe('no-store')
+        expect.soft(staleHit.headers()['retry-after'], `${path}: unavailable`).toBe('17')
+        expect.soft(staleHit.headers()['x-cache'], `${path}: unavailable`).not.toBe('HIT')
+      }
 
       available = true
       const recovered = await request.get(url, { headers })
