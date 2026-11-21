@@ -149,16 +149,37 @@ async function uploadGiteaAsset(releaseId, filePath) {
   })
 }
 
-async function verifyReleaseAssets(releaseId, files, request = giteaRequest) {
+async function listGiteaReleaseAssets(releaseId, request) {
   const path = `/repos/${giteaRepository}/releases/${releaseId}/assets`
   const { response, data } = await request(path)
   assertOk(response, data, 'Gitea release asset listing')
   if (!Array.isArray(data)) throw new Error('Gitea release asset listing was not an array')
+  return data
+}
 
-  const uploadedNames = new Set(data.map(asset => asset.name))
-  const missing = files.map(file => basename(file)).filter(name => !uploadedNames.has(name))
+async function removeGiteaAsset(releaseId, asset, request) {
+  if (!Number.isSafeInteger(asset.id)) {
+    throw new Error(`Gitea release asset ${asset.name} has no valid ID`)
+  }
+  const path = `/repos/${giteaRepository}/releases/${releaseId}/assets/${asset.id}`
+  const { response, data } = await request(path, { method: 'DELETE' })
+  if (response.status !== 204 && response.status !== 404) {
+    assertOk(response, data, `Delete incomplete Gitea release asset ${asset.name}`)
+  }
+}
+
+async function verifyReleaseAssets(releaseId, files, request = giteaRequest) {
+  const uploadedAssets = await listGiteaReleaseAssets(releaseId, request)
+  const missing = []
+  for (const file of files) {
+    const expectedSize = (await stat(file)).size
+    const matchingAsset = uploadedAssets.find(
+      asset => asset.name === basename(file) && Number(asset.size) === expectedSize,
+    )
+    if (!matchingAsset) missing.push(basename(file))
+  }
   if (missing.length > 0) {
-    throw new Error(`Gitea release is missing assets: ${missing.join(', ')}`)
+    throw new Error(`Gitea release is missing complete assets: ${missing.join(', ')}`)
   }
 }
 
@@ -177,7 +198,16 @@ export async function publishRelease({
   log = console.log,
 } = {}) {
   const existingRelease = await findGiteaRelease(request)
-  if (existingRelease) throw new Error(`Gitea release already exists for ${tag}`)
+  let release
+  if (existingRelease) {
+    if (existingRelease.draft !== true || existingRelease.target_commitish !== sha) {
+      throw new Error(`Gitea release ${tag} exists but is not a draft for commit ${sha}`)
+    }
+    if (!Number.isSafeInteger(existingRelease.id)) {
+      throw new Error(`Gitea draft release ${tag} has no valid release ID`)
+    }
+    release = existingRelease
+  }
 
   for (const asset of assets) await stat(asset)
 
@@ -186,26 +216,39 @@ export async function publishRelease({
     '',
     'Includes Linux x64 and ARM64 npm tarballs, binaries, and debug sidecars.',
   ].join('\n')
-  const { response: createResponse, data: release } = await request(
-    `/repos/${giteaRepository}/releases`,
-    {
-      method: 'POST',
-      body: JSON.stringify({
-        tag_name: tag,
-        target_commitish: sha,
-        name: tag,
-        body: releaseBody,
-        draft: true,
-        prerelease: true,
-      }),
-    },
-  )
-  assertOk(createResponse, release, `Create Gitea draft release ${tag}`)
-  if (typeof release?.id !== 'number') {
-    throw new Error('Gitea draft release response did not include a release ID')
+  if (!release) {
+    const { response: createResponse, data: createdRelease } = await request(
+      `/repos/${giteaRepository}/releases`,
+      {
+        method: 'POST',
+        body: JSON.stringify({
+          tag_name: tag,
+          target_commitish: sha,
+          name: tag,
+          body: releaseBody,
+          draft: true,
+          prerelease: true,
+        }),
+      },
+    )
+    assertOk(createResponse, createdRelease, `Create Gitea draft release ${tag}`)
+    if (!Number.isSafeInteger(createdRelease?.id)) {
+      throw new Error('Gitea draft release response did not include a release ID')
+    }
+    release = createdRelease
   }
 
+  const currentAssets = await listGiteaReleaseAssets(release.id, request)
   for (const asset of assets) {
+    const assetName = basename(asset)
+    const expectedSize = (await stat(asset)).size
+    const sameName = currentAssets.filter(current => current.name === assetName)
+    const completeAsset = sameName.find(current => Number(current.size) === expectedSize)
+    for (const current of sameName) {
+      if (current !== completeAsset) await removeGiteaAsset(release.id, current, request)
+    }
+    if (completeAsset) continue
+
     const uploaded = await uploadAsset(release.id, asset)
     log(`Uploaded ${uploaded.name}`)
   }

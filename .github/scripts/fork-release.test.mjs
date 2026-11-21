@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict'
-import { mkdtemp, rm, writeFile } from 'node:fs/promises'
+import { mkdtemp, rm, stat, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { basename, join } from 'node:path'
 import test from 'node:test'
@@ -41,7 +41,7 @@ test('creates a draft release, uploads assets, then publishes and waits for its 
 
     if (method === 'GET' && path.endsWith('/releases/42/assets')) {
       events.push('verify assets')
-      return { response: { ok: true, status: 200 }, data: [{ name: basename(asset) }] }
+      return { response: { ok: true, status: 200 }, data: [{ name: basename(asset), size: 10 }] }
     }
 
     if (method === 'PATCH' && path.endsWith('/releases/42')) {
@@ -54,8 +54,19 @@ test('creates a draft release, uploads assets, then publishes and waits for its 
   }
 
   try {
+    const originalRequest = request
+    let assetLists = 0
     await publishRelease({
-      request,
+      request: async (path, options = {}) => {
+        if ((options.method ?? 'GET') === 'GET' && path.endsWith('/releases/42/assets')) {
+          assetLists += 1
+          if (assetLists === 1) {
+            events.push('list draft assets')
+            return { response: { ok: true, status: 200 }, data: [] }
+          }
+        }
+        return originalRequest(path, options)
+      },
       uploadAsset: async (releaseId, filePath) => {
         events.push(`upload ${releaseId}`)
         assert.equal(filePath, asset)
@@ -73,11 +84,155 @@ test('creates a draft release, uploads assets, then publishes and waits for its 
     assert.deepEqual(events, [
       'list releases',
       'create draft',
+      'list draft assets',
       'upload 42',
       'verify assets',
       'publish release',
       'wait for mirrored tag',
     ])
+  } finally {
+    await rm(directory, { recursive: true, force: true })
+  }
+})
+
+test('resumes a same-commit draft after a failed upload and replaces an incomplete asset', async () => {
+  const directory = await mkdtemp(join(tmpdir(), 'rari-fork-release-retry-'))
+  const x64Asset = join(directory, 'rari-linux-x64.tgz')
+  const arm64Asset = join(directory, 'rari-linux-arm64.tgz')
+  await writeFile(x64Asset, 'complete x64 asset')
+  await writeFile(arm64Asset, 'complete arm64 asset')
+
+  const version = process.env.RELEASE_VERSION
+  const sha = process.env.RELEASE_SHA
+  const tag = `build-${version}`
+  const draft = { id: 42, tag_name: tag, target_commitish: sha, draft: true }
+  const remoteAssets = []
+  const events = []
+  let draftCreated = false
+  let arm64UploadAttempts = 0
+
+  const request = async (path, options = {}) => {
+    const method = options.method ?? 'GET'
+    if (method === 'GET' && path.endsWith('/releases?limit=50&page=1')) {
+      events.push('list releases')
+      return {
+        response: { ok: true, status: 200 },
+        data: draftCreated ? [draft] : [],
+      }
+    }
+    if (method === 'POST' && path.endsWith('/releases')) {
+      events.push('create draft')
+      draftCreated = true
+      return { response: { ok: true, status: 201 }, data: draft }
+    }
+    if (method === 'GET' && path.endsWith('/releases/42/assets')) {
+      events.push('list assets')
+      return { response: { ok: true, status: 200 }, data: [...remoteAssets] }
+    }
+    if (method === 'DELETE' && path.endsWith('/releases/42/assets/2')) {
+      events.push('delete incomplete arm64 asset')
+      const index = remoteAssets.findIndex(asset => asset.id === 2)
+      if (index >= 0) remoteAssets.splice(index, 1)
+      return { response: { ok: true, status: 204 }, data: null }
+    }
+    if (method === 'PATCH' && path.endsWith('/releases/42')) {
+      events.push('publish release')
+      assert.deepEqual(JSON.parse(options.body), { draft: false })
+      return { response: { ok: true, status: 200 }, data: { ...draft, draft: false } }
+    }
+    assert.fail(`Unexpected Gitea request: ${method} ${path}`)
+  }
+
+  const uploadAsset = async (releaseId, filePath) => {
+    assert.equal(releaseId, 42)
+    if (filePath === arm64Asset && arm64UploadAttempts++ === 0) {
+      events.push('fail arm64 upload')
+      remoteAssets.push({ id: 2, name: basename(filePath), size: 3 })
+      throw new Error('simulated interrupted upload')
+    }
+    remoteAssets.push({
+      id: filePath === x64Asset ? 1 : 3,
+      name: basename(filePath),
+      size: (await stat(filePath)).size,
+    })
+    events.push(`upload ${basename(filePath)}`)
+    return { name: basename(filePath) }
+  }
+
+  const options = {
+    request,
+    uploadAsset,
+    waitForMirrorTag: async ({ shouldExist, expectedSha }) => {
+      events.push('wait for mirrored tag')
+      assert.equal(shouldExist, true)
+      assert.equal(expectedSha, sha)
+    },
+    assets: [x64Asset, arm64Asset],
+    log: () => {},
+  }
+
+  try {
+    await assert.rejects(publishRelease(options), /simulated interrupted upload/)
+    await publishRelease(options)
+
+    assert.deepEqual(remoteAssets, [
+      { id: 1, name: basename(x64Asset), size: 18 },
+      { id: 3, name: basename(arm64Asset), size: 20 },
+    ])
+    assert.deepEqual(events, [
+      'list releases',
+      'create draft',
+      'list assets',
+      'upload rari-linux-x64.tgz',
+      'fail arm64 upload',
+      'list releases',
+      'list assets',
+      'delete incomplete arm64 asset',
+      'upload rari-linux-arm64.tgz',
+      'list assets',
+      'publish release',
+      'wait for mirrored tag',
+    ])
+  } finally {
+    await rm(directory, { recursive: true, force: true })
+  }
+})
+
+test('rejects a draft for a different commit before uploading assets', async () => {
+  const directory = await mkdtemp(join(tmpdir(), 'rari-fork-release-wrong-draft-'))
+  const asset = join(directory, 'rari-linux-x64.tgz')
+  await writeFile(asset, 'test asset')
+  let uploadCount = 0
+
+  try {
+    await assert.rejects(
+      publishRelease({
+        request: async (path, options = {}) => {
+          const method = options.method ?? 'GET'
+          if (method === 'GET' && path.endsWith('/releases?limit=50&page=1')) {
+            return {
+              response: { ok: true, status: 200 },
+              data: [
+                {
+                  id: 42,
+                  tag_name: 'build-0.17.9-fork.99-test.1',
+                  target_commitish: 'ffffffffffffffffffffffffffffffffffffffff',
+                  draft: true,
+                },
+              ],
+            }
+          }
+          assert.fail(`Unexpected Gitea request: ${method} ${path}`)
+        },
+        uploadAsset: async () => {
+          uploadCount += 1
+        },
+        assets: [asset],
+        log: () => {},
+      }),
+      /not a draft for commit/,
+    )
+    assert.equal(uploadCount, 0)
   } finally {
     await rm(directory, { recursive: true, force: true })
   }
