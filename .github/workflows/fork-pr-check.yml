@@ -111,7 +111,8 @@ jobs:
         run: |
           set -euo pipefail
           cargo build -p rari --bin rari --features ext-full,jemalloc
-          install -D target/debug/rari packages/rari-linux-x64/bin/rari
+          binary_arch="$(node -p 'process.arch')"
+          install -D target/debug/rari "packages/rari-linux-${binary_arch}/bin/rari"
 
       - name: Install Playwright browser
         if: steps.jemalloc.outputs.enabled == 'true'
