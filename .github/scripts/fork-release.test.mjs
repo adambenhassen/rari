@@ -1,5 +1,6 @@
 import assert from 'node:assert/strict'
-import { mkdtemp, rm, stat, writeFile } from 'node:fs/promises'
+import { createHash } from 'node:crypto'
+import { mkdtemp, readFile, rm, stat, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { basename, join } from 'node:path'
 import test from 'node:test'
@@ -95,11 +96,11 @@ test('creates a draft release, uploads assets, then publishes and waits for its 
   }
 })
 
-test('resumes a same-commit draft after a failed upload and replaces an incomplete asset', async () => {
+test('retry replaces same-size stale assets after a failed upload', async () => {
   const directory = await mkdtemp(join(tmpdir(), 'rari-fork-release-retry-'))
   const x64Asset = join(directory, 'rari-linux-x64.tgz')
   const arm64Asset = join(directory, 'rari-linux-arm64.tgz')
-  await writeFile(x64Asset, 'complete x64 asset')
+  await writeFile(x64Asset, 'stale x64 asset')
   await writeFile(arm64Asset, 'complete arm64 asset')
 
   const version = process.env.RELEASE_VERSION
@@ -110,6 +111,7 @@ test('resumes a same-commit draft after a failed upload and replaces an incomple
   const events = []
   let draftCreated = false
   let arm64UploadAttempts = 0
+  let nextAssetId = 1
 
   const request = async (path, options = {}) => {
     const method = options.method ?? 'GET'
@@ -129,9 +131,11 @@ test('resumes a same-commit draft after a failed upload and replaces an incomple
       events.push('list assets')
       return { response: { ok: true, status: 200 }, data: [...remoteAssets] }
     }
-    if (method === 'DELETE' && path.endsWith('/releases/42/assets/2')) {
-      events.push('delete incomplete arm64 asset')
-      const index = remoteAssets.findIndex(asset => asset.id === 2)
+    if (method === 'DELETE' && path.startsWith('/repos/adambenhassen/rari/releases/42/assets/')) {
+      const assetId = Number(path.split('/').at(-1))
+      const asset = remoteAssets.find(current => current.id === assetId)
+      events.push(`delete ${asset.name}`)
+      const index = remoteAssets.findIndex(current => current.id === assetId)
       if (index >= 0) remoteAssets.splice(index, 1)
       return { response: { ok: true, status: 204 }, data: null }
     }
@@ -147,13 +151,16 @@ test('resumes a same-commit draft after a failed upload and replaces an incomple
     assert.equal(releaseId, 42)
     if (filePath === arm64Asset && arm64UploadAttempts++ === 0) {
       events.push('fail arm64 upload')
-      remoteAssets.push({ id: 2, name: basename(filePath), size: 3 })
+      remoteAssets.push({ id: nextAssetId++, name: basename(filePath), size: 3 })
       throw new Error('simulated interrupted upload')
     }
     remoteAssets.push({
-      id: filePath === x64Asset ? 1 : 3,
+      id: nextAssetId++,
       name: basename(filePath),
       size: (await stat(filePath)).size,
+      sha256: createHash('sha256')
+        .update(await readFile(filePath))
+        .digest('hex'),
     })
     events.push(`upload ${basename(filePath)}`)
     return { name: basename(filePath) }
@@ -173,11 +180,28 @@ test('resumes a same-commit draft after a failed upload and replaces an incomple
 
   try {
     await assert.rejects(publishRelease(options), /simulated interrupted upload/)
+    const firstBuildSize = (await stat(x64Asset)).size
+    await writeFile(x64Asset, 'fresh x64 asset')
+    assert.equal((await stat(x64Asset)).size, firstBuildSize)
     await publishRelease(options)
 
     assert.deepEqual(remoteAssets, [
-      { id: 1, name: basename(x64Asset), size: 18 },
-      { id: 3, name: basename(arm64Asset), size: 20 },
+      {
+        id: 3,
+        name: basename(x64Asset),
+        size: 15,
+        sha256: createHash('sha256')
+          .update(await readFile(x64Asset))
+          .digest('hex'),
+      },
+      {
+        id: 4,
+        name: basename(arm64Asset),
+        size: 20,
+        sha256: createHash('sha256')
+          .update(await readFile(arm64Asset))
+          .digest('hex'),
+      },
     ])
     assert.deepEqual(events, [
       'list releases',
@@ -187,7 +211,9 @@ test('resumes a same-commit draft after a failed upload and replaces an incomple
       'fail arm64 upload',
       'list releases',
       'list assets',
-      'delete incomplete arm64 asset',
+      'delete rari-linux-x64.tgz',
+      'upload rari-linux-x64.tgz',
+      'delete rari-linux-arm64.tgz',
       'upload rari-linux-arm64.tgz',
       'list assets',
       'publish release',

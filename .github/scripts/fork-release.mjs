@@ -164,7 +164,7 @@ async function removeGiteaAsset(releaseId, asset, request) {
   const path = `/repos/${giteaRepository}/releases/${releaseId}/assets/${asset.id}`
   const { response, data } = await request(path, { method: 'DELETE' })
   if (response.status !== 204 && response.status !== 404) {
-    assertOk(response, data, `Delete incomplete Gitea release asset ${asset.name}`)
+    assertOk(response, data, `Delete previous Gitea release asset ${asset.name}`)
   }
 }
 
@@ -241,13 +241,8 @@ export async function publishRelease({
   const currentAssets = await listGiteaReleaseAssets(release.id, request)
   for (const asset of assets) {
     const assetName = basename(asset)
-    const expectedSize = (await stat(asset)).size
     const sameName = currentAssets.filter(current => current.name === assetName)
-    const completeAsset = sameName.find(current => Number(current.size) === expectedSize)
-    for (const current of sameName) {
-      if (current !== completeAsset) await removeGiteaAsset(release.id, current, request)
-    }
-    if (completeAsset) continue
+    for (const current of sameName) await removeGiteaAsset(release.id, current, request)
 
     const uploaded = await uploadAsset(release.id, asset)
     log(`Uploaded ${uploaded.name}`)

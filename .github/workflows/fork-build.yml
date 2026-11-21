@@ -15,14 +15,14 @@ on:
       delete_test_release:
         description: Delete the test prerelease and its mirrored tag
         required: false
-        default: false
-        type: boolean
+        default: 'false'
+        type: string
 
 permissions: {}
 
 jobs:
   build:
-    if: inputs.delete_test_release != true
+    if: inputs.delete_test_release != 'true'
     name: Build Linux release
     runs-on: inference-x64
     timeout-minutes: 300
@@ -312,7 +312,7 @@ jobs:
             '
 
   publish-release:
-    if: inputs.delete_test_release != true && github.ref == 'refs/heads/fork/main'
+    if: inputs.delete_test_release != 'true' && github.ref == 'refs/heads/fork/main'
     name: Publish Linux release
     needs: build
     runs-on: inference-x64
@@ -346,7 +346,7 @@ jobs:
         run: node .github/scripts/fork-release.mjs
 
   validate-cleanup-ref:
-    if: inputs.delete_test_release == true
+    if: inputs.delete_test_release == 'true'
     name: Validate cleanup source ref
     runs-on: inference-x64
     timeout-minutes: 5
@@ -364,13 +364,13 @@ jobs:
           fi
 
   delete-test-release:
-    if: inputs.delete_test_release == true && github.ref == 'refs/heads/fork/main'
+    if: inputs.delete_test_release == 'true' && github.ref == 'refs/heads/fork/main'
     name: Delete test release
     needs: validate-cleanup-ref
     runs-on: inference-x64
     timeout-minutes: 30
     permissions:
-      contents: read
+      contents: write
     steps:
       - name: Checkout
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
