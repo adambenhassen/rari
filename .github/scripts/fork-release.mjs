@@ -67,10 +67,15 @@ function assertOk(response, data, description) {
   }
 }
 
-async function waitForGithubMirrorTag({ shouldExist, expectedSha }) {
+export async function waitForGithubMirrorTag({
+  shouldExist,
+  expectedSha,
+  fetchTag = fetch,
+  sleepFn = pause,
+}) {
   const url = `https://api.github.com/repos/${githubMirrorRepository}/git/ref/tags/${encodeURIComponent(tag)}`
   for (let attempt = 0; attempt < 20; attempt += 1) {
-    const response = await fetch(url)
+    const response = await fetchTag(url)
     const data = await readResponse(response)
     if (shouldExist && response.ok) {
       const actualSha = data?.object?.sha
@@ -81,13 +86,17 @@ async function waitForGithubMirrorTag({ shouldExist, expectedSha }) {
     }
     if (!shouldExist && response.status === 404) return
     if (!shouldExist && response.ok) {
-      await pause(30_000)
+      await sleepFn(30_000)
+      continue
+    }
+    if (response.status === 403 || response.status === 429 || response.status >= 500) {
+      await sleepFn(30_000)
       continue
     }
     if (response.status !== 404) {
       throw new Error(`GitHub tag lookup failed (${response.status}): ${JSON.stringify(data)}`)
     }
-    await pause(30_000)
+    await sleepFn(30_000)
   }
   throw new Error(`GitHub mirror did not ${shouldExist ? 'receive' : 'remove'} tag ${tag} in time`)
 }
@@ -200,8 +209,16 @@ export async function publishRelease({
   const existingRelease = await findGiteaRelease(request)
   let release
   if (existingRelease) {
-    if (existingRelease.draft !== true || existingRelease.target_commitish !== sha) {
-      throw new Error(`Gitea release ${tag} exists but is not a draft for commit ${sha}`)
+    if (existingRelease.target_commitish !== sha) {
+      throw new Error(`Gitea release ${tag} targets a different commit than ${sha}`)
+    }
+    if (existingRelease.draft === false) {
+      await waitForMirrorTag({ shouldExist: true, expectedSha: sha })
+      log(`Verified mirrored tag for published Gitea prerelease ${tag}`)
+      return
+    }
+    if (existingRelease.draft !== true) {
+      throw new Error(`Gitea release ${tag} is not a draft for commit ${sha}`)
     }
     if (!Number.isSafeInteger(existingRelease.id)) {
       throw new Error(`Gitea draft release ${tag} has no valid release ID`)

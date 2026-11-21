@@ -8,10 +8,6 @@ on:
         required: true
         default: 0.17.9-fork.1
         type: string
-      issue:
-        description: Issue identifier for run routing
-        required: false
-        type: string
       delete_test_release:
         description: Delete the test prerelease and its mirrored tag
         required: false

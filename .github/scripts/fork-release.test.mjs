@@ -12,7 +12,38 @@ process.env.RELEASE_VERSION = '0.17.9-fork.99-test.1'
 process.env.RELEASE_SHA = '0123456789abcdef0123456789abcdef01234567'
 delete process.env.DELETE_TEST_RELEASE
 
-const { publishRelease } = await import('./fork-release.mjs')
+const { publishRelease, waitForGithubMirrorTag } = await import('./fork-release.mjs')
+
+test('retries GitHub rate limits and server errors while waiting for the mirrored tag', async () => {
+  const statuses = [403, 429, 503, 200]
+  const waits = []
+  let requestCount = 0
+
+  await waitForGithubMirrorTag({
+    shouldExist: true,
+    expectedSha: process.env.RELEASE_SHA,
+    fetchTag: async url => {
+      requestCount += 1
+      assert.equal(
+        url,
+        'https://api.github.com/repos/adambenhassen/rari/git/ref/tags/build-0.17.9-fork.99-test.1',
+      )
+      const status = statuses.shift()
+      return {
+        status,
+        ok: status >= 200 && status < 300,
+        text: async () =>
+          JSON.stringify(
+            status === 200 ? { object: { sha: process.env.RELEASE_SHA } } : { message: 'retry' },
+          ),
+      }
+    },
+    sleepFn: async milliseconds => waits.push(milliseconds),
+  })
+
+  assert.equal(requestCount, 4)
+  assert.deepEqual(waits, [30_000, 30_000, 30_000])
+})
 
 test('creates a draft release, uploads assets, then publishes and waits for its mirrored tag', async () => {
   const directory = await mkdtemp(join(tmpdir(), 'rari-fork-release-'))
@@ -224,6 +255,42 @@ test('retry replaces same-size stale assets after a failed upload', async () => 
   }
 })
 
+test('a published same-commit release only retries mirror verification', async () => {
+  const events = []
+  await publishRelease({
+    request: async (path, options = {}) => {
+      const method = options.method ?? 'GET'
+      events.push(`${method} ${path}`)
+      assert.equal(method, 'GET')
+      assert.equal(path, '/repos/adambenhassen/rari/releases?limit=50&page=1')
+      return {
+        response: { ok: true, status: 200 },
+        data: [
+          {
+            id: 42,
+            tag_name: 'build-0.17.9-fork.99-test.1',
+            target_commitish: process.env.RELEASE_SHA,
+            draft: false,
+          },
+        ],
+      }
+    },
+    uploadAsset: async () => assert.fail('published releases must not upload assets'),
+    waitForMirrorTag: async ({ shouldExist, expectedSha }) => {
+      events.push('wait for mirror')
+      assert.equal(shouldExist, true)
+      assert.equal(expectedSha, process.env.RELEASE_SHA)
+    },
+    assets: ['/missing/build-output.tgz'],
+    log: () => {},
+  })
+
+  assert.deepEqual(events, [
+    'GET /repos/adambenhassen/rari/releases?limit=50&page=1',
+    'wait for mirror',
+  ])
+})
+
 test('rejects a draft for a different commit before uploading assets', async () => {
   const directory = await mkdtemp(join(tmpdir(), 'rari-fork-release-wrong-draft-'))
   const asset = join(directory, 'rari-linux-x64.tgz')
@@ -256,7 +323,7 @@ test('rejects a draft for a different commit before uploading assets', async () 
         assets: [asset],
         log: () => {},
       }),
-      /not a draft for commit/,
+      /targets a different commit/,
     )
     assert.equal(uploadCount, 0)
   } finally {
