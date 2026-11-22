@@ -135,7 +135,11 @@ async function withReleaseOperationLock(request, operation, log) {
   const lockTagPath = `/repos/${giteaRepository}/tags/${encodeURIComponent(operationLockTag)}`
   const { response: lockTagResponse, data: lockTagData } = await request(lockTagPath)
   if (lockTagResponse.status !== 404) {
-    assertOk(lockTagResponse, lockTagData, `Gitea operation lock tag lookup for ${operationLockTag}`)
+    assertOk(
+      lockTagResponse,
+      lockTagData,
+      `Gitea operation lock tag lookup for ${operationLockTag}`,
+    )
     throw new Error(`Gitea operation lock tag ${operationLockTag} already exists`)
   }
 

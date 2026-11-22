@@ -12,7 +12,8 @@ process.env.RELEASE_VERSION = '0.17.9-fork.99-test.1'
 process.env.RELEASE_SHA = '0123456789abcdef0123456789abcdef01234567'
 delete process.env.DELETE_TEST_RELEASE
 
-const { deleteTestRelease, publishRelease, waitForGithubMirrorTag } = await import('./fork-release.mjs')
+const { deleteTestRelease, publishRelease, waitForGithubMirrorTag } =
+  await import('./fork-release.mjs')
 const skipTagCheck = async () => {}
 const skipOperationLock = operation => operation()
 
@@ -554,7 +555,12 @@ test('serializes publish and cleanup dispatches for the same version', async () 
       events.push('create version draft')
       return {
         response: { ok: true, status: 201 },
-        data: { id: 42, tag_name: body.tag_name, target_commitish: process.env.RELEASE_SHA, draft: true },
+        data: {
+          id: 42,
+          tag_name: body.tag_name,
+          target_commitish: process.env.RELEASE_SHA,
+          draft: true,
+        },
       }
     }
     if (method === 'GET' && path.endsWith('/releases?limit=50&page=1')) {
@@ -567,7 +573,8 @@ test('serializes publish and cleanup dispatches for the same version', async () 
       assetListCount += 1
       return {
         response: { ok: true, status: 200 },
-        data: assetListCount === 1 ? [] : [{ name: basename(asset), size: (await stat(asset)).size }],
+        data:
+          assetListCount === 1 ? [] : [{ name: basename(asset), size: (await stat(asset)).size }],
       }
     }
     if (method === 'PATCH' && path.endsWith('/releases/42')) {
