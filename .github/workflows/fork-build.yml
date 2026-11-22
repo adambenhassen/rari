@@ -278,9 +278,8 @@ jobs:
           docker cp \
             "$GITHUB_WORKSPACE/dist-tarballs/rari-linux-x64-${VERSION}.tgz" \
             "$smoke_container:/workspace/dist-tarballs/"
-          docker cp \
-            "$GITHUB_WORKSPACE/test/fixtures/app" \
-            "$smoke_container:/workspace/test/fixtures/"
+          tar -C "$GITHUB_WORKSPACE/test/fixtures" -chf - app \
+            | docker cp - "$smoke_container:/workspace/test/fixtures/"
           docker exec --env VERSION="$VERSION" "$smoke_container" sh -euc '
               apt-get update -qq
               apt-get install -y -qq ca-certificates curl libfontconfig1
