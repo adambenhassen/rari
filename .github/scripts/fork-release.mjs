@@ -13,6 +13,7 @@ const sha = process.env.RELEASE_SHA
 const deleting = process.env.DELETE_TEST_RELEASE === 'true'
 const githubMirrorRepository = 'adambenhassen/rari'
 const tag = `build-${version}`
+const operationLockTag = `${tag}-operation-lock`
 
 if (!giteaRepository || !giteaApiUrl || !giteaToken || !version) {
   throw new Error('Gitea API URL, repository, job token, and version are required')
@@ -113,6 +114,84 @@ async function findGiteaRelease(request = giteaRequest) {
     if (release) return release
     if (data.length < 50) return null
   }
+}
+
+async function assertGiteaTagCommit(request = giteaRequest) {
+  const path = `/repos/${giteaRepository}/tags/${encodeURIComponent(tag)}`
+  const { response, data } = await request(path)
+  if (response.status === 404) return
+  assertOk(response, data, `Gitea tag lookup for ${tag}`)
+
+  const actualSha = data?.commit?.sha
+  if (typeof actualSha !== 'string') {
+    throw new Error(`Gitea tag ${tag} did not include a commit SHA`)
+  }
+  if (actualSha.toLowerCase() !== sha.toLowerCase()) {
+    throw new Error(`Gitea tag ${tag} points to ${actualSha}, expected ${sha}`)
+  }
+}
+
+async function withReleaseOperationLock(request, operation, log) {
+  const lockTagPath = `/repos/${giteaRepository}/tags/${encodeURIComponent(operationLockTag)}`
+  const { response: lockTagResponse, data: lockTagData } = await request(lockTagPath)
+  if (lockTagResponse.status !== 404) {
+    assertOk(lockTagResponse, lockTagData, `Gitea operation lock tag lookup for ${operationLockTag}`)
+    throw new Error(`Gitea operation lock tag ${operationLockTag} already exists`)
+  }
+
+  const { response, data } = await request(`/repos/${giteaRepository}/releases`, {
+    method: 'POST',
+    body: JSON.stringify({
+      tag_name: operationLockTag,
+      target_commitish: sha,
+      name: operationLockTag,
+      body: `Temporary publish or cleanup lock for ${tag}.`,
+      draft: true,
+      prerelease: true,
+    }),
+  })
+  if (response.status === 409) {
+    throw new Error(
+      `Another publish or cleanup operation holds ${operationLockTag}; ` +
+        'if no workflow is active for this version, remove the stale lock draft and retry',
+    )
+  }
+  assertOk(response, data, `Acquire Gitea operation lock ${operationLockTag}`)
+  if (!Number.isSafeInteger(data?.id)) {
+    throw new Error(`Gitea operation lock ${operationLockTag} has no valid release ID`)
+  }
+
+  let result
+  let operationError
+  try {
+    result = await operation()
+  } catch (error) {
+    operationError = error
+  }
+
+  try {
+    const { response: deleteResponse, data: deleteData } = await request(
+      `/repos/${giteaRepository}/releases/${data.id}`,
+      { method: 'DELETE' },
+    )
+    if (deleteResponse.status !== 204 && deleteResponse.status !== 404) {
+      assertOk(deleteResponse, deleteData, `Release Gitea operation lock ${operationLockTag}`)
+    }
+  } catch (error) {
+    const lockError = new Error(
+      `Could not remove Gitea operation lock ${operationLockTag}; ` +
+        'remove the stale lock draft after confirming no workflow is active',
+      { cause: error },
+    )
+    if (operationError) {
+      log(lockError.message)
+      throw operationError
+    }
+    throw lockError
+  }
+
+  if (operationError) throw operationError
+  return result
 }
 
 async function uploadGiteaAsset(releaseId, filePath) {
@@ -243,7 +322,23 @@ async function verifyPublishedTarballs(release, files, request, downloadAsset) {
   }
 }
 
-export async function publishRelease({
+export async function publishRelease(options = {}) {
+  const {
+    request = giteaRequest,
+    checkTagCommit = () => assertGiteaTagCommit(request),
+    withOperationLock = (operation, log) => withReleaseOperationLock(request, operation, log),
+    log = console.log,
+  } = options
+
+  await checkTagCommit()
+
+  return withOperationLock(async () => {
+    await checkTagCommit()
+    return publishReleaseLocked({ ...options, request, log })
+  }, log)
+}
+
+async function publishReleaseLocked({
   request = giteaRequest,
   uploadAsset = uploadGiteaAsset,
   downloadAsset = downloadGiteaAsset,
@@ -330,7 +425,7 @@ export async function publishRelease({
   log(`Published Gitea prerelease ${tag}`)
 }
 
-export async function deleteTestRelease({
+async function deleteTestReleaseLocked({
   request = giteaRequest,
   waitForMirrorTag = waitForGithubMirrorTag,
   log = console.log,
@@ -361,6 +456,20 @@ export async function deleteTestRelease({
     throw new Error(`Gitea test release ${tag} still exists after cleanup`)
   }
   log(`Deleted Gitea test release and mirrored tag ${tag}`)
+}
+
+export async function deleteTestRelease(options = {}) {
+  const {
+    request = giteaRequest,
+    waitForMirrorTag = waitForGithubMirrorTag,
+    withOperationLock = (operation, log) => withReleaseOperationLock(request, operation, log),
+    log = console.log,
+  } = options
+
+  return withOperationLock(
+    () => deleteTestReleaseLocked({ ...options, request, waitForMirrorTag, log }),
+    log,
+  )
 }
 
 if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {

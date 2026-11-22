@@ -12,7 +12,9 @@ process.env.RELEASE_VERSION = '0.17.9-fork.99-test.1'
 process.env.RELEASE_SHA = '0123456789abcdef0123456789abcdef01234567'
 delete process.env.DELETE_TEST_RELEASE
 
-const { publishRelease, waitForGithubMirrorTag } = await import('./fork-release.mjs')
+const { deleteTestRelease, publishRelease, waitForGithubMirrorTag } = await import('./fork-release.mjs')
+const skipTagCheck = async () => {}
+const skipOperationLock = operation => operation()
 
 test('retries GitHub rate limits and server errors while waiting for the mirrored tag', async () => {
   const statuses = [403, 429, 503, 200]
@@ -89,6 +91,8 @@ test('creates a draft release, uploads assets, then publishes and waits for its 
     const originalRequest = request
     let assetLists = 0
     await publishRelease({
+      checkTagCommit: skipTagCheck,
+      withOperationLock: skipOperationLock,
       request: async (path, options = {}) => {
         if ((options.method ?? 'GET') === 'GET' && path.endsWith('/releases/42/assets')) {
           assetLists += 1
@@ -146,6 +150,9 @@ test('retry replaces same-size stale assets after a failed upload', async () => 
 
   const request = async (path, options = {}) => {
     const method = options.method ?? 'GET'
+    if (method === 'GET' && path.endsWith(`/tags/${tag}-operation-lock`)) {
+      return { response: { ok: false, status: 404 }, data: { message: 'Not Found' } }
+    }
     if (method === 'GET' && path.endsWith('/releases?limit=50&page=1')) {
       events.push('list releases')
       return {
@@ -154,9 +161,18 @@ test('retry replaces same-size stale assets after a failed upload', async () => 
       }
     }
     if (method === 'POST' && path.endsWith('/releases')) {
+      const body = JSON.parse(options.body)
+      if (body.tag_name === `${tag}-operation-lock`) {
+        events.push('acquire lock')
+        return { response: { ok: true, status: 201 }, data: { id: 900, draft: true } }
+      }
       events.push('create draft')
       draftCreated = true
       return { response: { ok: true, status: 201 }, data: draft }
+    }
+    if (method === 'DELETE' && path.endsWith('/releases/900')) {
+      events.push('release lock')
+      return { response: { ok: true, status: 204 }, data: null }
     }
     if (method === 'GET' && path.endsWith('/releases/42/assets')) {
       events.push('list assets')
@@ -199,6 +215,7 @@ test('retry replaces same-size stale assets after a failed upload', async () => 
 
   const options = {
     request,
+    checkTagCommit: skipTagCheck,
     uploadAsset,
     waitForMirrorTag: async ({ shouldExist, expectedSha }) => {
       events.push('wait for mirrored tag')
@@ -235,11 +252,14 @@ test('retry replaces same-size stale assets after a failed upload', async () => 
       },
     ])
     assert.deepEqual(events, [
+      'acquire lock',
       'list releases',
       'create draft',
       'list assets',
       'upload rari-linux-x64.tgz',
       'fail arm64 upload',
+      'release lock',
+      'acquire lock',
       'list releases',
       'list assets',
       'delete rari-linux-x64.tgz',
@@ -249,6 +269,7 @@ test('retry replaces same-size stale assets after a failed upload', async () => 
       'list assets',
       'publish release',
       'wait for mirrored tag',
+      'release lock',
     ])
   } finally {
     await rm(directory, { recursive: true, force: true })
@@ -283,8 +304,16 @@ test('a published same-commit release verifies both rebuilt tarballs before mirr
 
   try {
     await publishRelease({
+      withOperationLock: skipOperationLock,
       request: async (path, options = {}) => {
         const method = options.method ?? 'GET'
+        if (method === 'GET' && path.endsWith('/tags/build-0.17.9-fork.99-test.1')) {
+          events.push('check tag')
+          return {
+            response: { ok: true, status: 200 },
+            data: { commit: { sha: process.env.RELEASE_SHA } },
+          }
+        }
         if (method === 'GET' && path.endsWith('/releases?limit=50&page=1')) {
           events.push('list releases')
           return {
@@ -320,6 +349,8 @@ test('a published same-commit release verifies both rebuilt tarballs before mirr
     })
 
     assert.deepEqual(events, [
+      'check tag',
+      'check tag',
       'list releases',
       'list assets',
       `download ${tarballs[0].name}`,
@@ -358,6 +389,8 @@ test('a published same-commit retry rejects a rebuilt tarball with different byt
   try {
     await assert.rejects(
       publishRelease({
+        checkTagCommit: skipTagCheck,
+        withOperationLock: skipOperationLock,
         request: async (path, options = {}) => {
           const method = options.method ?? 'GET'
           if (method === 'GET' && path.endsWith('/releases?limit=50&page=1')) {
@@ -412,6 +445,8 @@ test('rejects a draft for a different commit before uploading assets', async () 
   try {
     await assert.rejects(
       publishRelease({
+        checkTagCommit: skipTagCheck,
+        withOperationLock: skipOperationLock,
         request: async (path, options = {}) => {
           const method = options.method ?? 'GET'
           if (method === 'GET' && path.endsWith('/releases?limit=50&page=1')) {
@@ -439,6 +474,146 @@ test('rejects a draft for a different commit before uploading assets', async () 
     )
     assert.equal(uploadCount, 0)
   } finally {
+    await rm(directory, { recursive: true, force: true })
+  }
+})
+
+test('rejects an existing tag on another commit before creating a draft or uploading assets', async () => {
+  const directory = await mkdtemp(join(tmpdir(), 'rari-fork-release-existing-tag-'))
+  const asset = join(directory, 'rari-linux-x64.tgz')
+  await writeFile(asset, 'test asset')
+  const events = []
+  let uploadCount = 0
+
+  try {
+    await assert.rejects(
+      publishRelease({
+        request: async (path, options = {}) => {
+          const method = options.method ?? 'GET'
+          if (method === 'GET' && path.endsWith(`/tags/build-${process.env.RELEASE_VERSION}`)) {
+            events.push('check tag')
+            return {
+              response: { ok: true, status: 200 },
+              data: { commit: { sha: 'ffffffffffffffffffffffffffffffffffffffff' } },
+            }
+          }
+          events.push(`${method} ${path}`)
+          assert.fail(`Unexpected Gitea request: ${method} ${path}`)
+        },
+        uploadAsset: async () => {
+          uploadCount += 1
+        },
+        assets: [asset],
+        log: () => {},
+      }),
+      /Gitea tag .* points to .* expected/,
+    )
+    assert.deepEqual(events, ['check tag'])
+    assert.equal(uploadCount, 0)
+  } finally {
+    await rm(directory, { recursive: true, force: true })
+  }
+})
+
+test('serializes publish and cleanup dispatches for the same version', async () => {
+  const directory = await mkdtemp(join(tmpdir(), 'rari-fork-release-lock-'))
+  const asset = join(directory, 'rari-linux-x64.tgz')
+  await writeFile(asset, 'test asset')
+
+  const lockTag = `build-${process.env.RELEASE_VERSION}-operation-lock`
+  const events = []
+  let lockHeld = false
+  let assetListCount = 0
+  let releaseReleaseList
+  let releaseListStarted
+  const releaseListStartedPromise = new Promise(resolve => {
+    releaseListStarted = resolve
+  })
+  const releaseListGate = new Promise(resolve => {
+    releaseReleaseList = resolve
+  })
+
+  const request = async (path, options = {}) => {
+    const method = options.method ?? 'GET'
+    if (method === 'GET' && path.endsWith(`/tags/${lockTag}`)) {
+      return { response: { ok: false, status: 404 }, data: { message: 'Not Found' } }
+    }
+    if (method === 'GET' && path.endsWith(`/tags/build-${process.env.RELEASE_VERSION}`)) {
+      events.push('check version tag')
+      return { response: { ok: false, status: 404 }, data: { message: 'Not Found' } }
+    }
+    if (method === 'POST' && path.endsWith('/releases')) {
+      const body = JSON.parse(options.body)
+      if (body.tag_name === lockTag) {
+        events.push('attempt lock')
+        if (lockHeld) return { response: { ok: false, status: 409 }, data: { message: 'Conflict' } }
+        lockHeld = true
+        events.push('acquire lock')
+        return { response: { ok: true, status: 201 }, data: { id: 900, draft: true } }
+      }
+      events.push('create version draft')
+      return {
+        response: { ok: true, status: 201 },
+        data: { id: 42, tag_name: body.tag_name, target_commitish: process.env.RELEASE_SHA, draft: true },
+      }
+    }
+    if (method === 'GET' && path.endsWith('/releases?limit=50&page=1')) {
+      events.push('list version releases')
+      releaseListStarted()
+      await releaseListGate
+      return { response: { ok: true, status: 200 }, data: [] }
+    }
+    if (method === 'GET' && path.endsWith('/releases/42/assets')) {
+      assetListCount += 1
+      return {
+        response: { ok: true, status: 200 },
+        data: assetListCount === 1 ? [] : [{ name: basename(asset), size: (await stat(asset)).size }],
+      }
+    }
+    if (method === 'PATCH' && path.endsWith('/releases/42')) {
+      events.push('publish version release')
+      return { response: { ok: true, status: 200 }, data: { id: 42, draft: false } }
+    }
+    if (method === 'DELETE' && path.endsWith('/releases/900')) {
+      events.push('release lock')
+      lockHeld = false
+      return { response: { ok: true, status: 204 }, data: null }
+    }
+    events.push(`${method} ${path}`)
+    assert.fail(`Unexpected Gitea request: ${method} ${path}`)
+  }
+
+  try {
+    const publishing = publishRelease({
+      request,
+      uploadAsset: async (_releaseId, filePath) => ({ name: basename(filePath) }),
+      assets: [asset],
+      waitForMirrorTag: async () => {},
+      log: () => {},
+    })
+
+    await releaseListStartedPromise
+    await assert.rejects(
+      deleteTestRelease({ request, waitForMirrorTag: async () => {}, log: () => {} }),
+      /Another publish or cleanup operation holds/,
+    )
+    releaseReleaseList()
+    await publishing
+
+    assert.equal(lockHeld, false)
+    assert.deepEqual(events, [
+      'check version tag',
+      'attempt lock',
+      'acquire lock',
+      'check version tag',
+      'list version releases',
+      'attempt lock',
+      'create version draft',
+      'publish version release',
+      'release lock',
+    ])
+  } finally {
+    releaseReleaseList()
     await rm(directory, { recursive: true, force: true })
   }
 })
@@ -492,6 +667,15 @@ test('deletes only the selected test release and tag', async () => {
     const { deleteTestRelease } = await import(cleanupModule.href)
     const request = async (path, options = {}) => {
       const method = options.method ?? 'GET'
+      if (method === 'GET' && path.endsWith(`/tags/${tag}-operation-lock`)) {
+        return { response: { ok: false, status: 404 }, data: { message: 'Not Found' } }
+      }
+      if (method === 'POST' && path.endsWith('/releases')) {
+        events.push('acquire cleanup lock')
+        assert.equal(JSON.parse(options.body).tag_name, `${tag}-operation-lock`)
+        return { response: { ok: true, status: 201 }, data: { id: 90, draft: true } }
+      }
+
       if (method === 'GET' && path.endsWith('/releases?limit=50&page=1')) {
         events.push('list releases')
         return {
@@ -503,6 +687,11 @@ test('deletes only the selected test release and tag', async () => {
       if (method === 'DELETE' && path === '/repos/adambenhassen/rari/releases/42') {
         events.push('delete selected release')
         deletedReleaseIds.push(42)
+        return { response: { ok: true, status: 204 }, data: null }
+      }
+
+      if (method === 'DELETE' && path === '/repos/adambenhassen/rari/releases/90') {
+        events.push('release cleanup lock')
         return { response: { ok: true, status: 204 }, data: null }
       }
 
@@ -527,11 +716,13 @@ test('deletes only the selected test release and tag', async () => {
     assert.deepEqual(deletedReleaseIds, [testRelease.id])
     assert.deepEqual(deletedTags, [tag])
     assert.deepEqual(events, [
+      'acquire cleanup lock',
       'list releases',
       'delete selected release',
       'delete selected tag',
       'wait for mirror deletion',
       'list releases',
+      'release cleanup lock',
     ])
   } finally {
     if (previousVersion === undefined) delete process.env.RELEASE_VERSION
