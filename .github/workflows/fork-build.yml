@@ -4,23 +4,40 @@ on:
   workflow_dispatch:
     inputs:
       version:
-        description: Prerelease version for platform tarballs
+        description: Prerelease version for Linux platform tarballs
         required: true
-        default: 0.17.9-fork.1
         type: string
-      issue:
-        description: Issue key to route this build run to (for example MAIN-3724)
+      delete_test_release:
+        description: Delete the test prerelease and its mirrored tag
         required: false
+        default: 'false'
         type: string
 
 permissions: {}
 
 jobs:
-  validate:
-    name: Validate release request
-    runs-on: ubuntu-latest
+  build:
+    if: inputs.delete_test_release != 'true'
+    name: Build Linux release
+    runs-on: inference-x64
+    timeout-minutes: 300
+    permissions:
+      contents: read
+    env:
+      CARGO_PROFILE_RELEASE_DEBUG: line-tables-only
+      CARGO_PROFILE_RELEASE_STRIP: none
+      CARGO_BUILD_JOBS: 2
+      CARGO_INCREMENTAL: 0
+      NODE_OPTIONS: --max-old-space-size=6144
+      PNPM_CONFIG_WORKSPACE_CONCURRENCY: 1
     steps:
-      - name: Require fork/main and a fork version
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+
+      - name: Validate release request
         env:
           BUILD_REF: ${{ github.ref }}
           VERSION: ${{ inputs.version }}
@@ -30,39 +47,10 @@ jobs:
             echo "Dispatch this workflow from fork/main (got $BUILD_REF)" >&2
             exit 1
           fi
-          if [[ ! "$VERSION" =~ ^0\.17\.9-fork\.[0-9]+$ ]]; then
-            echo "Version must match 0.17.9-fork.<n> (got $VERSION)" >&2
+          if [[ ! "$VERSION" =~ ^0\.17\.9-fork\.[0-9]+(-test\.[0-9]+)?$ ]]; then
+            echo "Version must match 0.17.9-fork.<n> or 0.17.9-fork.<n>-test.<n>" >&2
             exit 1
           fi
-
-  build:
-    name: Build ${{ matrix.platform }}
-    needs: validate
-    runs-on: ${{ matrix.os }}
-    timeout-minutes: 150
-    permissions:
-      contents: read
-    env:
-      CARGO_PROFILE_RELEASE_DEBUG: line-tables-only
-      CARGO_PROFILE_RELEASE_STRIP: none
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - platform: linux-x64
-            os: ubuntu-latest
-            target: x86_64-unknown-linux-gnu
-            name: rari-linux-x64
-          - platform: linux-arm64
-            os: ubuntu-24.04-arm
-            target: aarch64-unknown-linux-gnu
-            name: rari-linux-arm64
-    steps:
-      - name: Checkout
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          ref: ${{ github.sha }}
-          persist-credentials: false
 
       - name: Install pnpm
         uses: pnpm/action-setup@ea17c68df8912ef543352723c149a84f56e3d413 # v6.1.0
@@ -71,31 +59,40 @@ jobs:
         uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
           node-version: 24.21.0
-          cache: pnpm
 
       - name: Install JavaScript dependencies
         run: pnpm install --frozen-lockfile
+
+      - name: Install Linux build and ARM64 smoke dependencies
+        run: |
+          set -euo pipefail
+          sudo dpkg --add-architecture arm64
+          sudo sed -i '/^Types: deb$/a Architectures: amd64' /etc/apt/sources.list.d/ubuntu.sources
+          sudo tee /etc/apt/sources.list.d/ubuntu-arm64-ports.sources >/dev/null <<'EOF'
+          Types: deb
+          URIs: http://ports.ubuntu.com/ubuntu-ports
+          Suites: noble noble-updates noble-backports noble-security
+          Components: main restricted universe multiverse
+          Architectures: arm64
+          Signed-By: /usr/share/keyrings/ubuntu-archive-keyring.gpg
+          EOF
+          sudo apt-get update
+          sudo apt-get install -y \
+            binutils mold pkg-config libfontconfig1-dev libclang-dev \
+            gcc-aarch64-linux-gnu g++-aarch64-linux-gnu binutils-aarch64-linux-gnu \
+            qemu-user-static libfontconfig1:arm64 libfontconfig1-dev:arm64
+
+      - name: Bundle React ESM vendor files
+        run: pnpm --filter @rari/bundle-react-esm bundle
 
       - name: Install Rust
         uses: dtolnay/rust-toolchain@02cb101ec7c40f2c49e1d9714d64511d8e1b74de # v1
         with:
           toolchain: nightly
-          targets: ${{ matrix.target }}
+          targets: x86_64-unknown-linux-gnu,aarch64-unknown-linux-gnu
 
-      - name: Cache Rust
-        uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
-        with:
-          key: ${{ matrix.target }}
-          prefix-key: fork-main-v1
-
-      - name: Install Linux build dependencies
-        if: runner.os == 'Linux'
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y binutils mold pkg-config libfontconfig1-dev
-
-      - name: Bundle React ESM vendor files
-        run: pnpm --filter @rari/bundle-react-esm bundle
+      - name: Build smoke test app
+        run: pnpm --filter @test/app... build
 
       - name: Create snapshot placeholder
         run: |
@@ -104,62 +101,97 @@ jobs:
           echo 'pub static RESIDUAL_LAZY_ESM_SOURCES: &[(&str, &str)] = &[];' > crates/rari/snapshots/residual_lazy_sources.rs
           echo 'pub static RESIDUAL_LAZY_JS_SOURCES: &[(&str, &str)] = &[];' >> crates/rari/snapshots/residual_lazy_sources.rs
 
-      - name: Generate V8 snapshot (Linux)
-        if: runner.os == 'Linux'
+      - name: Generate V8 snapshot
         run: cargo run --release --manifest-path tools/snapshot/Cargo.toml -- crates/rari/snapshots
         env:
           RUSTFLAGS: -C link-arg=-fuse-ld=mold -Cforce-frame-pointers=yes
 
-      - name: Build binary (Linux)
-        if: runner.os == 'Linux'
-        run: cargo build --release --target ${{ matrix.target }} --bin rari --features ext-full,jemalloc
+      - name: Build Linux x64 binary
+        run: cargo build --release --target x86_64-unknown-linux-gnu --bin rari --features ext-full,jemalloc
         env:
           RUSTFLAGS: -C link-arg=-fuse-ld=mold -Cforce-frame-pointers=yes
 
-      - name: Prepare Linux binary and debug sidecar
-        if: runner.os == 'Linux'
+      - name: Build and run the ARM64 snapshot generator
         run: |
           set -euo pipefail
-          mkdir -p binaries
-          BIN=target/${{ matrix.target }}/release/rari
-          objcopy --only-keep-debug "$BIN" "binaries/${{ matrix.name }}.debug"
-          objcopy --strip-debug "$BIN" "binaries/${{ matrix.name }}"
-          objcopy --add-gnu-debuglink="binaries/${{ matrix.name }}.debug" "binaries/${{ matrix.name }}"
-          chmod +x "binaries/${{ matrix.name }}"
-          ls -lh binaries/
+          export CC_aarch64_unknown_linux_gnu=aarch64-linux-gnu-gcc
+          export CXX_aarch64_unknown_linux_gnu=aarch64-linux-gnu-g++
+          export AR_aarch64_unknown_linux_gnu=aarch64-linux-gnu-ar
+          export CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER=aarch64-linux-gnu-gcc
+          export PKG_CONFIG_ALLOW_CROSS=1
+          export PKG_CONFIG_LIBDIR=/usr/lib/aarch64-linux-gnu/pkgconfig:/usr/share/pkgconfig
+          export PKG_CONFIG_PATH=/usr/lib/aarch64-linux-gnu/pkgconfig
+          export PKG_CONFIG_SYSROOT_DIR=/
+          export RUSTFLAGS='-Cforce-frame-pointers=yes'
+          cargo build --release --manifest-path tools/snapshot/Cargo.toml \
+            --target aarch64-unknown-linux-gnu
+          qemu-aarch64-static -L /usr/aarch64-linux-gnu \
+            target/aarch64-unknown-linux-gnu/release/rari-snapshot crates/rari/snapshots
 
-      - name: Upload binary and debug sidecar
-        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
-        with:
-          name: ${{ matrix.name }}
-          path: binaries/
-          if-no-files-found: error
-          retention-days: 7
+      - name: Build Linux ARM64 binary
+        run: |
+          set -euo pipefail
+          export CC_aarch64_unknown_linux_gnu=aarch64-linux-gnu-gcc
+          export CXX_aarch64_unknown_linux_gnu=aarch64-linux-gnu-g++
+          export AR_aarch64_unknown_linux_gnu=aarch64-linux-gnu-ar
+          export CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER=aarch64-linux-gnu-gcc
+          export PKG_CONFIG_ALLOW_CROSS=1
+          export PKG_CONFIG_LIBDIR=/usr/lib/aarch64-linux-gnu/pkgconfig:/usr/share/pkgconfig
+          export PKG_CONFIG_PATH=/usr/lib/aarch64-linux-gnu/pkgconfig
+          export PKG_CONFIG_SYSROOT_DIR=/
+          export RUSTFLAGS='-Cforce-frame-pointers=yes'
+          cargo build --release --target aarch64-unknown-linux-gnu --bin rari --features ext-full,jemalloc
 
-  release:
-    name: Package and publish prerelease
-    needs: build
-    runs-on: ubuntu-latest
-    permissions:
-      contents: write
-    steps:
-      - name: Checkout
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          ref: ${{ github.sha }}
-          persist-credentials: false
+      - name: Smoke-test Linux ARM64 binary under QEMU
+        run: |
+          set -euo pipefail
+          binary="$GITHUB_WORKSPACE/target/aarch64-unknown-linux-gnu/release/rari"
+          qemu-aarch64-static -L /usr/aarch64-linux-gnu "$binary" --version
+          cd test/fixtures/app
+          qemu-aarch64-static -L /usr/aarch64-linux-gnu "$binary" \
+            --mode production --host 127.0.0.1 --port 43819 \
+            > "$RUNNER_TEMP/rari-arm64-smoke.log" 2>&1 &
+          server_pid=$!
+          cleanup() {
+            kill "$server_pid" 2>/dev/null || true
+            wait "$server_pid" 2>/dev/null || true
+          }
+          trap cleanup EXIT
+          rendered=false
+          for attempt in $(seq 1 60); do
+            if curl --fail --silent --show-error http://127.0.0.1:43819/ \
+              --output "$RUNNER_TEMP/rari-arm64-render.html"; then
+              rendered=true
+              break
+            fi
+            if ! kill -0 "$server_pid" 2>/dev/null; then
+              cat "$RUNNER_TEMP/rari-arm64-smoke.log"
+              exit 1
+            fi
+            sleep 1
+          done
+          if [[ "$rendered" != true ]] || ! grep -Fq 'Test App Home' "$RUNNER_TEMP/rari-arm64-render.html"; then
+            cat "$RUNNER_TEMP/rari-arm64-smoke.log"
+            echo 'ARM64 server did not render the smoke-test page' >&2
+            exit 1
+          fi
 
-      - name: Setup Node.js
-        uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
-        with:
-          node-version: 24.21.0
+      - name: Prepare Linux binaries and debug sidecars
+        run: |
+          set -euo pipefail
+          mkdir -p release-assets
+          x64=target/x86_64-unknown-linux-gnu/release/rari
+          arm64=target/aarch64-unknown-linux-gnu/release/rari
+          objcopy --only-keep-debug "$x64" release-assets/rari-linux-x64.debug
+          objcopy --strip-debug "$x64" release-assets/rari-linux-x64
+          objcopy --add-gnu-debuglink=release-assets/rari-linux-x64.debug release-assets/rari-linux-x64
+          aarch64-linux-gnu-objcopy --only-keep-debug "$arm64" release-assets/rari-linux-arm64.debug
+          aarch64-linux-gnu-objcopy --strip-debug "$arm64" release-assets/rari-linux-arm64
+          aarch64-linux-gnu-objcopy --add-gnu-debuglink=release-assets/rari-linux-arm64.debug release-assets/rari-linux-arm64
+          chmod +x release-assets/rari-linux-x64 release-assets/rari-linux-arm64
+          file release-assets/rari-linux-x64 release-assets/rari-linux-arm64
 
-      - name: Download binaries
-        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
-        with:
-          path: artifacts
-
-      - name: Build platform tarballs
+      - name: Package Linux npm tarballs
         env:
           VERSION: ${{ inputs.version }}
         run: |
@@ -167,11 +199,11 @@ jobs:
           mkdir -p dist-tarballs
 
           build_platform() {
-            local platform="$1" os="$2" cpu="$3" description="$4"
+            local platform="$1" cpu="$2" description="$3"
             local pkg="rari-${platform}"
             local dir="packages/${pkg}"
             mkdir -p "${dir}/bin"
-            cp "artifacts/${pkg}/${pkg}" "${dir}/bin/rari"
+            cp "release-assets/${pkg}" "${dir}/bin/rari"
             chmod +x "${dir}/bin/rari"
             cat > "${dir}/package.json" <<EOF
           {
@@ -181,7 +213,7 @@ jobs:
             "description": "Runtime Accelerated Rendering Infrastructure (${description})",
             "author": "Ryan Skinner",
             "license": "MIT",
-            "os": ["${os}"],
+            "os": ["linux"],
             "cpu": ["${cpu}"],
             "homepage": "https://github.com/rari-build/rari#readme",
             "bin": {"rari": "./bin/rari"},
@@ -191,33 +223,177 @@ jobs:
           EOF
             cp LICENSE "${dir}/LICENSE"
             printf '# %s\n' "${pkg}" > "${dir}/README.md"
-            (cd "${dir}" && npm pack --pack-destination "${GITHUB_WORKSPACE}/dist-tarballs")
+            (cd "${dir}" && npm pack --pack-destination "$GITHUB_WORKSPACE/dist-tarballs")
           }
 
-          build_platform linux-x64 linux x64 "Linux x64 binary"
-          build_platform linux-arm64 linux arm64 "Linux ARM64 binary"
-          ls -lh dist-tarballs
+          build_platform linux-x64 x64 'Linux x64 binary'
+          build_platform linux-arm64 arm64 'Linux ARM64 binary'
+          ls -lh dist-tarballs release-assets
 
-      - name: Create GitHub prerelease
+      - name: Record Linux tarball checksums
         env:
-          GH_TOKEN: ${{ github.token }}
           VERSION: ${{ inputs.version }}
         run: |
           set -euo pipefail
-          TAG="build-${VERSION}"
-          NOTES_FILE="${RUNNER_TEMP}/release-notes.md"
-          cat > "${NOTES_FILE}" <<EOF
-          Fork prerelease built from fork/main at ${GITHUB_SHA}.
+          mkdir -p build-provenance
+          (
+            cd dist-tarballs
+            sha256sum \
+              "rari-linux-x64-${VERSION}.tgz" \
+              "rari-linux-arm64-${VERSION}.tgz"
+          ) > build-provenance/SHA256SUMS
+          cat build-provenance/SHA256SUMS >> "$GITHUB_STEP_SUMMARY"
 
-          Platform packages are version ${VERSION} and can be consumed through pnpm overrides using the attached tarball URLs.
+      - name: Upload Linux build provenance
+        uses: ChristopherHX/gitea-upload-artifact@62ac910c5d3dfa85c7cb2df15afe2e342b2407c2 # Gitea-compatible v4 fork
+        with:
+          name: fork-build-provenance-${{ inputs.version }}
+          path: build-provenance/SHA256SUMS
+          if-no-files-found: error
+          retention-days: 90
 
-          Assets include stripped Linux rari binaries and separate .debug ELF sidecars.
-          EOF
-          gh release create "${TAG}" \
-            --repo "${GITHUB_REPOSITORY}" \
-            --title "${TAG}" \
-            --notes-file "${NOTES_FILE}" \
-            --prerelease \
-            --target "${GITHUB_SHA}" \
-            dist-tarballs/*.tgz \
-            artifacts/rari-*/*
+      - name: Upload release assets for the trusted publisher
+        uses: ChristopherHX/gitea-upload-artifact@62ac910c5d3dfa85c7cb2df15afe2e342b2407c2 # Gitea-compatible v4 fork
+        with:
+          name: fork-release-assets
+          path: |
+            dist-tarballs/
+            release-assets/
+          if-no-files-found: error
+          retention-days: 1
+
+      - name: Smoke-test packaged Linux x64 binary on the production base image
+        env:
+          VERSION: ${{ inputs.version }}
+        run: |
+          set -euo pipefail
+          smoke_container="$(docker create --platform linux/amd64 \
+            node:24-trixie-slim node -e 'setInterval(() => {}, 60000)')"
+          cleanup() {
+            docker rm --force "$smoke_container" >/dev/null 2>&1 || true
+          }
+          trap cleanup EXIT
+          docker start "$smoke_container" >/dev/null
+          docker exec "$smoke_container" mkdir -p /workspace/dist-tarballs /workspace/test/fixtures
+          docker cp \
+            "$GITHUB_WORKSPACE/dist-tarballs/rari-linux-x64-${VERSION}.tgz" \
+            "$smoke_container:/workspace/dist-tarballs/"
+          tar -C "$GITHUB_WORKSPACE/test/fixtures" -chf - app \
+            | docker cp - "$smoke_container:/workspace/test/fixtures/"
+          docker exec --env VERSION="$VERSION" "$smoke_container" sh -euc '
+              apt-get update -qq
+              apt-get install -y -qq ca-certificates curl libfontconfig1
+              mkdir -p /tmp/rari-package
+              tar -xzf "/workspace/dist-tarballs/rari-linux-x64-${VERSION}.tgz" \
+                -C /tmp/rari-package --strip-components=1
+              cd /workspace/test/fixtures/app
+              /tmp/rari-package/bin/rari --version
+              /tmp/rari-package/bin/rari --mode production --host 127.0.0.1 --port 43820 \
+                > /tmp/rari-x64-smoke.log 2>&1 &
+              server_pid=$!
+              cleanup() {
+                kill "$server_pid" 2>/dev/null || true
+                wait "$server_pid" 2>/dev/null || true
+              }
+              trap cleanup EXIT
+              rendered=false
+              for attempt in $(seq 1 60); do
+                if curl --fail --silent http://127.0.0.1:43820/ \
+                  --output /tmp/rari-x64-render.html; then
+                  rendered=true
+                  break
+                fi
+                if ! kill -0 "$server_pid" 2>/dev/null; then
+                  cat /tmp/rari-x64-smoke.log
+                  exit 1
+                fi
+                sleep 1
+              done
+              if [ "$rendered" != true ] || ! grep -Fq "Test App Home" /tmp/rari-x64-render.html; then
+                cat /tmp/rari-x64-smoke.log
+                echo "Packaged x64 binary did not render the smoke-test page" >&2
+                exit 1
+              fi
+            '
+
+  publish-release:
+    if: inputs.delete_test_release != 'true' && github.ref == 'refs/heads/fork/main'
+    name: Publish Linux release
+    needs: build
+    runs-on: inference-x64
+    timeout-minutes: 30
+    permissions:
+      contents: write
+    steps:
+      - name: Checkout trusted workflow code
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+
+      - name: Install Node.js
+        uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: 24.21.0
+
+      - name: Download release assets
+        uses: ChristopherHX/gitea-download-artifact@75635f32b4c1c41c4b3d64e8f85210112ed4c9c7 # Gitea-compatible v4 fork
+        with:
+          name: fork-release-assets
+
+      - name: Publish Gitea prerelease and wait for the mirrored tag
+        env:
+          GITEA_API_URL: ${{ github.api_url }}
+          GITEA_REPOSITORY: ${{ github.repository }}
+          GITEA_TOKEN: ${{ secrets.GITEA_TOKEN }}
+          RELEASE_VERSION: ${{ inputs.version }}
+          RELEASE_SHA: ${{ github.sha }}
+        run: node .github/scripts/fork-release.mjs
+
+  validate-cleanup-ref:
+    if: inputs.delete_test_release == 'true'
+    name: Validate cleanup source ref
+    runs-on: inference-x64
+    timeout-minutes: 5
+    permissions:
+      contents: read
+    steps:
+      - name: Validate cleanup ref
+        env:
+          BUILD_REF: ${{ github.ref }}
+        run: |
+          set -euo pipefail
+          if [[ "$BUILD_REF" != "refs/heads/fork/main" ]]; then
+            echo "Dispatch this workflow from fork/main (got $BUILD_REF)" >&2
+            exit 1
+          fi
+
+  delete-test-release:
+    if: inputs.delete_test_release == 'true' && github.ref == 'refs/heads/fork/main'
+    name: Delete test release
+    needs: validate-cleanup-ref
+    runs-on: inference-x64
+    timeout-minutes: 30
+    permissions:
+      contents: write
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+
+      - name: Install Node.js
+        uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: 24.21.0
+
+      - name: Delete Gitea test release and mirrored tag
+        env:
+          GITEA_API_URL: ${{ github.api_url }}
+          GITEA_REPOSITORY: ${{ github.repository }}
+          GITEA_TOKEN: ${{ secrets.GITEA_TOKEN }}
+          RELEASE_VERSION: ${{ inputs.version }}
+          RELEASE_SHA: ${{ github.sha }}
+          DELETE_TEST_RELEASE: 'true'
+        run: node .github/scripts/fork-release.mjs

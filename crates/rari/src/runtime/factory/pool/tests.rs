@@ -1,5 +1,5 @@
 use std::{
-    future::Future,
+    future::{Future, pending},
     pin::Pin,
     sync::{
         Arc, Mutex,
@@ -1343,8 +1343,7 @@ async fn with_request_context_op_timeout_keeps_slot_healthy_when_cleanup_ok() {
 
     let result = pool
         .with_request_context(Arc::clone(&ctx), |_runtime| async {
-            sleep(Duration::from_millis(80)).await;
-            Ok(1_i32)
+            pending::<Result<i32, RariError>>().await
         })
         .await;
 

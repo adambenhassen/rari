@@ -313,10 +313,7 @@ impl JsExecutionRuntime {
 #[cfg(test)]
 #[expect(clippy::expect_used)]
 mod tests {
-    use std::{
-        sync::Arc,
-        time::{Duration, Instant},
-    };
+    use std::sync::Arc;
 
     use rari_error::RariError;
     use tokio::sync::mpsc;
@@ -342,12 +339,10 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn overlapping_streams_on_one_isolate_finish_near_max_delay() {
+    async fn overlapping_streams_on_one_isolate_start_before_any_finish() {
         let runtime = Arc::new(JsExecutionRuntime::with_pool_size(None, 1));
-        let delay_ms = 200u64;
         let stream_count = 4usize;
 
-        let start = Instant::now();
         let mut join_handles = Vec::with_capacity(stream_count);
 
         for i in 0..stream_count {
@@ -356,7 +351,23 @@ mod tests {
             let (tx, mut rx) = mpsc::channel::<Result<Vec<u8>, RariError>>(8);
             let script = format!(
                 r#"(async function() {{
-                    await new Promise((resolve) => setTimeout(resolve, {delay_ms}));
+                    const state = globalThis.__rari_overlap_test ??= {{ started: 0, waiters: [] }};
+                    state.started += 1;
+                    const allStarted = await new Promise((resolve) => {{
+                        const timeout = setTimeout(() => resolve(false), 2000);
+                        const release = () => {{
+                            clearTimeout(timeout);
+                            resolve(true);
+                        }};
+                        if (state.started === {stream_count}) {{
+                            for (const wake of state.waiters) wake();
+                            state.waiters = [];
+                            release();
+                        }} else {{
+                            state.waiters.push(release);
+                        }}
+                    }});
+                    if (!allStarted) throw new Error("streams did not overlap on one isolate");
                     await Deno.core.ops.op_fizz_chunk("{stream_id}", "chunk-{i}");
                     Deno.core.ops.op_fizz_done("{stream_id}");
                 }})()"#
@@ -392,17 +403,7 @@ mod tests {
             successes += 1;
         }
 
-        let elapsed = start.elapsed();
         assert_eq!(successes, stream_count);
-        // Serial would be ~800ms; overlapped should be near 200ms (+ runtime overhead).
-        assert!(
-            elapsed < Duration::from_millis(delay_ms * stream_count as u64 / 2 + 400),
-            "expected overlapped streams, elapsed={elapsed:?}"
-        );
-        assert!(
-            elapsed >= Duration::from_millis(delay_ms.saturating_sub(50)),
-            "elapsed unexpectedly fast: {elapsed:?}"
-        );
     }
 
     #[tokio::test]
