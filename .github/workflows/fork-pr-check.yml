@@ -2,8 +2,6 @@ name: Fork PR check
 
 on:
   pull_request:
-    branches:
-      - '*/main'
 
 permissions: {}
 

@@ -267,10 +267,21 @@ jobs:
           VERSION: ${{ inputs.version }}
         run: |
           set -euo pipefail
-          docker run --rm --platform linux/amd64 \
-            -e VERSION="$VERSION" \
-            -v "$GITHUB_WORKSPACE:/workspace:ro" \
-            node:24-trixie-slim sh -euc '
+          smoke_container="$(docker create --platform linux/amd64 \
+            node:24-trixie-slim node -e 'setInterval(() => {}, 60000)')"
+          cleanup() {
+            docker rm --force "$smoke_container" >/dev/null 2>&1 || true
+          }
+          trap cleanup EXIT
+          docker start "$smoke_container" >/dev/null
+          docker exec "$smoke_container" mkdir -p /workspace/dist-tarballs /workspace/test/fixtures
+          docker cp \
+            "$GITHUB_WORKSPACE/dist-tarballs/rari-linux-x64-${VERSION}.tgz" \
+            "$smoke_container:/workspace/dist-tarballs/"
+          docker cp \
+            "$GITHUB_WORKSPACE/test/fixtures/app" \
+            "$smoke_container:/workspace/test/fixtures/"
+          docker exec --env VERSION="$VERSION" "$smoke_container" sh -euc '
               apt-get update -qq
               apt-get install -y -qq ca-certificates curl libfontconfig1
               mkdir -p /tmp/rari-package
