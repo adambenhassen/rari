@@ -154,14 +154,14 @@ test('rejects global Docker cleanup and filters that are not unique to a job', (
   )
 })
 
-test('resolves explicit Compose files from the step working directory', async () => {
+test('resolves explicit Compose files from commented steps in the step working directory', async () => {
   const root = await mkdtemp(join(tmpdir(), 'docker-safety-'))
   const subdirectory = join(root, 'services', 'api')
   const workflowPath = join(root, '.github', 'workflows', 'check.yml')
   const workflow = [
     'jobs:',
     '  check:',
-    '    steps:',
+    '    steps: # run steps',
     '      - name: Start services',
     '        working-directory: services/api',
     '        run: docker compose -f custom-compose.yml up',

@@ -244,14 +244,14 @@ function yamlScalar(value) {
 
 function defaultRunWorkingDirectory(lines, start, end, defaultsIndent) {
   for (let index = start; index < end; index += 1) {
-    const defaultsMatch = lines[index].match(/^(\s*)defaults:\s*$/)
+    const defaultsMatch = lines[index].match(/^(\s*)defaults:\s*(?:#.*)?$/)
     if (!defaultsMatch || defaultsMatch[1].length !== defaultsIndent) continue
 
     for (let next = index + 1; next < end; next += 1) {
       const line = lines[next]
       if (line.trim() && line.match(/^\s*/)[0].length <= defaultsIndent) break
       const indent = line.match(/^\s*/)[0].length
-      if (indent !== defaultsIndent + 2 || !/^\s*run:\s*$/.test(line)) continue
+      if (indent !== defaultsIndent + 2 || !/^\s*run:\s*(?:#.*)?$/.test(line)) continue
 
       for (let runLine = next + 1; runLine < end; runLine += 1) {
         const runLineText = lines[runLine]
@@ -271,7 +271,7 @@ function workflowSteps(source) {
   const workflowDefault = defaultRunWorkingDirectory(lines, 0, lines.length, 0)
 
   for (let index = 0; index < lines.length; index += 1) {
-    const stepsMatch = lines[index].match(/^(\s*)steps:\s*$/)
+    const stepsMatch = lines[index].match(/^(\s*)steps:\s*(?:#.*)?$/)
     if (!stepsMatch) continue
 
     const stepsIndent = stepsMatch[1].length
@@ -280,7 +280,7 @@ function workflowSteps(source) {
     let jobStart = -1
     for (let previous = index - 1; previous >= 0; previous -= 1) {
       const line = lines[previous]
-      if (line.match(/^\s*/)[0].length === jobIndent && /^[\w.-]+:\s*$/.test(line.trim())) {
+      if (line.match(/^\s*/)[0].length === jobIndent && /^[\w.-]+:\s*(?:#.*)?$/.test(line.trim())) {
         jobStart = previous
         break
       }
