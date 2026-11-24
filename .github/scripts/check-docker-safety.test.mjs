@@ -45,6 +45,12 @@ test('rejects global Docker cleanup and filters that are not unique to a job', (
     ['unfiltered Docker prune'],
   )
   assert.deepEqual(
+    findDockerSafetyViolations('docker --context remote system prune -af').map(
+      ({ message }) => message,
+    ),
+    ['unfiltered Docker prune'],
+  )
+  assert.deepEqual(
     findDockerSafetyViolations(
       ['docker', 'network', 'prune', '--filter', 'label=ci.task=$GITHUB_RUN_ID'].join(' '),
     ).map(({ message }) => message),
@@ -164,6 +170,12 @@ test('rejects global Docker cleanup and filters that are not unique to a job', (
 test('requires Docker container names to include the run, attempt, and job identity', () => {
   assert.deepEqual(
     findDockerSafetyViolations('docker create --name rari-smoke-image alpine').map(
+      ({ message }) => message,
+    ),
+    ['container name is not unique to this job'],
+  )
+  assert.deepEqual(
+    findDockerSafetyViolations('docker --context remote run --name fixed alpine').map(
       ({ message }) => message,
     ),
     ['container name is not unique to this job'],
@@ -318,6 +330,38 @@ test('scans a Compose file passed as an attached -f argument', async () => {
       [{ path: workflowPath, source: workflow }],
       {},
     )
+
+    assert.deepEqual(
+      composeFiles.map(({ path }) => path),
+      [resolve(root, 'custom.yml')],
+    )
+    assert.deepEqual(
+      composeFiles.flatMap(({ path, source }) =>
+        findDockerSafetyViolations(source, path).map(({ message }) => message),
+      ),
+      ['fixed host-port publishing'],
+    )
+  } finally {
+    await rm(root, { recursive: true, force: true })
+  }
+})
+
+test('scans Compose files after Docker root options', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'docker-safety-docker-root-option-'))
+  const workflowPath = join(root, '.github', 'workflows', 'check.yml')
+  const workflow = [
+    'jobs:',
+    '  check:',
+    '    steps:',
+    '      - run: docker --context remote compose -f custom.yml up',
+  ].join('\n')
+  const fixedCompose = 'services:\n  db:\n    ports:\n      - "127.0.0.1:5432:5432"'
+
+  try {
+    await mkdir(join(root, '.github', 'workflows'), { recursive: true })
+    await writeFile(join(root, 'custom.yml'), fixedCompose)
+
+    const composeFiles = await collectComposeFiles(root, [{ path: workflowPath, source: workflow }])
 
     assert.deepEqual(
       composeFiles.map(({ path }) => path),

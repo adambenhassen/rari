@@ -56,6 +56,26 @@ const composeGlobalOptionsWithValue = new Set([
   '-H',
   '-p',
 ])
+const dockerRootOptionsWithValue = new Set([
+  '--config',
+  '--context',
+  '--host',
+  '--log-level',
+  '--tlscacert',
+  '--tlscert',
+  '--tlskey',
+  '-c',
+  '-H',
+  '-l',
+])
+const dockerRootOptionsWithoutValue = new Set([
+  '--debug',
+  '--help',
+  '--tls',
+  '--tlsverify',
+  '--version',
+  '-D',
+])
 
 function logicalCommands(lines) {
   const commands = []
@@ -70,6 +90,96 @@ function logicalCommands(lines) {
   }
 
   return commands
+}
+
+function shellTokens(source) {
+  return [...source.matchAll(/"(?:\\.|[^"\\])*"|'[^']*'|[^\s]+/g)].map(match => ({
+    value: match[0],
+    start: match.index,
+    end: match.index + match[0].length,
+  }))
+}
+
+function unquoteShellToken(token) {
+  return (token.startsWith('"') && token.endsWith('"')) ||
+    (token.startsWith("'") && token.endsWith("'"))
+    ? token.slice(1, -1)
+    : token
+}
+
+function commandWord(token) {
+  return unquoteShellToken(token)
+    .replace(/^[($`]+|[);`]+$/g, '')
+    .toLowerCase()
+}
+
+function dockerInvocations(source) {
+  const matches = [...source.matchAll(/\bdocker(?=\s|$|-compose\b)/gi)]
+  const invocations = []
+
+  for (let matchIndex = 0; matchIndex < matches.length; matchIndex += 1) {
+    const match = matches[matchIndex]
+    const end = matches[matchIndex + 1]?.index ?? source.length
+    const afterDocker = match.index + match[0].length
+    const tokens = shellTokens(source.slice(afterDocker, end))
+
+    for (let index = 0; index < tokens.length; index += 1) {
+      const token = commandWord(tokens[index].value)
+
+      if (token === '-compose') {
+        invocations.push({
+          subcommand: 'compose',
+          arguments: source.slice(afterDocker + tokens[index].end, end),
+          command: source.slice(match.index, end),
+        })
+        break
+      }
+
+      if (dockerRootOptionsWithValue.has(token)) {
+        if (!tokens[index + 1]) break
+        index += 1
+        continue
+      }
+
+      const attachedValueOption = [...dockerRootOptionsWithValue].some(
+        option =>
+          token.startsWith(`${option}=`) ||
+          (option.length === 2 &&
+            option.startsWith('-') &&
+            token.startsWith(option) &&
+            token.length > 2),
+      )
+      if (
+        attachedValueOption ||
+        dockerRootOptionsWithoutValue.has(token) ||
+        token.startsWith('-')
+      ) {
+        continue
+      }
+
+      invocations.push({
+        subcommand: token,
+        arguments: source.slice(afterDocker + tokens[index].end, end),
+        command: source.slice(match.index, end),
+      })
+      break
+    }
+  }
+
+  return invocations
+}
+
+function removesEveryDockerContainer(invocations) {
+  const forceRemove = invocations.some(
+    invocation =>
+      invocation.subcommand === 'rm' &&
+      /(?:^|\s)(?:--force|-[a-z]*f[a-z]*)(?:\s|$)/i.test(invocation.arguments),
+  )
+  const listsEveryContainer = invocations.some(
+    invocation =>
+      invocation.subcommand === 'ps' && /(?:^|\s)-[a-z]*aq\b/i.test(invocation.arguments),
+  )
+  return forceRemove && listsEveryContainer
 }
 
 function hasVariable(value, name) {
@@ -249,45 +359,45 @@ export function findDockerSafetyViolations(source, file = '<input>') {
   const matrixContext = isWorkflow ? workflowMatrixContext(source) : undefined
 
   for (const command of logicalCommands(lines)) {
-    if (/\bdocker\s+(?:create|run)\b/i.test(command.text)) {
-      const name = dockerContainerName(command.text, source)
-      const hasUnscopedAssignment = name?.assignments.some(
-        assignment =>
-          !assignment.expandsVariables ||
-          !hasJobScopedContainerName(assignment.value, matrixContext),
-      )
+    const invocations = dockerInvocations(command.text)
+
+    for (const invocation of invocations) {
+      if (invocation.subcommand === 'create' || invocation.subcommand === 'run') {
+        const name = dockerContainerName(invocation.command, source)
+        const hasUnscopedAssignment = name?.assignments.some(
+          assignment =>
+            !assignment.expandsVariables ||
+            !hasJobScopedContainerName(assignment.value, matrixContext),
+        )
+        if (
+          !name ||
+          !name.expandsVariables ||
+          !hasJobScopedContainerName(name.value, matrixContext) ||
+          hasUnscopedAssignment
+        ) {
+          violations.push({
+            file,
+            line: command.line,
+            message: 'container name is not unique to this job',
+          })
+        }
+      }
+
+      if (hasFixedDockerPublish(invocation.command)) {
+        violations.push({ file, line: command.line, message: 'fixed host-port publishing' })
+      }
+
       if (
-        !name ||
-        !name.expandsVariables ||
-        !hasJobScopedContainerName(name.value, matrixContext) ||
-        hasUnscopedAssignment
+        /^(?:system|container|image|volume|network|builder)\s+prune\b/i.test(
+          `${invocation.subcommand}${invocation.arguments}`,
+        ) &&
+        !hasJobLabelFilter(`${invocation.subcommand}${invocation.arguments}`, matrixContext)
       ) {
-        violations.push({
-          file,
-          line: command.line,
-          message: 'container name is not unique to this job',
-        })
+        violations.push({ file, line: command.line, message: 'unfiltered Docker prune' })
       }
     }
 
-    if (hasFixedDockerPublish(command.text)) {
-      violations.push({ file, line: command.line, message: 'fixed host-port publishing' })
-    }
-
-    if (
-      /\bdocker\s+(?:system|container|image|volume|network|builder)\s+prune\b/i.test(
-        command.text,
-      ) &&
-      !hasJobLabelFilter(command.text, matrixContext)
-    ) {
-      violations.push({ file, line: command.line, message: 'unfiltered Docker prune' })
-    }
-
-    if (
-      /\bdocker\s+rm\b[\s\S]*?(?:--force|(?:^|\s)-[a-z]*f[a-z]*)[\s\S]*?\bdocker\s+ps\b[\s\S]*?-aq\b/i.test(
-        command.text,
-      )
-    ) {
+    if (removesEveryDockerContainer(invocations)) {
       violations.push({ file, line: command.line, message: 'removing every Docker container' })
     }
   }
@@ -343,8 +453,8 @@ function normalizeShellContinuations(source) {
 }
 
 function hasDockerComposeCommand(source) {
-  return /\bdocker(?:\s+compose|-compose)\b(?=\s|[);|&]|$)/i.test(
-    normalizeShellContinuations(source),
+  return dockerInvocations(normalizeShellContinuations(source)).some(
+    invocation => invocation.subcommand === 'compose',
   )
 }
 
@@ -416,21 +526,16 @@ function shellCommandSegments(source) {
 
 function composeFileReferences(source) {
   const references = []
-  const unquote = token =>
-    (token.startsWith('"') && token.endsWith('"')) || (token.startsWith("'") && token.endsWith("'"))
-      ? token.slice(1, -1)
-      : token
-
-  const composeCommand = /\bdocker(?:\s+compose|-compose)\b(?=\s|[);|&]|$)/gi
 
   for (const segment of shellCommandSegments(source)) {
-    for (const command of segment.matchAll(composeCommand)) {
-      const argumentSource = segment.slice(command.index + command[0].length)
-      const tokens = argumentSource.match(/"(?:\\.|[^"\\])*"|'[^']*'|[^\s]+/g) || []
+    for (const command of dockerInvocations(segment)) {
+      if (command.subcommand !== 'compose') continue
+
+      const tokens = shellTokens(command.arguments)
       for (let index = 0; index < tokens.length; index += 1) {
-        const token = unquote(tokens[index])
-        const commandWord = token.replace(/^[($`]+|[);`]+$/g, '').toLowerCase()
-        if (composeSubcommands.has(commandWord)) break
+        const token = unquoteShellToken(tokens[index].value)
+        const word = commandWord(tokens[index].value)
+        if (composeSubcommands.has(word)) break
 
         let reference
 
@@ -438,7 +543,7 @@ function composeFileReferences(source) {
           if (!tokens[index + 1]) {
             throw new Error(`Cannot statically resolve explicit Compose file option in ${segment}`)
           }
-          reference = unquote(tokens[++index])
+          reference = unquoteShellToken(tokens[++index].value)
         } else if (token.startsWith('--file=')) {
           reference = token.slice('--file='.length)
         } else if (token.startsWith('--file')) {
