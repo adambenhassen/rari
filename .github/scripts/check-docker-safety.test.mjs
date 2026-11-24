@@ -50,14 +50,40 @@ test('rejects global Docker cleanup and filters that are not unique to a job', (
         'network',
         'prune',
         '--filter',
-        'label=ci.task=$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT-$GITHUB_JOB-$MATRIX_ID',
+        '"label=ci.task=$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT-$GITHUB_JOB-${{ toJSON(matrix) }}"',
       ].join(' '),
     ),
     [],
   )
   assert.deepEqual(
     findDockerSafetyViolations(
-      'docker network prune --filter "label=ci.task=${{ github.run_id }}-${{ github.run_attempt }}-${{ github.job }}-${{ matrix.target }}"',
+      [
+        'jobs:',
+        '  check:',
+        '    strategy:',
+        '      matrix:',
+        '        os: [linux, windows]',
+        '        target: [x86, arm]',
+        '    steps:',
+        '      - run: docker network prune --filter "label=ci.task=${{ github.run_id }}-${{ github.run_attempt }}-${{ github.job }}-${{ matrix.target }}"',
+      ].join('\n'),
+      '.github/workflows/check.yml',
+    ).map(({ message }) => message),
+    ['unfiltered Docker prune'],
+  )
+  assert.deepEqual(
+    findDockerSafetyViolations(
+      [
+        'jobs:',
+        '  check:',
+        '    strategy:',
+        '      matrix:',
+        '        os: [linux, windows]',
+        '        target: [x86, arm]',
+        '    steps:',
+        '      - run: docker network prune --filter "label=ci.task=${{ github.run_id }}-${{ github.run_attempt }}-${{ github.job }}-${{ matrix.os }}-${{ matrix.target }}"',
+      ].join('\n'),
+      '.github/workflows/check.yml',
     ),
     [],
   )
@@ -92,6 +118,45 @@ test('resolves explicit Compose files from the step working directory', async ()
     '    steps:',
     '      - name: Start services',
     '        working-directory: services/api',
+    '        run: docker compose -f custom-compose.yml up',
+  ].join('\n')
+  const fixedCompose = 'services:\n  db:\n    ports:\n      - "127.0.0.1:5432:5432"'
+
+  try {
+    await mkdir(subdirectory, { recursive: true })
+    await mkdir(join(root, '.github', 'workflows'), { recursive: true })
+    await writeFile(join(root, 'custom-compose.yml'), 'services: {}\n')
+    await writeFile(join(subdirectory, 'custom-compose.yml'), fixedCompose)
+
+    const composeFiles = await collectComposeFiles(root, [{ path: workflowPath, source: workflow }])
+
+    assert.deepEqual(
+      composeFiles.map(({ path }) => path),
+      [resolve(root, 'services/api/custom-compose.yml')],
+    )
+    assert.deepEqual(
+      composeFiles.flatMap(({ path, source }) =>
+        findDockerSafetyViolations(source, path).map(({ message }) => message),
+      ),
+      ['fixed host-port publishing'],
+    )
+  } finally {
+    await rm(root, { recursive: true, force: true })
+  }
+})
+
+test('resolves Compose files using the job default run working directory', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'docker-safety-defaults-'))
+  const subdirectory = join(root, 'services', 'api')
+  const workflowPath = join(root, '.github', 'workflows', 'check.yml')
+  const workflow = [
+    'jobs:',
+    '  check:',
+    '    defaults:',
+    '      run:',
+    '        working-directory: services/api',
+    '    steps:',
+    '      - name: Start services',
     '        run: docker compose -f custom-compose.yml up',
   ].join('\n')
   const fixedCompose = 'services:\n  db:\n    ports:\n      - "127.0.0.1:5432:5432"'

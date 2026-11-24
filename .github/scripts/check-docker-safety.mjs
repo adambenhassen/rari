@@ -25,18 +25,30 @@ function logicalCommands(lines) {
   return commands
 }
 
-function hasJobLabelFilter(command) {
+function hasVariable(value, name) {
+  const patterns = [`\\$\\{\\{\\s*(?:env\\.)?${name}\\s*\\}\\}`, `\\$\\{${name}\\}`, `\\$${name}`]
+  const githubContext = {
+    GITHUB_JOB: 'github.job',
+    GITHUB_RUN_ATTEMPT: 'github.run_attempt',
+    GITHUB_RUN_ID: 'github.run_id',
+  }[name]
+  if (githubContext) patterns.push(`\\$\\{\\{\\s*${githubContext}\\s*\\}\\}`)
+  return new RegExp(`(?:${patterns.join('|')})(?![\\w])`, 'i').test(value)
+}
+
+function hasMatrixField(value, field) {
+  const escapedField = field.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
+  const matrixExpression = new RegExp(`\\$\\{\\{\\s*matrix\\.${escapedField}\\s*\\}\\}`, 'i')
+  const envName = `MATRIX_${field.replace(/[^a-z\d_]/gi, '_').toUpperCase()}`
+  return matrixExpression.test(value) || hasVariable(value, envName)
+}
+
+function hasFullMatrixExpression(value) {
+  return /\$\{\{\s*toJSON\s*\(\s*matrix\s*\)\s*\}\}/i.test(value)
+}
+
+function hasJobLabelFilter(command, matrixContext) {
   const filter = /--filter(?:=|\s+)(?:"([^"]+)"|'([^']+)'|([^\s]+))/gi
-  const hasVariable = (value, name) => {
-    const patterns = [`\\$\\{\\{\\s*(?:env\\.)?${name}\\s*\\}\\}`, `\\$\\{${name}\\}`, `\\$${name}`]
-    const githubContext = {
-      GITHUB_JOB: 'github.job',
-      GITHUB_RUN_ATTEMPT: 'github.run_attempt',
-      GITHUB_RUN_ID: 'github.run_id',
-    }[name]
-    if (githubContext) patterns.push(`\\$\\{\\{\\s*${githubContext}\\s*\\}\\}`)
-    return new RegExp(`(?:${patterns.join('|')})(?![\\w])`, 'i').test(value)
-  }
 
   for (const match of command.matchAll(filter)) {
     const criterion = match[1] ?? match[2] ?? match[3]
@@ -55,8 +67,12 @@ function hasJobLabelFilter(command) {
     const runIdentity = ['GITHUB_RUN_ID', 'GITHUB_RUN_ATTEMPT', 'GITHUB_JOB'].every(name =>
       hasVariable(value, name),
     )
-    const matrixIdentity =
-      /\$\{\{\s*matrix\.[\w.-]+\s*\}\}/i.test(value) || /\$\{?MATRIX_[A-Z0-9_]+\}?/i.test(value)
+    const matrixIdentity = matrixContext
+      ? !matrixContext.hasMatrix ||
+        hasFullMatrixExpression(value) ||
+        (matrixContext.keys.length > 0 &&
+          matrixContext.keys.every(key => hasMatrixField(value, key)))
+      : hasFullMatrixExpression(value)
     if (runIdentity && matrixIdentity) return true
   }
   return false
@@ -74,9 +90,39 @@ function hasFixedPortMapping(value) {
   )
 }
 
+function workflowMatrixContext(source) {
+  const lines = source.split(/\r?\n/)
+  const keys = new Set()
+  let hasMatrix = false
+
+  for (let index = 0; index < lines.length; index += 1) {
+    const match = lines[index].match(/^(\s*)matrix:\s*(.*?)\s*$/)
+    if (!match) continue
+
+    hasMatrix = true
+    const matrixIndent = match[1].length
+    if (match[2] && !match[2].startsWith('#')) continue
+
+    for (let next = index + 1; next < lines.length; next += 1) {
+      const line = lines[next]
+      if (!line.trim() || line.trimStart().startsWith('#')) continue
+      const indent = line.match(/^\s*/)[0].length
+      if (indent <= matrixIndent) break
+      if (indent !== matrixIndent + 2) continue
+
+      const dimension = line.trim().match(/^([\w-]+):(?:\s|$)/)
+      if (dimension && !['include', 'exclude'].includes(dimension[1])) keys.add(dimension[1])
+    }
+  }
+
+  return { hasMatrix, keys: [...keys] }
+}
+
 export function findDockerSafetyViolations(source, file = '<input>') {
   const lines = source.split(/\r?\n/)
   const violations = []
+  const isWorkflow = /[\\/]workflows[\\/][^\\/]+\.ya?ml$/.test(file)
+  const matrixContext = isWorkflow ? workflowMatrixContext(source) : undefined
 
   for (const command of logicalCommands(lines)) {
     if (hasFixedDockerPublish(command.text)) {
@@ -87,7 +133,7 @@ export function findDockerSafetyViolations(source, file = '<input>') {
       /\bdocker\s+(?:system|container|image|volume|network|builder)\s+prune\b/i.test(
         command.text,
       ) &&
-      !hasJobLabelFilter(command.text)
+      !hasJobLabelFilter(command.text, matrixContext)
     ) {
       violations.push({ file, line: command.line, message: 'unfiltered Docker prune' })
     }
@@ -156,9 +202,44 @@ function composeFileReferences(source) {
   return references
 }
 
+function yamlScalar(value) {
+  const trimmed = value.trim()
+  if (
+    (trimmed.startsWith('"') && trimmed.endsWith('"')) ||
+    (trimmed.startsWith("'") && trimmed.endsWith("'"))
+  ) {
+    return trimmed.slice(1, -1)
+  }
+  return trimmed.replace(/\s+#.*$/, '')
+}
+
+function defaultRunWorkingDirectory(lines, start, end, defaultsIndent) {
+  for (let index = start; index < end; index += 1) {
+    const defaultsMatch = lines[index].match(/^(\s*)defaults:\s*$/)
+    if (!defaultsMatch || defaultsMatch[1].length !== defaultsIndent) continue
+
+    for (let next = index + 1; next < end; next += 1) {
+      const line = lines[next]
+      if (line.trim() && line.match(/^\s*/)[0].length <= defaultsIndent) break
+      const indent = line.match(/^\s*/)[0].length
+      if (indent !== defaultsIndent + 2 || !/^\s*run:\s*$/.test(line)) continue
+
+      for (let runLine = next + 1; runLine < end; runLine += 1) {
+        const runLineText = lines[runLine]
+        if (runLineText.trim() && runLineText.match(/^\s*/)[0].length <= indent) break
+        const workingDirectory = runLineText.match(/^\s*working-directory:\s*(.*?)\s*$/)
+        if (workingDirectory) return yamlScalar(workingDirectory[1])
+      }
+    }
+  }
+
+  return undefined
+}
+
 function workflowSteps(source) {
   const lines = source.split(/\r?\n/)
   const steps = []
+  const workflowDefault = defaultRunWorkingDirectory(lines, 0, lines.length, 0)
 
   for (let index = 0; index < lines.length; index += 1) {
     const stepsMatch = lines[index].match(/^(\s*)steps:\s*$/)
@@ -166,6 +247,28 @@ function workflowSteps(source) {
 
     const stepsIndent = stepsMatch[1].length
     const stepIndent = stepsIndent + 2
+    const jobIndent = stepsIndent - 2
+    let jobStart = -1
+    for (let previous = index - 1; previous >= 0; previous -= 1) {
+      const line = lines[previous]
+      if (line.match(/^\s*/)[0].length === jobIndent && /^[\w.-]+:\s*$/.test(line.trim())) {
+        jobStart = previous
+        break
+      }
+    }
+    let jobEnd = lines.length
+    if (jobStart >= 0) {
+      for (let next = jobStart + 1; next < lines.length; next += 1) {
+        if (lines[next].trim() && lines[next].match(/^\s*/)[0].length <= jobIndent) {
+          jobEnd = next
+          break
+        }
+      }
+    }
+    const jobDefault =
+      jobStart >= 0
+        ? defaultRunWorkingDirectory(lines, jobStart + 1, jobEnd, jobIndent + 2)
+        : undefined
     let block = []
     for (let next = index + 1; next < lines.length; next += 1) {
       const line = lines[next]
@@ -173,21 +276,25 @@ function workflowSteps(source) {
 
       const indent = line.match(/^\s*/)[0].length
       if (line.trim() && indent === stepIndent && /^\s*-\s*/.test(line)) {
-        if (block.length > 0) steps.push(block)
+        if (block.length > 0) {
+          steps.push({ lines: block, defaultWorkingDirectory: jobDefault ?? workflowDefault })
+        }
         block = [line.replace(/^\s*-\s?/, '')]
       } else if (block.length > 0) {
         block.push(line)
       }
     }
-    if (block.length > 0) steps.push(block)
+    if (block.length > 0) {
+      steps.push({ lines: block, defaultWorkingDirectory: jobDefault ?? workflowDefault })
+    }
   }
 
-  return steps.map(linesInStep => {
+  return steps.map(({ lines: linesInStep, defaultWorkingDirectory }) => {
     const stepSource = linesInStep.join('\n')
     const workingDirectory = stepSource.match(/^\s*working-directory:\s*(.*?)\s*$/m)?.[1]
     return {
       source: stepSource,
-      workingDirectory: workingDirectory?.replace(/^['"]|['"]$/g, ''),
+      workingDirectory: workingDirectory ? yamlScalar(workingDirectory) : defaultWorkingDirectory,
     }
   })
 }
