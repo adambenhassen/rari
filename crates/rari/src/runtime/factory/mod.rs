@@ -7,7 +7,7 @@ mod runtime;
 mod runtime_builder;
 pub(crate) mod utils;
 
-use std::sync::Arc;
+use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 
 pub use interface::JsRuntimeInterface;
 pub use pool::{
@@ -15,6 +15,12 @@ pub use pool::{
 };
 pub use runtime::RariRuntime;
 use rustc_hash::FxHashMap;
+
+static V8_RUNTIME_INIT_LOCK: Mutex<()> = Mutex::new(());
+
+pub(crate) fn lock_v8_runtime_init() -> MutexGuard<'static, ()> {
+    V8_RUNTIME_INIT_LOCK.lock().unwrap_or_else(PoisonError::into_inner)
+}
 
 pub fn create_runtime() -> Arc<RariRuntime> {
     Arc::new(RariRuntime::new(None))

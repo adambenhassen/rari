@@ -1,7 +1,7 @@
 use std::{
     borrow::Cow,
     rc::Rc,
-    sync::{Arc, LazyLock, Mutex, PoisonError},
+    sync::{Arc, LazyLock},
 };
 
 use cow_utils::CowUtils;
@@ -14,6 +14,7 @@ use crate::runtime::{
     ext,
     factory::{
         create_params::runtime_create_params,
+        lock_v8_runtime_init,
         utils::constants::{ENV_INJECTION_SCRIPT, MODULE_CHECK_SCRIPT, NODE_BOOTSTRAP_SCRIPT},
     },
     module_loader::RariModuleLoader,
@@ -50,10 +51,6 @@ fn sync_bootstrap_options(runtime: &JsRuntime, has_node_modules_dir: bool) {
 static RUNTIME_SNAPSHOT: &[u8] = include_bytes!("../../../snapshots/RARI_SNAPSHOT.bin");
 include!("../../../snapshots/residual_lazy_sources.rs");
 
-// V8 snapshot deserialization has aborted in SharedHeapDeserializer when Rari
-// creates multiple snapshot-backed isolates concurrently.
-static SNAPSHOT_RUNTIME_INIT_LOCK: Mutex<()> = Mutex::new(());
-
 pub fn build_js_runtime(
     env_vars: Option<FxHashMap<String, String>>,
 ) -> Result<(JsRuntime, Rc<RariModuleLoader>), RariError> {
@@ -77,6 +74,7 @@ pub fn build_js_runtime(
         ..Default::default()
     });
 
+    let _init_guard = lock_v8_runtime_init();
     let options = RuntimeOptions {
         #[expect(
             clippy::clone_on_ref_ptr,
@@ -92,10 +90,7 @@ pub fn build_js_runtime(
         ..Default::default()
     };
 
-    let mut runtime = {
-        let _guard = SNAPSHOT_RUNTIME_INIT_LOCK.lock().unwrap_or_else(PoisonError::into_inner);
-        JsRuntime::new(options)
-    };
+    let mut runtime = JsRuntime::new(options);
 
     runtime
         .lazy_init_extensions(lazy_args)

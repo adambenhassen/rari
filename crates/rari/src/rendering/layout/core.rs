@@ -1823,7 +1823,10 @@ mod tests {
 
     #[tokio::test]
     async fn static_composition_failure_keeps_its_error_and_clears_the_capture() {
-        let mut runtime = JsRuntime::new(RuntimeOptions::default());
+        let mut runtime = {
+            let _guard = crate::runtime::factory::lock_v8_runtime_init();
+            JsRuntime::new(RuntimeOptions::default())
+        };
         runtime
             .execute_script(
                 "init_static_render_test".to_string(),
