@@ -65,7 +65,7 @@ jobs:
       - name: Install Rust build dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y pkg-config libfontconfig1-dev libclang-dev mold
+          sudo apt-get install -y pkg-config libfontconfig1-dev libclang-dev mold gdb
 
       - name: Create snapshot placeholder
         run: |
@@ -83,8 +83,38 @@ jobs:
       - name: Run Rust clippy
         run: cargo clippy -p rari --all-targets --all-features -- -D warnings
 
-      - name: Test Rust
-        run: cargo test -p rari --all-features
+      - name: Capture native Rust test abort stack
+        run: |
+          set -euo pipefail
+          test_bin="$(cargo test -p rari --all-features --no-run --message-format=json | jq -r 'select(.reason == "compiler-artifact" and .target.name == "rari" and .profile.test and (.target.kind | index("lib") != null)) | .executable')"
+          test -x "$test_bin"
+
+          for attempt in $(seq 1 10); do
+            log="$RUNNER_TEMP/rari-test-gdb-$attempt.log"
+            set +e
+            gdb --quiet --batch \
+              -ex 'set pagination off' \
+              -ex 'set print frame-arguments none' \
+              -ex 'handle SIGABRT stop print nopass' \
+              -ex run \
+              -ex 'thread apply all bt' \
+              --args "$test_bin" > "$log" 2>&1
+            gdb_status=$?
+            set -e
+            cat "$log"
+
+            if rg -q 'Program received signal SIGABRT' "$log"; then
+              echo "Captured SIGABRT native stack on attempt $attempt"
+              exit 1
+            fi
+
+            if [ "$gdb_status" -ne 0 ]; then
+              exit "$gdb_status"
+            fi
+          done
+
+          echo 'No SIGABRT reproduced in ten parallel test runs'
+          exit 1
 
       - name: Detect jemalloc feature
         id: jemalloc
