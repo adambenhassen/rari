@@ -19,6 +19,8 @@ jobs:
     permissions:
       contents: read
     env:
+      CARGO_BUILD_JOBS: 2
+      CARGO_INCREMENTAL: 0
       NODE_OPTIONS: --max-old-space-size=6144
       PNPM_CONFIG_WORKSPACE_CONCURRENCY: 1
       CARGO_BUILD_JOBS: 2
