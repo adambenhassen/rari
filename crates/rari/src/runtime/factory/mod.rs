@@ -23,17 +23,6 @@ pub(crate) fn lock_v8_runtime_init() -> MutexGuard<'static, ()> {
     V8_RUNTIME_INIT_LOCK.lock().unwrap_or_else(PoisonError::into_inner)
 }
 
-#[cfg(test)]
-mod tests {
-    use super::{V8_RUNTIME_INIT_LOCK, lock_v8_runtime_init};
-
-    #[test]
-    fn v8_runtime_init_lock_excludes_other_initializers() {
-        let _guard = lock_v8_runtime_init();
-        assert!(V8_RUNTIME_INIT_LOCK.try_lock().is_err());
-    }
-}
-
 pub fn create_runtime() -> Arc<RariRuntime> {
     Arc::new(RariRuntime::new(None))
 }
@@ -44,4 +33,15 @@ pub fn create_runtime() -> Arc<RariRuntime> {
 )]
 pub fn create_runtime_with_env(env_vars: FxHashMap<String, String>) -> Arc<RariRuntime> {
     Arc::new(RariRuntime::new(Some(env_vars)))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{V8_RUNTIME_INIT_LOCK, lock_v8_runtime_init};
+
+    #[test]
+    fn v8_runtime_init_lock_excludes_other_initializers() {
+        let _guard = lock_v8_runtime_init();
+        assert!(V8_RUNTIME_INIT_LOCK.try_lock().is_err());
+    }
 }
