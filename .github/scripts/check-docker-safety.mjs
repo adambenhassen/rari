@@ -3,7 +3,12 @@ import { extname, join, relative, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 
 const textExtensions = new Set(['.js', '.json', '.md', '.mjs', '.sh', '.ts', '.yml', '.yaml'])
-const composeFileNames = ['compose.yaml', 'compose.yml', 'docker-compose.yaml', 'docker-compose.yml']
+const composeFileNames = [
+  'compose.yaml',
+  'compose.yml',
+  'docker-compose.yaml',
+  'docker-compose.yml',
+]
 
 function logicalCommands(lines) {
   const commands = []
@@ -23,7 +28,11 @@ function logicalCommands(lines) {
 function hasJobLabelFilter(command) {
   const filter = /--filter(?:=|\s+)["']?label=([\w.-]*(?:task|job|run)[\w.-]*(?:=|:)[^,"'\s]*)/gi
   for (const match of command.matchAll(filter)) {
-    if (/(?:GITHUB_RUN_ID|GITHUB_RUN_ATTEMPT|GITHUB_JOB|TASK_ID|RUN_ID|JOB_ID|github\.run_id)/i.test(match[1])) {
+    if (
+      /(?:GITHUB_RUN_ID|GITHUB_RUN_ATTEMPT|GITHUB_JOB|TASK_ID|RUN_ID|JOB_ID|github\.run_id)/i.test(
+        match[1],
+      )
+    ) {
       return true
     }
   }
@@ -31,7 +40,9 @@ function hasJobLabelFilter(command) {
 }
 
 function hasFixedDockerPublish(command) {
-  return /(?:^|\s)(?:--publish(?:=|\s+)|-p(?:=|\s+|(?=\d)))(?:(?:(?:\d{1,3}\.){3}\d{1,3}|localhost|\[[\da-f:]+\]):)?\d+(?:-\d+)?:\d+(?:-\d+)?(?:\/(?:tcp|udp))?(?=$|\s|["'])/.test(command)
+  return /(?:^|\s)(?:--publish(?:=|\s+)|-p(?:=|\s+|(?=\d)))(?:(?:(?:\d{1,3}\.){3}\d{1,3}|localhost|\[[\da-f:]+\]):)?\d+(?:-\d+)?:\d+(?:-\d+)?(?:\/(?:tcp|udp))?(?=$|\s|["'])/.test(
+    command,
+  )
 }
 
 function hasFixedPortMapping(value) {
@@ -50,13 +61,19 @@ export function findDockerSafetyViolations(source, file = '<input>') {
     }
 
     if (
-      /\bdocker\s+(?:system|container|image|volume|network|builder)\s+prune\b/i.test(command.text) &&
+      /\bdocker\s+(?:system|container|image|volume|network|builder)\s+prune\b/i.test(
+        command.text,
+      ) &&
       !hasJobLabelFilter(command.text)
     ) {
       violations.push({ file, line: command.line, message: 'unfiltered Docker prune' })
     }
 
-    if (/\bdocker\s+rm\b[\s\S]*?(?:--force|(?:^|\s)-[a-z]*f[a-z]*)[\s\S]*?\bdocker\s+ps\b[\s\S]*?-aq\b/i.test(command.text)) {
+    if (
+      /\bdocker\s+rm\b[\s\S]*?(?:--force|(?:^|\s)-[a-z]*f[a-z]*)[\s\S]*?\bdocker\s+ps\b[\s\S]*?-aq\b/i.test(
+        command.text,
+      )
+    ) {
       violations.push({ file, line: command.line, message: 'removing every Docker container' })
     }
   }
@@ -154,12 +171,15 @@ async function main() {
   const sources = await Promise.all(
     configFiles.map(async path => ({ path, source: await readFile(path, 'utf8') })),
   )
-  const scopedWorkflows = sources.filter(({ path, source }) =>
-    /[\\/](?:workflows)[\\/][^\\/]+\.ya?ml$/.test(path) && isInScopeWorkflow(source),
+  const scopedWorkflows = sources.filter(
+    ({ path, source }) =>
+      /[\\/](?:workflows)[\\/][^\\/]+\.ya?ml$/.test(path) && isInScopeWorkflow(source),
   )
   const helperSources = sources.filter(({ path }) => /[\\/](?:actions|scripts)[\\/]/.test(path))
   const composeFiles = await collectComposeFiles(root, [...scopedWorkflows, ...helperSources])
-  const scanned = new Map([...scopedWorkflows, ...helperSources, ...composeFiles].map(item => [item.path, item]))
+  const scanned = new Map(
+    [...scopedWorkflows, ...helperSources, ...composeFiles].map(item => [item.path, item]),
+  )
   const violations = [...scanned.values()].flatMap(({ path, source }) =>
     findDockerSafetyViolations(source, relative(root, path)),
   )

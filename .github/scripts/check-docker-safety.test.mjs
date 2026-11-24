@@ -1,6 +1,5 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
-
 import { findDockerSafetyViolations } from './check-docker-safety.mjs'
 
 test('rejects fixed Docker host ports and fixed compose ports', () => {
