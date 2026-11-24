@@ -47,6 +47,37 @@ function hasFullMatrixExpression(value) {
   return /\$\{\{\s*toJSON\s*\(\s*matrix\s*\)\s*\}\}/i.test(value)
 }
 
+function assignedShellVariableValue(source, reference) {
+  const variable = reference.match(/^\$\{?([A-Za-z_][\w]*)\}?$/)
+  if (!variable) return reference
+
+  const name = variable[1].replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
+  const assignment = new RegExp(
+    `^\\s*(?:export\\s+)?${name}\\s*=\\s*(?:"([^"]*)"|'([^']*)'|([^\\s#]+))\\s*(?:#.*)?$`,
+    'm',
+  ).exec(source)
+  return assignment?.[1] ?? assignment?.[2] ?? assignment?.[3] ?? reference
+}
+
+function hasJobScopedContainerName(name, matrixContext) {
+  const runIdentity = ['GITHUB_RUN_ID', 'GITHUB_RUN_ATTEMPT', 'GITHUB_JOB'].every(variable =>
+    hasVariable(name, variable),
+  )
+  const matrixIdentity = matrixContext
+    ? !matrixContext.hasMatrix ||
+      hasFullMatrixExpression(name) ||
+      (!matrixContext.hasUnknownDimensions &&
+        matrixContext.keys.every(key => hasMatrixField(name, key)))
+    : true
+  return runIdentity && matrixIdentity
+}
+
+function dockerContainerName(command, source) {
+  const match = /(?:^|\s)--name(?:=|\s+)(?:"([^"]*)"|'([^']*)'|([^\s]+))/i.exec(command)
+  if (!match) return undefined
+  return assignedShellVariableValue(source, match[1] ?? match[2] ?? match[3])
+}
+
 function hasJobLabelFilter(command, matrixContext) {
   const filter = /--filter(?:=|\s+)(?:"([^"]+)"|'([^']+)'|([^\s]+))/gi
 
@@ -154,6 +185,17 @@ export function findDockerSafetyViolations(source, file = '<input>') {
   const matrixContext = isWorkflow ? workflowMatrixContext(source) : undefined
 
   for (const command of logicalCommands(lines)) {
+    if (/\bdocker\s+(?:create|run)\b/i.test(command.text)) {
+      const name = dockerContainerName(command.text, source)
+      if (!name || !hasJobScopedContainerName(name, matrixContext)) {
+        violations.push({
+          file,
+          line: command.line,
+          message: 'container name is not unique to this job',
+        })
+      }
+    }
+
     if (hasFixedDockerPublish(command.text)) {
       violations.push({ file, line: command.line, message: 'fixed host-port publishing' })
     }
@@ -229,6 +271,10 @@ function composeFileReferences(source) {
   const fileOption = /(?:--file(?:=|\s+)|(?:^|\s)-f(?:=|\s+))(?:"([^"]+)"|'([^']+)'|([^\s"'\\]+))/g
   for (const match of source.matchAll(fileOption)) references.push(match[1] ?? match[2] ?? match[3])
   return references
+}
+
+function isLiteralComposeFileReference(reference) {
+  return !/[$`*?]/.test(reference)
 }
 
 function yamlScalar(value) {
@@ -342,7 +388,7 @@ function defaultComposePaths(root, workingDirectory) {
 }
 
 export async function collectComposeFiles(root, sources) {
-  const references = new Set()
+  const references = new Map()
 
   for (const { path, source } of sources) {
     if (!/\bdocker\s+compose\b|\bdocker-compose\b/.test(source)) continue
@@ -358,19 +404,35 @@ export async function collectComposeFiles(root, sources) {
       const workingDirectory = resolve(root, command.workingDirectory || '.')
       const fileReferences = composeFileReferences(command.source)
       if (fileReferences.length > 0) {
-        for (const reference of fileReferences) references.add(resolve(workingDirectory, reference))
+        for (const reference of fileReferences) {
+          if (!isLiteralComposeFileReference(reference)) {
+            throw new Error(
+              `Cannot statically resolve explicit Compose file reference "${reference}" in ${path}`,
+            )
+          }
+          references.set(resolve(workingDirectory, reference), { required: true, source: path })
+        }
       } else {
-        for (const path of defaultComposePaths(root, workingDirectory)) references.add(path)
+        for (const path of defaultComposePaths(root, workingDirectory)) {
+          if (!references.has(path)) references.set(path, { required: false, source: path })
+        }
       }
     }
   }
 
   const found = []
-  for (const path of references) {
+  for (const [path, reference] of references) {
     try {
       found.push({ path, source: await readFile(path, 'utf8') })
     } catch (error) {
-      if (error.code !== 'ENOENT') throw error
+      if (error.code === 'ENOENT' && !reference.required) continue
+      if (error.code === 'ENOENT') {
+        throw new Error(
+          `Explicit Compose file does not exist: ${path} (referenced by ${reference.source})`,
+          { cause: error },
+        )
+      }
+      throw error
     }
   }
   return found
