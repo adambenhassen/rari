@@ -57,17 +57,21 @@ function hasFullMatrixExpression(value) {
 
 function assignedShellVariableValue(source, reference) {
   const variable = reference.match(/^\$\{?([A-Za-z_][\w]*)\}?$/)
-  if (!variable) return { value: reference, expandsVariables: true }
+  if (!variable) return { value: reference, expandsVariables: true, assignments: [] }
 
   const name = variable[1].replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
-  const assignment = new RegExp(
+  const assignmentPattern = new RegExp(
     `^\\s*(?:export\\s+)?${name}\\s*=\\s*(?:"([^"]*)"|'([^']*)'|([^\\s#]+))\\s*(?:#.*)?$`,
-    'm',
-  ).exec(source)
-  if (!assignment) return { value: reference, expandsVariables: true }
-  if (assignment[1] !== undefined) return { value: assignment[1], expandsVariables: true }
-  if (assignment[2] !== undefined) return { value: assignment[2], expandsVariables: false }
-  return { value: assignment[3], expandsVariables: true }
+    'gm',
+  )
+  const assignments = [...source.matchAll(assignmentPattern)].map(assignment => {
+    if (assignment[1] !== undefined) return { value: assignment[1], expandsVariables: true }
+    if (assignment[2] !== undefined) return { value: assignment[2], expandsVariables: false }
+    return { value: assignment[3], expandsVariables: true }
+  })
+  return assignments.length > 0
+    ? { ...assignments[0], assignments }
+    : { value: reference, expandsVariables: true, assignments: [] }
 }
 
 function hasJobScopedContainerName(name, matrixContext) {
@@ -200,10 +204,16 @@ export function findDockerSafetyViolations(source, file = '<input>') {
   for (const command of logicalCommands(lines)) {
     if (/\bdocker\s+(?:create|run)\b/i.test(command.text)) {
       const name = dockerContainerName(command.text, source)
+      const hasUnscopedAssignment = name?.assignments.some(
+        assignment =>
+          !assignment.expandsVariables ||
+          !hasJobScopedContainerName(assignment.value, matrixContext),
+      )
       if (
         !name ||
         !name.expandsVariables ||
-        !hasJobScopedContainerName(name.value, matrixContext)
+        !hasJobScopedContainerName(name.value, matrixContext) ||
+        hasUnscopedAssignment
       ) {
         violations.push({
           file,
@@ -281,12 +291,46 @@ function isInScopeWorkflow(source) {
   return /\b(?:inference-x64|ubuntu-latest)\b/.test(source)
 }
 
-function composeFileReferences(source) {
-  if (!/\bdocker\s+compose\b|\bdocker-compose\b/.test(source)) return []
+function hasDockerComposeCommand(source) {
+  return /(?:^|[\s"'`])docker\s+compose(?=\s|$)|(?:^|[\s"'`])docker-compose(?=\s|$)/i.test(source)
+}
 
+function composeFileReferences(source) {
+  if (!hasDockerComposeCommand(source)) return []
+
+  const tokens = source.match(/"(?:\\.|[^"\\])*"|'[^']*'|[^\s]+/g) || []
   const references = []
-  const fileOption = /(?:--file(?:=|\s+)|(?:^|\s)-f(?:=|\s+))(?:"([^"]+)"|'([^']+)'|([^\s"'\\]+))/g
-  for (const match of source.matchAll(fileOption)) references.push(match[1] ?? match[2] ?? match[3])
+  const unquote = token =>
+    (token.startsWith('"') && token.endsWith('"')) || (token.startsWith("'") && token.endsWith("'"))
+      ? token.slice(1, -1)
+      : token
+
+  for (let index = 0; index < tokens.length; index += 1) {
+    const token = unquote(tokens[index])
+    let reference
+
+    if (token === '-f' || token === '--file') {
+      if (!tokens[index + 1]) {
+        throw new Error(`Cannot statically resolve explicit Compose file option in ${source}`)
+      }
+      reference = unquote(tokens[++index])
+    } else if (token.startsWith('--file=')) {
+      reference = token.slice('--file='.length)
+    } else if (token.startsWith('--file')) {
+      throw new Error(
+        `Cannot statically resolve explicit Compose file option "${token}" in ${source}`,
+      )
+    } else if (token.startsWith('-f') && token.length > 2) {
+      reference = token.slice(2).replace(/^=/, '')
+    }
+
+    if (reference !== undefined) {
+      if (!reference) {
+        throw new Error(`Cannot statically resolve explicit Compose file option in ${source}`)
+      }
+      references.push(reference)
+    }
+  }
   return references
 }
 
@@ -402,6 +446,7 @@ function workflowSteps(source) {
         if (block.length > 0) {
           steps.push({
             lines: block,
+            jobId: jobStart,
             defaultWorkingDirectory: jobDefault ?? workflowDefault,
             environment: {
               ...workflowEnvironment,
@@ -418,6 +463,7 @@ function workflowSteps(source) {
     if (block.length > 0) {
       steps.push({
         lines: block,
+        jobId: jobStart,
         defaultWorkingDirectory: jobDefault ?? workflowDefault,
         environment: {
           ...workflowEnvironment,
@@ -428,16 +474,29 @@ function workflowSteps(source) {
     }
   }
 
-  return steps.map(({ lines: linesInStep, defaultWorkingDirectory, environment }) => {
-    const stepSource = linesInStep.join('\n')
-    const workingDirectory = stepSource.match(/^\s*working-directory:\s*(.*?)\s*$/m)?.[1]
-    return {
-      source: stepSource,
-      shellSource: workflowRunSource(stepSource),
-      workingDirectory: workingDirectory ? yamlScalar(workingDirectory) : defaultWorkingDirectory,
-      environment,
-    }
-  })
+  const resolvedSteps = steps.map(
+    ({ lines: linesInStep, jobId, defaultWorkingDirectory, environment }) => {
+      const stepSource = linesInStep.join('\n')
+      const workingDirectory = stepSource.match(/^\s*working-directory:\s*(.*?)\s*$/m)?.[1]
+      return {
+        source: stepSource,
+        shellSource: workflowRunSource(stepSource),
+        jobId,
+        workingDirectory: workingDirectory ? yamlScalar(workingDirectory) : defaultWorkingDirectory,
+        environment,
+      }
+    },
+  )
+
+  return resolvedSteps.map((step, index) => ({
+    ...step,
+    writesComposeFileToGithubEnv: resolvedSteps
+      .slice(0, index)
+      .some(
+        previous =>
+          previous.jobId === step.jobId && writesComposeFileToGithubEnv(previous.shellSource),
+      ),
+  }))
 }
 
 function workflowRunSource(source) {
@@ -486,6 +545,16 @@ function shellComposeFileAssignments(source) {
   }
 
   return { assignments, unresolved }
+}
+
+function writesComposeFileToGithubEnv(source) {
+  return source
+    .split(/\r?\n/)
+    .some(
+      line =>
+        /\bCOMPOSE_FILE\s*=/.test(line) &&
+        /(?:>>?|tee\s+(?:-a\s+)?)\s*["']?(?:\$GITHUB_ENV\b|\$\{GITHUB_ENV\})/.test(line),
+    )
 }
 
 function defaultComposePaths(root, workingDirectory) {
@@ -568,18 +637,26 @@ export async function collectComposeFiles(root, sources, environment = process.e
   const references = new Map()
 
   for (const { path, source } of sources) {
-    if (!/\bdocker\s+compose\b|\bdocker-compose\b/.test(source)) continue
+    if (!hasDockerComposeCommand(source)) continue
 
     const isWorkflow = /[\\/]workflows[\\/][^\\/]+\.ya?ml$/.test(path)
     const commands = isWorkflow
-      ? workflowSteps(source).filter(step =>
-          /\bdocker\s+compose\b|\bdocker-compose\b/.test(step.source),
-        )
+      ? workflowSteps(source).filter(step => hasDockerComposeCommand(step.source))
       : [{ source, shellSource: source, workingDirectory: undefined }]
 
     for (const command of commands) {
+      if (command.workingDirectory && !isLiteralComposeFileReference(command.workingDirectory)) {
+        throw new Error(
+          `Cannot statically resolve workflow working directory "${command.workingDirectory}" in ${path}`,
+        )
+      }
       const workingDirectory = resolve(root, command.workingDirectory || '.')
-      const fileReferences = composeFileReferences(command.source)
+      const fileReferences = composeFileReferences(command.shellSource || command.source)
+      if (command.writesComposeFileToGithubEnv && fileReferences.length === 0) {
+        throw new Error(
+          `Cannot statically resolve COMPOSE_FILE written to GITHUB_ENV before Compose step in ${path}`,
+        )
+      }
       if (fileReferences.length > 0) {
         for (const reference of fileReferences) {
           if (!isLiteralComposeFileReference(reference)) {

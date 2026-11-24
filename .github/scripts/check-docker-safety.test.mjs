@@ -231,6 +231,38 @@ test('requires Docker container names to include the run, attempt, and job ident
   )
 })
 
+test('does not reuse container name assignments from another workflow job', () => {
+  const workflow = [
+    'jobs:',
+    '  first:',
+    '    steps:',
+    '      - run: |',
+    '          c="rari-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}-${GITHUB_JOB}"',
+    '          docker create --name "$c" alpine',
+    '  second:',
+    '    steps:',
+    '      - run: |',
+    '          c=fixed',
+    '          docker create --name "$c" alpine',
+  ].join('\n')
+  const secondDockerLine =
+    workflow
+      .split('\n')
+      .findIndex(
+        line => line.includes('docker create --name "$c" alpine') && line.includes('          '),
+        6,
+      ) + 1
+  const violations = findDockerSafetyViolations(workflow, '.github/workflows/check.yml')
+
+  assert.ok(
+    violations.some(
+      violation =>
+        violation.line === secondDockerLine &&
+        violation.message === 'container name is not unique to this job',
+    ),
+  )
+})
+
 test('resolves explicit Compose files from commented steps in the step working directory', async () => {
   const root = await mkdtemp(join(tmpdir(), 'docker-safety-'))
   const subdirectory = join(root, 'services', 'api')
@@ -262,6 +294,59 @@ test('resolves explicit Compose files from commented steps in the step working d
         findDockerSafetyViolations(source, path).map(({ message }) => message),
       ),
       ['fixed host-port publishing'],
+    )
+  } finally {
+    await rm(root, { recursive: true, force: true })
+  }
+})
+
+test('scans a Compose file passed as an attached -f argument', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'docker-safety-attached-compose-'))
+  const workflowPath = join(root, '.github', 'workflows', 'check.yml')
+  const workflow = [
+    'jobs:',
+    '  check:',
+    '    steps:',
+    '      - run: docker compose -fcustom.yml up',
+  ].join('\n')
+  const fixedCompose = 'services:\n  db:\n    ports:\n      - "127.0.0.1:5432:5432"'
+
+  try {
+    await mkdir(join(root, '.github', 'workflows'), { recursive: true })
+    await writeFile(join(root, 'custom.yml'), fixedCompose)
+
+    const composeFiles = await collectComposeFiles(
+      root,
+      [{ path: workflowPath, source: workflow }],
+      {},
+    )
+
+    assert.deepEqual(
+      composeFiles.map(({ path }) => path),
+      [resolve(root, 'custom.yml')],
+    )
+    assert.deepEqual(
+      composeFiles.flatMap(({ path, source }) =>
+        findDockerSafetyViolations(source, path).map(({ message }) => message),
+      ),
+      ['fixed host-port publishing'],
+    )
+  } finally {
+    await rm(root, { recursive: true, force: true })
+  }
+})
+
+test('fails closed when a Compose -f option has no file value', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'docker-safety-missing-compose-option-'))
+  const workflowPath = join(root, '.github', 'workflows', 'check.yml')
+  const workflow = 'jobs:\n  check:\n    steps:\n      - run: docker compose -f'
+
+  try {
+    await mkdir(join(root, '.github', 'workflows'), { recursive: true })
+
+    await assert.rejects(
+      collectComposeFiles(root, [{ path: workflowPath, source: workflow }], {}),
+      /Cannot statically resolve explicit Compose file option/,
     )
   } finally {
     await rm(root, { recursive: true, force: true })
@@ -330,6 +415,34 @@ test('fails closed when an explicit Compose file reference is dynamic', async ()
     await assert.rejects(
       collectComposeFiles(root, [{ path: workflowPath, source: workflow }]),
       /Cannot statically resolve explicit Compose file reference/,
+    )
+  } finally {
+    await rm(root, { recursive: true, force: true })
+  }
+})
+
+test('fails closed for a dynamic workflow working directory', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'docker-safety-dynamic-working-directory-'))
+  const workflowPath = join(root, '.github', 'workflows', 'check.yml')
+  const workflow = [
+    'jobs:',
+    '  check:',
+    '    steps:',
+    '      - name: Start services',
+    '        working-directory: ${{ env.DIR }}',
+    '        run: docker compose up',
+  ].join('\n')
+
+  try {
+    await mkdir(join(root, '.github', 'workflows'), { recursive: true })
+    await writeFile(
+      join(root, 'compose.yaml'),
+      'services:\n  db:\n    ports:\n      - "127.0.0.1:5432:5432"',
+    )
+
+    await assert.rejects(
+      collectComposeFiles(root, [{ path: workflowPath, source: workflow }], {}),
+      /Cannot statically resolve workflow working directory/,
     )
   } finally {
     await rm(root, { recursive: true, force: true })
@@ -442,6 +555,29 @@ test('fails closed when a shell COMPOSE_FILE assignment is dynamic', async () =>
     await assert.rejects(
       collectComposeFiles(root, [{ path: workflowPath, source: unsupportedAssignment }], {}),
       /Cannot statically resolve shell COMPOSE_FILE assignment/,
+    )
+  } finally {
+    await rm(root, { recursive: true, force: true })
+  }
+})
+
+test('fails closed when a previous step writes COMPOSE_FILE to GITHUB_ENV', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'docker-safety-github-env-compose-'))
+  const workflowPath = join(root, '.github', 'workflows', 'check.yml')
+  const workflow = [
+    'jobs:',
+    '  check:',
+    '    steps:',
+    '      - run: echo "COMPOSE_FILE=custom.yml" >> "$GITHUB_ENV"',
+    '      - run: docker compose up',
+  ].join('\n')
+
+  try {
+    await mkdir(join(root, '.github', 'workflows'), { recursive: true })
+
+    await assert.rejects(
+      collectComposeFiles(root, [{ path: workflowPath, source: workflow }], {}),
+      /Cannot statically resolve COMPOSE_FILE written to GITHUB_ENV/,
     )
   } finally {
     await rm(root, { recursive: true, force: true })
