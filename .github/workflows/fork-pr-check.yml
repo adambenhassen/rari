@@ -38,6 +38,12 @@ jobs:
         with:
           node-version: 24.21.0
 
+      - name: Test Docker safety guard
+        run: node --test .github/scripts/check-docker-safety.test.mjs
+
+      - name: Check Docker workflow safety
+        run: node .github/scripts/check-docker-safety.mjs
+
       - name: Test fork release publishing
         run: node --test .github/scripts/fork-release.test.mjs
 

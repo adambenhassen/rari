@@ -579,10 +579,16 @@ jobs:
           VERSION: ${{ inputs.version }}
         run: |
           set -euo pipefail
-          smoke_container="$(docker create --platform linux/amd64 \
-            node:24-trixie-slim node -e 'setInterval(() => {}, 60000)')"
+          smoke_container="rari-smoke-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}-build"
+          docker create --name "$smoke_container" --platform linux/amd64 \
+            node:24-trixie-slim node -e 'setInterval(() => {}, 60000)'
           cleanup() {
-            docker rm --force "$smoke_container" >/dev/null 2>&1 || true
+            local status=$?
+            if ! docker rm --force "$smoke_container" >/dev/null; then
+              echo "Failed to remove smoke container $smoke_container" >&2
+              status=1
+            fi
+            exit "$status"
           }
           trap cleanup EXIT
           docker start "$smoke_container" >/dev/null
