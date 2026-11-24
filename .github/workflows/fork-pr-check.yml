@@ -117,13 +117,13 @@ jobs:
             gdb_status=$?
             set -e
 
-            if grep -Eq 'Program (received signal|terminated with signal) SIGABRT' "$log"; then
+            if grep -Eq '(received signal|terminated with signal) SIGABRT' "$log"; then
               cat "$log"
               echo "Captured SIGABRT native stack on attempt $attempt"
               exit 1
             fi
 
-            if grep -Eq 'Program received signal|Program terminated' "$log"; then
+            if grep -Eq '(received signal|terminated with signal)' "$log"; then
               cat "$log"
               echo "GDB stopped the test process unexpectedly on attempt $attempt"
               exit 1
@@ -169,13 +169,13 @@ jobs:
               gdb_status=$?
               set -e
 
-              if grep -Eq 'Program (received signal|terminated with signal) SIGABRT' "$log"; then
+              if grep -Eq '(received signal|terminated with signal) SIGABRT' "$log"; then
                 cat "$log"
                 echo "Captured SIGABRT native stack after cargo test failure on attempt $attempt"
                 exit "$cargo_status"
               fi
 
-              if grep -Eq 'Program received signal|Program terminated' "$log"; then
+              if grep -Eq '(received signal|terminated with signal)' "$log"; then
                 cat "$log"
                 echo "GDB stopped the test process unexpectedly after cargo test failure on attempt $attempt"
                 exit 1

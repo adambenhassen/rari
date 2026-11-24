@@ -1,7 +1,7 @@
 use std::{
     borrow::Cow,
     rc::Rc,
-    sync::{Arc, LazyLock},
+    sync::{Arc, LazyLock, Mutex},
 };
 
 use cow_utils::CowUtils;
@@ -50,6 +50,10 @@ fn sync_bootstrap_options(runtime: &JsRuntime, has_node_modules_dir: bool) {
 static RUNTIME_SNAPSHOT: &[u8] = include_bytes!("../../../snapshots/RARI_SNAPSHOT.bin");
 include!("../../../snapshots/residual_lazy_sources.rs");
 
+// V8 snapshot deserialization has aborted in SharedHeapDeserializer when Rari
+// creates multiple snapshot-backed isolates concurrently.
+static SNAPSHOT_RUNTIME_INIT_LOCK: Mutex<()> = Mutex::new(());
+
 pub fn build_js_runtime(
     env_vars: Option<FxHashMap<String, String>>,
 ) -> Result<(JsRuntime, Rc<RariModuleLoader>), RariError> {
@@ -88,7 +92,11 @@ pub fn build_js_runtime(
         ..Default::default()
     };
 
-    let mut runtime = JsRuntime::new(options);
+    let mut runtime = {
+        let _guard =
+            SNAPSHOT_RUNTIME_INIT_LOCK.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        JsRuntime::new(options)
+    };
 
     runtime
         .lazy_init_extensions(lazy_args)
@@ -136,4 +144,41 @@ pub fn build_js_runtime(
 
 fn get_streaming_ops() -> Vec<deno_core::OpDecl> {
     ops::get_streaming_ops()
+}
+
+#[cfg(test)]
+mod tests {
+    use std::{
+        sync::{Arc, Barrier},
+        thread,
+    };
+
+    use super::build_js_runtime;
+
+    #[test]
+    fn parallel_snapshot_runtime_creation_is_safe() {
+        const RUNTIME_COUNT: usize = 12;
+        let start = Arc::new(Barrier::new(RUNTIME_COUNT));
+        let handles = (0..RUNTIME_COUNT)
+            .map(|_| {
+                let start = Arc::clone(&start);
+                thread::spawn(move || {
+                    let runtime = tokio::runtime::Builder::new_current_thread()
+                        .enable_all()
+                        .build()
+                        .expect("create Tokio runtime");
+                    start.wait();
+                    runtime.block_on(async {
+                        let (js_runtime, _module_loader) =
+                            build_js_runtime(None).expect("build snapshot-backed JS runtime");
+                        drop(js_runtime);
+                    });
+                })
+            })
+            .collect::<Vec<_>>();
+
+        for handle in handles {
+            handle.join().expect("snapshot-backed runtime thread should succeed");
+        }
+    }
 }
