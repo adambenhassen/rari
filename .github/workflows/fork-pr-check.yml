@@ -107,6 +107,7 @@ jobs:
             find target/debug/build/rari -type f -path '*/out/rari-*' -executable -print
             exit 1
           fi
+          echo "RARI_TEST_BIN=$test_bin" >> "$GITHUB_ENV"
 
           for attempt in $(seq 1 10); do
             log="$RUNNER_TEMP/rari-test-gdb-$attempt.log"
@@ -138,7 +139,44 @@ jobs:
           echo 'No SIGABRT reproduced in ten parallel test runs'
 
       - name: Test Rust
-        run: cargo test -p rari --all-features
+        run: |
+          set -euo pipefail
+          test_log="$RUNNER_TEMP/rari-cargo-test.log"
+          set +e
+          cargo test -p rari --all-features 2>&1 | tee "$test_log"
+          cargo_status=${PIPESTATUS[0]}
+          set -e
+
+          if [ "$cargo_status" -ne 0 ] && grep -Fq 'vector.h:415: libc++ Hardening assertion' "$test_log"; then
+            echo 'The parallel cargo test hit the libc++ vector assertion; retrying under GDB to capture a native stack.'
+            for attempt in $(seq 1 10); do
+              log="$RUNNER_TEMP/rari-test-gdb-after-failure-$attempt.log"
+              set +e
+              gdb --quiet --batch \
+                -ex 'set pagination off' \
+                -ex 'set print frame-arguments none' \
+                -ex 'handle SIGABRT stop print nopass' \
+                -ex run \
+                -ex 'thread apply all bt' \
+                --args "$RARI_TEST_BIN" > "$log" 2>&1
+              gdb_status=$?
+              set -e
+
+              if grep -q 'Program received signal SIGABRT' "$log"; then
+                cat "$log"
+                echo "Captured SIGABRT native stack after cargo test failure on attempt $attempt"
+                exit "$cargo_status"
+              fi
+
+              if [ "$gdb_status" -ne 0 ]; then
+                cat "$log"
+                break
+              fi
+            done
+            echo 'No SIGABRT reproduced under GDB after the cargo test failure.'
+          fi
+
+          exit "$cargo_status"
 
       - name: Detect jemalloc feature
         id: jemalloc
