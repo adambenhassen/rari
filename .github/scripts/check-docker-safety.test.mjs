@@ -245,20 +245,12 @@ test('does not reuse container name assignments from another workflow job', () =
     '          c=fixed',
     '          docker create --name "$c" alpine',
   ].join('\n')
-  const secondDockerLine =
-    workflow
-      .split('\n')
-      .findIndex(
-        line => line.includes('docker create --name "$c" alpine') && line.includes('          '),
-        6,
-      ) + 1
   const violations = findDockerSafetyViolations(workflow, '.github/workflows/check.yml')
 
   assert.ok(
     violations.some(
       violation =>
-        violation.line === secondDockerLine &&
-        violation.message === 'container name is not unique to this job',
+        violation.line === 11 && violation.message === 'container name is not unique to this job',
     ),
   )
 })
@@ -305,9 +297,15 @@ test('scans a Compose file passed as an attached -f argument', async () => {
   const workflowPath = join(root, '.github', 'workflows', 'check.yml')
   const workflow = [
     'jobs:',
-    '  check:',
+    '  substitution:',
     '    steps:',
-    '      - run: docker compose -fcustom.yml up',
+    '      - run: $(docker compose -f custom.yml up)',
+    '  subshell:',
+    '    steps:',
+    '      - run: (docker compose -fcustom.yml up)',
+    '  absolute:',
+    '    steps:',
+    '      - run: /usr/bin/docker compose --file=custom.yml up',
   ].join('\n')
   const fixedCompose = 'services:\n  db:\n    ports:\n      - "127.0.0.1:5432:5432"'
 
@@ -330,6 +328,28 @@ test('scans a Compose file passed as an attached -f argument', async () => {
         findDockerSafetyViolations(source, path).map(({ message }) => message),
       ),
       ['fixed host-port publishing'],
+    )
+  } finally {
+    await rm(root, { recursive: true, force: true })
+  }
+})
+
+test('ignores unrelated shell flags before a Compose command', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'docker-safety-unrelated-shell-flags-'))
+  const workflowPath = join(root, '.github', 'workflows', 'check.yml')
+  const workflow = [
+    'jobs:',
+    '  check:',
+    '    steps:',
+    '      - run: curl -fsSL https://example.test/x | sh && docker compose up',
+    '      - run: docker compose rm -f',
+  ].join('\n')
+
+  try {
+    await mkdir(join(root, '.github', 'workflows'), { recursive: true })
+    assert.deepEqual(
+      await collectComposeFiles(root, [{ path: workflowPath, source: workflow }], {}),
+      [],
     )
   } finally {
     await rm(root, { recursive: true, force: true })
@@ -568,7 +588,10 @@ test('fails closed when a previous step writes COMPOSE_FILE to GITHUB_ENV', asyn
     'jobs:',
     '  check:',
     '    steps:',
-    '      - run: echo "COMPOSE_FILE=custom.yml" >> "$GITHUB_ENV"',
+    '      - run: |',
+    '          cat >> "$GITHUB_ENV" <<EOF',
+    '          COMPOSE_FILE=custom.yml',
+    '          EOF',
     '      - run: docker compose up',
   ].join('\n')
 

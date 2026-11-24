@@ -9,6 +9,48 @@ const composeFileNames = [
   'docker-compose.yaml',
   'docker-compose.yml',
 ]
+const composeSubcommands = new Set([
+  'alpha',
+  'attach',
+  'build',
+  'config',
+  'convert',
+  'cp',
+  'create',
+  'down',
+  'events',
+  'exec',
+  'images',
+  'kill',
+  'logs',
+  'ls',
+  'pause',
+  'port',
+  'ps',
+  'pull',
+  'push',
+  'restart',
+  'rm',
+  'run',
+  'start',
+  'stop',
+  'top',
+  'unpause',
+  'up',
+  'version',
+  'wait',
+  'watch',
+])
+const composeGlobalOptionsWithValue = new Set([
+  '--ansi',
+  '--env-file',
+  '--parallel',
+  '--profile',
+  '--project-directory',
+  '--project-name',
+  '--progress',
+  '-p',
+])
 
 function logicalCommands(lines) {
   const commands = []
@@ -292,43 +334,106 @@ function isInScopeWorkflow(source) {
 }
 
 function hasDockerComposeCommand(source) {
-  return /(?:^|[\s"'`])docker\s+compose(?=\s|$)|(?:^|[\s"'`])docker-compose(?=\s|$)/i.test(source)
+  return /\bdocker(?:\s+compose|-compose)\b(?=\s|[);|&]|$)/i.test(source)
+}
+
+function shellCommandSegments(source) {
+  const segments = []
+  let current = ''
+  let quote
+  let escaped = false
+
+  for (let index = 0; index < source.length; index += 1) {
+    const character = source[index]
+    if (escaped) {
+      current += character
+      escaped = false
+      continue
+    }
+    if (character === '\\' && quote !== "'") {
+      current += character
+      escaped = true
+      continue
+    }
+    if (quote) {
+      current += character
+      if (character === quote) quote = undefined
+      continue
+    }
+    if (character === '"' || character === "'") {
+      quote = character
+      current += character
+      continue
+    }
+    if (character === '\n' || character === '\r' || character === ';' || character === '|') {
+      segments.push(current)
+      current = ''
+      if (character === '|' && source[index + 1] === '|') index += 1
+      continue
+    }
+    if (character === '&' && source[index + 1] === '&') {
+      segments.push(current)
+      current = ''
+      index += 1
+      continue
+    }
+    current += character
+  }
+
+  segments.push(current)
+  return segments
 }
 
 function composeFileReferences(source) {
-  if (!hasDockerComposeCommand(source)) return []
-
-  const tokens = source.match(/"(?:\\.|[^"\\])*"|'[^']*'|[^\s]+/g) || []
   const references = []
   const unquote = token =>
     (token.startsWith('"') && token.endsWith('"')) || (token.startsWith("'") && token.endsWith("'"))
       ? token.slice(1, -1)
       : token
 
-  for (let index = 0; index < tokens.length; index += 1) {
-    const token = unquote(tokens[index])
-    let reference
+  for (const segment of shellCommandSegments(source)) {
+    const command = /\bdocker(?:\s+compose|-compose)\b(?=\s|[);|&]|$)/i.exec(segment)
+    if (!command) continue
 
-    if (token === '-f' || token === '--file') {
-      if (!tokens[index + 1]) {
-        throw new Error(`Cannot statically resolve explicit Compose file option in ${source}`)
-      }
-      reference = unquote(tokens[++index])
-    } else if (token.startsWith('--file=')) {
-      reference = token.slice('--file='.length)
-    } else if (token.startsWith('--file')) {
-      throw new Error(
-        `Cannot statically resolve explicit Compose file option "${token}" in ${source}`,
-      )
-    } else if (token.startsWith('-f') && token.length > 2) {
-      reference = token.slice(2).replace(/^=/, '')
-    }
+    const argumentSource = segment.slice(command.index + command[0].length)
+    const tokens = argumentSource.match(/"(?:\\.|[^"\\])*"|'[^']*'|[^\s]+/g) || []
+    for (let index = 0; index < tokens.length; index += 1) {
+      const token = unquote(tokens[index])
+      const commandWord = token.replace(/^[($`]+|[);`]+$/g, '').toLowerCase()
+      if (composeSubcommands.has(commandWord)) break
 
-    if (reference !== undefined) {
-      if (!reference) {
-        throw new Error(`Cannot statically resolve explicit Compose file option in ${source}`)
+      let reference
+
+      if (token === '-f' || token === '--file') {
+        if (!tokens[index + 1]) {
+          throw new Error(`Cannot statically resolve explicit Compose file option in ${segment}`)
+        }
+        reference = unquote(tokens[++index])
+      } else if (token.startsWith('--file=')) {
+        reference = token.slice('--file='.length)
+      } else if (token.startsWith('--file')) {
+        throw new Error(
+          `Cannot statically resolve explicit Compose file option "${token}" in ${segment}`,
+        )
+      } else if (token.startsWith('-f') && token.length > 2) {
+        reference = token.slice(2).replace(/^=/, '')
+      } else if (composeGlobalOptionsWithValue.has(token)) {
+        if (!tokens[index + 1]) {
+          throw new Error(`Cannot statically resolve Compose option "${token}" in ${segment}`)
+        }
+        index += 1
+      } else if (token.startsWith('-')) {
+        continue
+      } else {
+        break
       }
-      references.push(reference)
+
+      if (reference !== undefined) {
+        if (!reference) {
+          throw new Error(`Cannot statically resolve explicit Compose file option in ${segment}`)
+        }
+        references.push(reference)
+      }
     }
   }
   return references
@@ -548,13 +653,10 @@ function shellComposeFileAssignments(source) {
 }
 
 function writesComposeFileToGithubEnv(source) {
-  return source
-    .split(/\r?\n/)
-    .some(
-      line =>
-        /\bCOMPOSE_FILE\s*=/.test(line) &&
-        /(?:>>?|tee\s+(?:-a\s+)?)\s*["']?(?:\$GITHUB_ENV\b|\$\{GITHUB_ENV\})/.test(line),
-    )
+  return (
+    /\bCOMPOSE_FILE\s*=/.test(source) &&
+    /(?:>>?|tee\s+(?:-a\s+)?)\s*["']?(?:\$GITHUB_ENV\b|\$\{GITHUB_ENV\})/.test(source)
+  )
 }
 
 function defaultComposePaths(root, workingDirectory) {
@@ -767,7 +869,10 @@ async function main() {
     ({ path, source }) =>
       /[\\/](?:workflows)[\\/][^\\/]+\.ya?ml$/.test(path) && isInScopeWorkflow(source),
   )
-  const helperSources = sources.filter(({ path }) => /[\\/](?:actions|scripts)[\\/]/.test(path))
+  const helperSources = sources.filter(
+    ({ path }) =>
+      path !== fileURLToPath(import.meta.url) && /[\\/](?:actions|scripts)[\\/]/.test(path),
+  )
   const composeFiles = await collectComposeFiles(root, [...scopedWorkflows, ...helperSources])
   const scanned = new Map(
     [...scopedWorkflows, ...helperSources, ...composeFiles].map(item => [item.path, item]),
