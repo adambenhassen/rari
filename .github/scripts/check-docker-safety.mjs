@@ -33,7 +33,15 @@ function hasVariable(value, name) {
     GITHUB_RUN_ID: 'github.run_id',
   }[name]
   if (githubContext) patterns.push(`\\$\\{\\{\\s*${githubContext}\\s*\\}\\}`)
-  return new RegExp(`(?:${patterns.join('|')})(?![\\w])`, 'i').test(value)
+  const variable = new RegExp(`(?:${patterns.join('|')})(?![\\w])`, 'gi')
+  for (const match of value.matchAll(variable)) {
+    let backslashes = 0
+    for (let index = match.index - 1; index >= 0 && value[index] === '\\'; index -= 1) {
+      backslashes += 1
+    }
+    if (backslashes % 2 === 0) return true
+  }
+  return false
 }
 
 function hasMatrixField(value, field) {
@@ -425,10 +433,59 @@ function workflowSteps(source) {
     const workingDirectory = stepSource.match(/^\s*working-directory:\s*(.*?)\s*$/m)?.[1]
     return {
       source: stepSource,
+      shellSource: workflowRunSource(stepSource),
       workingDirectory: workingDirectory ? yamlScalar(workingDirectory) : defaultWorkingDirectory,
       environment,
     }
   })
+}
+
+function workflowRunSource(source) {
+  const lines = source.split(/\r?\n/)
+  const scripts = []
+
+  for (let index = 0; index < lines.length; index += 1) {
+    const run = lines[index].match(/^(\s*)run:\s*(.*?)\s*$/)
+    if (!run) continue
+
+    const runIndent = run[1].length
+    const body = run[2]
+    const scalarBody = yamlScalar(body)
+    if (scalarBody && !/^[|>][+-]?$/.test(scalarBody)) {
+      scripts.push(scalarBody)
+      continue
+    }
+
+    for (let next = index + 1; next < lines.length; next += 1) {
+      const line = lines[next]
+      if (line.trim() && line.match(/^\s*/)[0].length <= runIndent) break
+      scripts.push(line.trim())
+    }
+  }
+
+  return scripts.join('\n')
+}
+
+function shellComposeFileAssignments(source) {
+  const assignments = []
+  let unresolved = false
+  for (const line of source.split(/\r?\n/)) {
+    const trimmed = line.trim()
+    if (!trimmed || trimmed.startsWith('#')) continue
+
+    for (const segment of trimmed.split(/&&|\|\||[;|]/)) {
+      const candidate = segment.trim()
+      if (!/\bCOMPOSE_FILE\s*=/.test(candidate)) continue
+
+      const match = candidate.match(
+        /^(?:export\s+)?COMPOSE_FILE\s*=\s*(?:"([^"]*)"|'([^']*)'|([^\s#]+))/,
+      )
+      if (match) assignments.push(match[1] ?? match[2] ?? match[3])
+      else unresolved = true
+    }
+  }
+
+  return { assignments, unresolved }
 }
 
 function defaultComposePaths(root, workingDirectory) {
@@ -518,7 +575,7 @@ export async function collectComposeFiles(root, sources, environment = process.e
       ? workflowSteps(source).filter(step =>
           /\bdocker\s+compose\b|\bdocker-compose\b/.test(step.source),
         )
-      : [{ source, workingDirectory: undefined }]
+      : [{ source, shellSource: source, workingDirectory: undefined }]
 
     for (const command of commands) {
       const workingDirectory = resolve(root, command.workingDirectory || '.')
@@ -534,6 +591,11 @@ export async function collectComposeFiles(root, sources, environment = process.e
         }
       } else {
         const commandEnvironment = command.environment || {}
+        const shellComposeFile = shellComposeFileAssignments(command.shellSource || '')
+        if (shellComposeFile.unresolved) {
+          throw new Error(`Cannot statically resolve shell COMPOSE_FILE assignment in ${path}`)
+        }
+        const shellAssignments = shellComposeFile.assignments
         const hasWorkflowComposeFile = Object.hasOwn(commandEnvironment, 'COMPOSE_FILE')
         const hasRunnerComposeFile = Object.hasOwn(environment, 'COMPOSE_FILE')
         const hasComposeFile = hasWorkflowComposeFile || hasRunnerComposeFile
@@ -544,11 +606,21 @@ export async function collectComposeFiles(root, sources, environment = process.e
           ? commandEnvironment.COMPOSE_PATH_SEPARATOR
           : environment.COMPOSE_PATH_SEPARATOR
 
-        if (hasComposeFile && !composeFile) {
+        if (shellAssignments.length > 0) {
+          for (const shellComposeFile of shellAssignments) {
+            for (const reference of composeFilePaths(
+              shellComposeFile,
+              workingDirectory,
+              pathSeparator,
+              path,
+              path,
+            )) {
+              references.set(reference.path, reference)
+            }
+          }
+        } else if (hasComposeFile && !composeFile) {
           throw new Error(`Cannot statically resolve COMPOSE_FILE in ${path}`)
-        }
-
-        if (hasComposeFile) {
+        } else if (hasComposeFile) {
           for (const reference of composeFilePaths(
             composeFile,
             workingDirectory,
