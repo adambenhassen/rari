@@ -1,7 +1,7 @@
 use std::{
     borrow::Cow,
     rc::Rc,
-    sync::{Arc, LazyLock, Mutex},
+    sync::{Arc, LazyLock, Mutex, PoisonError},
 };
 
 use cow_utils::CowUtils;
@@ -93,8 +93,7 @@ pub fn build_js_runtime(
     };
 
     let mut runtime = {
-        let _guard =
-            SNAPSHOT_RUNTIME_INIT_LOCK.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        let _guard = SNAPSHOT_RUNTIME_INIT_LOCK.lock().unwrap_or_else(PoisonError::into_inner);
         JsRuntime::new(options)
     };
 
@@ -153,9 +152,15 @@ mod tests {
         thread,
     };
 
+    use tokio::runtime::Builder;
+
     use super::build_js_runtime;
 
     #[test]
+    #[expect(
+        clippy::expect_used,
+        reason = "Runtime initialization failures should fail the regression test"
+    )]
     fn parallel_snapshot_runtime_creation_is_safe() {
         const RUNTIME_COUNT: usize = 12;
         let start = Arc::new(Barrier::new(RUNTIME_COUNT));
@@ -163,7 +168,7 @@ mod tests {
             .map(|_| {
                 let start = Arc::clone(&start);
                 thread::spawn(move || {
-                    let runtime = tokio::runtime::Builder::new_current_thread()
+                    let runtime = Builder::new_current_thread()
                         .enable_all()
                         .build()
                         .expect("create Tokio runtime");
