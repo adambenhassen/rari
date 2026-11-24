@@ -1,5 +1,5 @@
 import { readdir, readFile } from 'node:fs/promises'
-import { extname, join, relative, resolve } from 'node:path'
+import { dirname, extname, join, relative, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 
 const textExtensions = new Set(['.js', '.json', '.md', '.mjs', '.sh', '.ts', '.yml', '.yaml'])
@@ -26,21 +26,44 @@ function logicalCommands(lines) {
 }
 
 function hasJobLabelFilter(command) {
-  const filter = /--filter(?:=|\s+)["']?label=([\w.-]*(?:task|job|run)[\w.-]*(?:=|:)[^,"'\s]*)/gi
+  const filter = /--filter(?:=|\s+)(?:"([^"]+)"|'([^']+)'|([^\s]+))/gi
+  const hasVariable = (value, name) => {
+    const patterns = [`\\$\\{\\{\\s*(?:env\\.)?${name}\\s*\\}\\}`, `\\$\\{${name}\\}`, `\\$${name}`]
+    const githubContext = {
+      GITHUB_JOB: 'github.job',
+      GITHUB_RUN_ATTEMPT: 'github.run_attempt',
+      GITHUB_RUN_ID: 'github.run_id',
+    }[name]
+    if (githubContext) patterns.push(`\\$\\{\\{\\s*${githubContext}\\s*\\}\\}`)
+    return new RegExp(`(?:${patterns.join('|')})(?![\\w])`, 'i').test(value)
+  }
+
   for (const match of command.matchAll(filter)) {
+    const criterion = match[1] ?? match[2] ?? match[3]
+    const label = criterion.match(/^label=([\w.-]+)=(.+)$/i)
+    if (!label || !/(?:task|job|run)/i.test(label[1])) continue
+
+    const value = label[2].trim()
     if (
-      /(?:GITHUB_RUN_ID|GITHUB_RUN_ATTEMPT|GITHUB_JOB|TASK_ID|RUN_ID|JOB_ID|github\.run_id)/i.test(
-        match[1],
+      ['TASK_ID', 'GITEA_TASK_ID', 'RUNNER_TASK_ID', 'CI_JOB_ID', 'GITHUB_JOB_ID'].some(name =>
+        hasVariable(value, name),
       )
     ) {
       return true
     }
+
+    const runIdentity = ['GITHUB_RUN_ID', 'GITHUB_RUN_ATTEMPT', 'GITHUB_JOB'].every(name =>
+      hasVariable(value, name),
+    )
+    const matrixIdentity =
+      /\$\{\{\s*matrix\.[\w.-]+\s*\}\}/i.test(value) || /\$\{?MATRIX_[A-Z0-9_]+\}?/i.test(value)
+    if (runIdentity && matrixIdentity) return true
   }
   return false
 }
 
 function hasFixedDockerPublish(command) {
-  return /(?:^|\s)(?:--publish(?:=|\s+)|-p(?:=|\s+|(?=\d)))(?:(?:(?:\d{1,3}\.){3}\d{1,3}|localhost|\[[\da-f:]+\]):)?\d+(?:-\d+)?:\d+(?:-\d+)?(?:\/(?:tcp|udp))?(?=$|\s|["'])/.test(
+  return /(?:^|\s)(?:--publish(?:=|\s+)|-p(?:=|\s+|(?=\d)))["']?(?:(?:(?:\d{1,3}\.){3}\d{1,3}|localhost|\[[\da-f:]+\]):)?\d+(?:-\d+)?:\d+(?:-\d+)?(?:\/(?:tcp|udp))?(?=$|\s|["'])/.test(
     command,
   )
 }
@@ -128,28 +151,82 @@ function composeFileReferences(source) {
   if (!/\bdocker\s+compose\b|\bdocker-compose\b/.test(source)) return []
 
   const references = []
-  const fileOption = /(?:--file(?:=|\s+)|(?:^|\s)-f(?:=|\s+))(["']?)([^\s"'\\]+)/g
-  for (const match of source.matchAll(fileOption)) references.push(match[2])
+  const fileOption = /(?:--file(?:=|\s+)|(?:^|\s)-f(?:=|\s+))(?:"([^"]+)"|'([^']+)'|([^\s"'\\]+))/g
+  for (const match of source.matchAll(fileOption)) references.push(match[1] ?? match[2] ?? match[3])
   return references
 }
 
-async function collectComposeFiles(root, sources) {
+function workflowSteps(source) {
+  const lines = source.split(/\r?\n/)
+  const steps = []
+
+  for (let index = 0; index < lines.length; index += 1) {
+    const stepsMatch = lines[index].match(/^(\s*)steps:\s*$/)
+    if (!stepsMatch) continue
+
+    const stepsIndent = stepsMatch[1].length
+    const stepIndent = stepsIndent + 2
+    let block = []
+    for (let next = index + 1; next < lines.length; next += 1) {
+      const line = lines[next]
+      if (line.trim() && line.match(/^\s*/)[0].length <= stepsIndent) break
+
+      const indent = line.match(/^\s*/)[0].length
+      if (line.trim() && indent === stepIndent && /^\s*-\s*/.test(line)) {
+        if (block.length > 0) steps.push(block)
+        block = [line.replace(/^\s*-\s?/, '')]
+      } else if (block.length > 0) {
+        block.push(line)
+      }
+    }
+    if (block.length > 0) steps.push(block)
+  }
+
+  return steps.map(linesInStep => {
+    const stepSource = linesInStep.join('\n')
+    const workingDirectory = stepSource.match(/^\s*working-directory:\s*(.*?)\s*$/m)?.[1]
+    return {
+      source: stepSource,
+      workingDirectory: workingDirectory?.replace(/^['"]|['"]$/g, ''),
+    }
+  })
+}
+
+function defaultComposePaths(root, workingDirectory) {
+  const paths = []
+  let directory = workingDirectory
+  while (true) {
+    for (const name of composeFileNames) paths.push(join(directory, name))
+    if (directory === root) break
+    const parent = dirname(directory)
+    if (parent === directory || relative(root, parent).startsWith('..')) break
+    directory = parent
+  }
+  return paths
+}
+
+export async function collectComposeFiles(root, sources) {
   const references = new Set()
-  const defaultDirectories = new Set()
 
   for (const { path, source } of sources) {
     if (!/\bdocker\s+compose\b|\bdocker-compose\b/.test(source)) continue
-    defaultDirectories.add(root)
-    for (const match of source.matchAll(/^\s*working-directory:\s*["']?([^\s"']+)/gm)) {
-      defaultDirectories.add(resolve(root, match[1]))
-    }
-    for (const reference of composeFileReferences(source)) {
-      references.add(resolve(root, reference))
-    }
-  }
 
-  for (const directory of defaultDirectories) {
-    for (const name of composeFileNames) references.add(join(directory, name))
+    const isWorkflow = /[\\/]workflows[\\/][^\\/]+\.ya?ml$/.test(path)
+    const commands = isWorkflow
+      ? workflowSteps(source).filter(step =>
+          /\bdocker\s+compose\b|\bdocker-compose\b/.test(step.source),
+        )
+      : [{ source, workingDirectory: undefined }]
+
+    for (const command of commands) {
+      const workingDirectory = resolve(root, command.workingDirectory || '.')
+      const fileReferences = composeFileReferences(command.source)
+      if (fileReferences.length > 0) {
+        for (const reference of fileReferences) references.add(resolve(workingDirectory, reference))
+      } else {
+        for (const path of defaultComposePaths(root, workingDirectory)) references.add(path)
+      }
+    }
   }
 
   const found = []
