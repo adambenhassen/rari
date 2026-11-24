@@ -7,17 +7,26 @@ on:
         description: Prerelease version for Linux platform tarballs
         required: true
         type: string
+      issue:
+        description: Multica issue key for routing this workflow result
+        required: false
+        type: string
+      diagnose_snapshot_profiles:
+        description: Compare original and reduced-memory snapshot compiler settings without publishing
+        required: false
+        default: false
+        type: boolean
       delete_test_release:
         description: Delete the test prerelease and its mirrored tag
         required: false
-        default: 'false'
-        type: string
+        default: false
+        type: boolean
 
 permissions: {}
 
 jobs:
   build:
-    if: inputs.delete_test_release != 'true'
+    if: ${{ inputs.delete_test_release != true && inputs.delete_test_release != 'true' && inputs.diagnose_snapshot_profiles != true && inputs.diagnose_snapshot_profiles != 'true' }}
     name: Build Linux release
     runs-on: inference-x64
     timeout-minutes: 300
@@ -30,6 +39,7 @@ jobs:
       CARGO_INCREMENTAL: 0
       NODE_OPTIONS: --max-old-space-size=6144
       PNPM_CONFIG_WORKSPACE_CONCURRENCY: 1
+      RUSTUP_TOOLCHAIN: nightly-2026-11-22
     steps:
       - name: Checkout
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -88,7 +98,7 @@ jobs:
       - name: Install Rust
         uses: dtolnay/rust-toolchain@02cb101ec7c40f2c49e1d9714d64511d8e1b74de # v1
         with:
-          toolchain: nightly
+          toolchain: nightly-2026-11-22
           targets: x86_64-unknown-linux-gnu,aarch64-unknown-linux-gnu
 
       - name: Build smoke test app
@@ -104,11 +114,19 @@ jobs:
       - name: Generate V8 snapshot
         run: cargo run --release --manifest-path tools/snapshot/Cargo.toml -- crates/rari/snapshots
         env:
+          # The generator is not shipped; avoid fat cross-crate LTO.
+          CARGO_BUILD_JOBS: '1'
+          CARGO_PROFILE_RELEASE_DEBUG: none
+          CARGO_PROFILE_RELEASE_CODEGEN_UNITS: '16'
+          CARGO_PROFILE_RELEASE_LTO: 'false'
           RUSTFLAGS: -C link-arg=-fuse-ld=mold -Cforce-frame-pointers=yes
 
       - name: Build Linux x64 binary
         run: cargo build --release --target x86_64-unknown-linux-gnu --bin rari --features ext-full,jemalloc
         env:
+          CARGO_BUILD_JOBS: '1'
+          CARGO_PROFILE_RELEASE_CODEGEN_UNITS: '16'
+          CARGO_PROFILE_RELEASE_LTO: 'false'
           RUSTFLAGS: -C link-arg=-fuse-ld=mold -Cforce-frame-pointers=yes
 
       - name: Build and run the ARM64 snapshot generator
@@ -127,6 +145,12 @@ jobs:
             --target aarch64-unknown-linux-gnu
           qemu-aarch64-static -L /usr/aarch64-linux-gnu \
             target/aarch64-unknown-linux-gnu/release/rari-snapshot crates/rari/snapshots
+        env:
+          # The generator is not shipped; avoid fat cross-crate LTO.
+          CARGO_BUILD_JOBS: '1'
+          CARGO_PROFILE_RELEASE_DEBUG: none
+          CARGO_PROFILE_RELEASE_CODEGEN_UNITS: '16'
+          CARGO_PROFILE_RELEASE_LTO: 'false'
 
       - name: Build Linux ARM64 binary
         run: |
@@ -141,6 +165,10 @@ jobs:
           export PKG_CONFIG_SYSROOT_DIR=/
           export RUSTFLAGS='-Cforce-frame-pointers=yes'
           cargo build --release --target aarch64-unknown-linux-gnu --bin rari --features ext-full,jemalloc
+        env:
+          CARGO_BUILD_JOBS: '1'
+          CARGO_PROFILE_RELEASE_CODEGEN_UNITS: '16'
+          CARGO_PROFILE_RELEASE_LTO: 'false'
 
       - name: Smoke-test Linux ARM64 binary under QEMU
         run: |
@@ -316,8 +344,132 @@ jobs:
               fi
             '
 
+  check-snapshot-profile-diagnostic:
+    if: ${{ (inputs.diagnose_snapshot_profiles == true || inputs.diagnose_snapshot_profiles == 'true') && inputs.delete_test_release != true && inputs.delete_test_release != 'true' }}
+    name: 'check: snapshot-profile-diagnostic'
+    runs-on: inference-x64
+    timeout-minutes: 120
+    permissions:
+      contents: read
+    env:
+      CARGO_PROFILE_RELEASE_DEBUG: line-tables-only
+      CARGO_PROFILE_RELEASE_STRIP: none
+      CARGO_INCREMENTAL: 0
+      RUSTUP_TOOLCHAIN: nightly-2026-11-22
+      RUSTFLAGS: -C link-arg=-fuse-ld=mold -Cforce-frame-pointers=yes
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@02cb101ec7c40f2c49e1d9714d64511d8e1b74de # v1
+        with:
+          toolchain: nightly-2026-11-22
+
+      - name: Install Rust build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y pkg-config libfontconfig1-dev libclang-dev mold
+
+      - name: Create snapshot placeholder
+        run: |
+          mkdir -p crates/rari/snapshots
+          touch crates/rari/snapshots/RARI_SNAPSHOT.bin
+          echo 'pub static RESIDUAL_LAZY_ESM_SOURCES: &[(&str, &str)] = &[];' > crates/rari/snapshots/residual_lazy_sources.rs
+          echo 'pub static RESIDUAL_LAZY_JS_SOURCES: &[(&str, &str)] = &[];' >> crates/rari/snapshots/residual_lazy_sources.rs
+
+      - name: Prepare compiler and resource recorders
+        run: |
+          set -euo pipefail
+          cat > "$RUNNER_TEMP/rustc-status-wrapper.sh" <<'WRAPPER'
+          #!/usr/bin/env bash
+          set +e
+          "$@"
+          rustc_status=$?
+          if [[ " $* " == *" --crate-name rari_snapshot "* ]]; then
+            printf 'RUSTC_EXIT_STATUS=%s\n' "$rustc_status" >&2
+            if (( rustc_status >= 128 )); then
+              signal=$((rustc_status - 128))
+              signal_name=$(kill -l "$signal" 2>/dev/null || true)
+              printf 'RUSTC_TERMINATION_SIGNAL=%s (%s)\n' "$signal" "$signal_name" >&2
+            fi
+          fi
+          exit "$rustc_status"
+          WRAPPER
+          cat > "$RUNNER_TEMP/snapshot-runner-resources.sh" <<'RESOURCES'
+          #!/usr/bin/env bash
+          set -euo pipefail
+          echo "=== runner resource snapshot: $1 ==="
+          grep -E '^(MemTotal|MemAvailable|SwapTotal|SwapFree):' /proc/meminfo || true
+          for path in /sys/fs/cgroup/memory.current /sys/fs/cgroup/memory.peak /sys/fs/cgroup/memory.max /sys/fs/cgroup/memory.events; do
+            if [[ -r "$path" ]]; then
+              echo "--- $path ---"
+              cat "$path"
+            else
+              echo "--- $path unavailable ---"
+            fi
+          done
+          for path in /proc/pressure/memory /proc/pressure/io; do
+            if [[ -r "$path" ]]; then
+              echo "--- $path ---"
+              cat "$path"
+            fi
+          done
+          grep -E '^(oom_kill|pgmajfault) ' /proc/vmstat || true
+          RESOURCES
+          chmod +x "$RUNNER_TEMP/rustc-status-wrapper.sh" "$RUNNER_TEMP/snapshot-runner-resources.sh"
+          echo "RUSTC_WRAPPER=$RUNNER_TEMP/rustc-status-wrapper.sh" >> "$GITHUB_ENV"
+          echo "SNAPSHOT_RESOURCE_SNAPSHOT=$RUNNER_TEMP/snapshot-runner-resources.sh" >> "$GITHUB_ENV"
+
+      - name: Build snapshot with original release settings
+        id: original
+        run: |
+          set -euo pipefail
+          "$SNAPSHOT_RESOURCE_SNAPSHOT" original-before
+          set +e
+          CARGO_TARGET_DIR="$RUNNER_TEMP/snapshot-original-target" \
+            cargo build --release --manifest-path tools/snapshot/Cargo.toml
+          cargo_status=$?
+          set -e
+          printf 'ORIGINAL_CARGO_EXIT_STATUS=%s\n' "$cargo_status"
+          echo "cargo_exit_status=$cargo_status" >> "$GITHUB_OUTPUT"
+          "$SNAPSHOT_RESOURCE_SNAPSHOT" original-after
+          rm -rf "$RUNNER_TEMP/snapshot-original-target"
+
+        env:
+          CARGO_BUILD_JOBS: '2'
+          CARGO_PROFILE_RELEASE_CODEGEN_UNITS: '1'
+          CARGO_PROFILE_RELEASE_LTO: fat
+
+      - name: Build snapshot with proposed release settings
+        id: proposed
+        run: |
+          set -euo pipefail
+          "$SNAPSHOT_RESOURCE_SNAPSHOT" proposed-before
+          set +e
+          CARGO_TARGET_DIR="$RUNNER_TEMP/snapshot-proposed-target" \
+            cargo build --release --manifest-path tools/snapshot/Cargo.toml
+          cargo_status=$?
+          set -e
+          printf 'PROPOSED_CARGO_EXIT_STATUS=%s\n' "$cargo_status"
+          echo "cargo_exit_status=$cargo_status" >> "$GITHUB_OUTPUT"
+          "$SNAPSHOT_RESOURCE_SNAPSHOT" proposed-after
+          rm -rf "$RUNNER_TEMP/snapshot-proposed-target"
+          if (( cargo_status != 0 )); then
+            exit "$cargo_status"
+          fi
+
+        env:
+          CARGO_BUILD_JOBS: '1'
+          CARGO_PROFILE_RELEASE_DEBUG: none
+          CARGO_PROFILE_RELEASE_CODEGEN_UNITS: '16'
+          CARGO_PROFILE_RELEASE_LTO: 'false'
+
   publish-release:
-    if: inputs.delete_test_release != 'true' && github.ref == 'refs/heads/fork/main'
+    if: ${{ inputs.delete_test_release != true && inputs.delete_test_release != 'true' && inputs.diagnose_snapshot_profiles != true && inputs.diagnose_snapshot_profiles != 'true' && github.ref == 'refs/heads/fork/main' }}
     name: Publish Linux release
     needs: build
     runs-on: inference-x64
@@ -351,7 +503,7 @@ jobs:
         run: node .github/scripts/fork-release.mjs
 
   validate-cleanup-ref:
-    if: inputs.delete_test_release == 'true'
+    if: ${{ inputs.delete_test_release == true || inputs.delete_test_release == 'true' }}
     name: Validate cleanup source ref
     runs-on: inference-x64
     timeout-minutes: 5
@@ -361,15 +513,20 @@ jobs:
       - name: Validate cleanup ref
         env:
           BUILD_REF: ${{ github.ref }}
+          DIAGNOSE_SNAPSHOT_PROFILES: ${{ inputs.diagnose_snapshot_profiles }}
         run: |
           set -euo pipefail
+          if [[ "$DIAGNOSE_SNAPSHOT_PROFILES" == "true" ]]; then
+            echo "Cannot combine delete_test_release with diagnose_snapshot_profiles" >&2
+            exit 1
+          fi
           if [[ "$BUILD_REF" != "refs/heads/fork/main" ]]; then
             echo "Dispatch this workflow from fork/main (got $BUILD_REF)" >&2
             exit 1
           fi
 
   delete-test-release:
-    if: inputs.delete_test_release == 'true' && github.ref == 'refs/heads/fork/main'
+    if: ${{ (inputs.delete_test_release == true || inputs.delete_test_release == 'true') && inputs.diagnose_snapshot_profiles != true && inputs.diagnose_snapshot_profiles != 'true' && github.ref == 'refs/heads/fork/main' }}
     name: Delete test release
     needs: validate-cleanup-ref
     runs-on: inference-x64
