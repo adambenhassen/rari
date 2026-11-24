@@ -86,8 +86,22 @@ jobs:
       - name: Capture native Rust test abort stack
         run: |
           set -euo pipefail
-          test_bin="$(cargo test -p rari --all-features --no-run --message-format=json | jq -r 'select(.reason == "compiler-artifact" and .target.name == "rari" and .profile.test and (.target.kind | index("lib") != null)) | .executable')"
-          test -x "$test_bin"
+          cargo test -p rari --all-features --no-run
+
+          test_bin=""
+          while IFS= read -r candidate; do
+            test_listing="$("$candidate" --list 2>/dev/null || true)"
+            if [[ "$test_listing" == *": test"* ]]; then
+              test_bin="$candidate"
+              break
+            fi
+          done < <(find target/debug/build/rari -type f -path '*/out/rari-*' -executable -print)
+
+          if [ -z "$test_bin" ]; then
+            echo 'Could not locate the rari library test binary'
+            find target/debug/build/rari -type f -path '*/out/rari-*' -executable -print
+            exit 1
+          fi
 
           for attempt in $(seq 1 10); do
             log="$RUNNER_TEMP/rari-test-gdb-$attempt.log"
@@ -101,20 +115,25 @@ jobs:
               --args "$test_bin" > "$log" 2>&1
             gdb_status=$?
             set -e
-            cat "$log"
 
             if rg -q 'Program received signal SIGABRT' "$log"; then
+              cat "$log"
               echo "Captured SIGABRT native stack on attempt $attempt"
               exit 1
             fi
 
             if [ "$gdb_status" -ne 0 ]; then
+              cat "$log"
               exit "$gdb_status"
             fi
+
+            rg 'test result:' "$log" || true
           done
 
           echo 'No SIGABRT reproduced in ten parallel test runs'
-          exit 1
+
+      - name: Test Rust
+        run: cargo test -p rari --all-features
 
       - name: Detect jemalloc feature
         id: jemalloc
