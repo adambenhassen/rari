@@ -49,14 +49,17 @@ function hasFullMatrixExpression(value) {
 
 function assignedShellVariableValue(source, reference) {
   const variable = reference.match(/^\$\{?([A-Za-z_][\w]*)\}?$/)
-  if (!variable) return reference
+  if (!variable) return { value: reference, expandsVariables: true }
 
   const name = variable[1].replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
   const assignment = new RegExp(
     `^\\s*(?:export\\s+)?${name}\\s*=\\s*(?:"([^"]*)"|'([^']*)'|([^\\s#]+))\\s*(?:#.*)?$`,
     'm',
   ).exec(source)
-  return assignment?.[1] ?? assignment?.[2] ?? assignment?.[3] ?? reference
+  if (!assignment) return { value: reference, expandsVariables: true }
+  if (assignment[1] !== undefined) return { value: assignment[1], expandsVariables: true }
+  if (assignment[2] !== undefined) return { value: assignment[2], expandsVariables: false }
+  return { value: assignment[3], expandsVariables: true }
 }
 
 function hasJobScopedContainerName(name, matrixContext) {
@@ -75,7 +78,9 @@ function hasJobScopedContainerName(name, matrixContext) {
 function dockerContainerName(command, source) {
   const match = /(?:^|\s)--name(?:=|\s+)(?:"([^"]*)"|'([^']*)'|([^\s]+))/i.exec(command)
   if (!match) return undefined
-  return assignedShellVariableValue(source, match[1] ?? match[2] ?? match[3])
+  const expandsVariables = match[2] === undefined
+  const name = assignedShellVariableValue(source, match[1] ?? match[2] ?? match[3])
+  return { ...name, expandsVariables: expandsVariables && name.expandsVariables }
 }
 
 function hasJobLabelFilter(command, matrixContext) {
@@ -187,7 +192,11 @@ export function findDockerSafetyViolations(source, file = '<input>') {
   for (const command of logicalCommands(lines)) {
     if (/\bdocker\s+(?:create|run)\b/i.test(command.text)) {
       const name = dockerContainerName(command.text, source)
-      if (!name || !hasJobScopedContainerName(name, matrixContext)) {
+      if (
+        !name ||
+        !name.expandsVariables ||
+        !hasJobScopedContainerName(name.value, matrixContext)
+      ) {
         violations.push({
           file,
           line: command.line,
@@ -279,13 +288,41 @@ function isLiteralComposeFileReference(reference) {
 
 function yamlScalar(value) {
   const trimmed = value.trim()
-  if (
-    (trimmed.startsWith('"') && trimmed.endsWith('"')) ||
-    (trimmed.startsWith("'") && trimmed.endsWith("'"))
-  ) {
-    return trimmed.slice(1, -1)
+  if (trimmed.startsWith('"') || trimmed.startsWith("'")) {
+    const quote = trimmed[0]
+    const end = trimmed.lastIndexOf(quote)
+    if (
+      end > 0 &&
+      (end === trimmed.length - 1 ||
+        trimmed
+          .slice(end + 1)
+          .trimStart()
+          .startsWith('#'))
+    ) {
+      return trimmed.slice(1, end)
+    }
   }
   return trimmed.replace(/\s+#.*$/, '')
+}
+
+function yamlEnvironment(lines, start, end, environmentIndent) {
+  const environment = {}
+
+  for (let index = start; index < end; index += 1) {
+    const match = lines[index].match(/^(\s*)env:\s*(?:#.*)?$/)
+    if (!match || match[1].length !== environmentIndent) continue
+
+    for (let next = index + 1; next < end; next += 1) {
+      const line = lines[next]
+      if (line.trim() && line.match(/^\s*/)[0].length <= environmentIndent) break
+      const variable = line.match(/^\s*["']?([A-Za-z_][\w-]*)["']?:\s*(.*?)\s*$/)
+      if (variable && line.match(/^\s*/)[0].length === environmentIndent + 2) {
+        environment[variable[1]] = yamlScalar(variable[2])
+      }
+    }
+  }
+
+  return environment
 }
 
 function defaultRunWorkingDirectory(lines, start, end, defaultsIndent) {
@@ -315,6 +352,7 @@ function workflowSteps(source) {
   const lines = source.split(/\r?\n/)
   const steps = []
   const workflowDefault = defaultRunWorkingDirectory(lines, 0, lines.length, 0)
+  const workflowEnvironment = yamlEnvironment(lines, 0, lines.length, 0)
 
   for (let index = 0; index < lines.length; index += 1) {
     const stepsMatch = lines[index].match(/^(\s*)steps:\s*(?:#.*)?$/)
@@ -344,6 +382,8 @@ function workflowSteps(source) {
       jobStart >= 0
         ? defaultRunWorkingDirectory(lines, jobStart + 1, jobEnd, jobIndent + 2)
         : undefined
+    const jobEnvironment =
+      jobStart >= 0 ? yamlEnvironment(lines, jobStart + 1, jobEnd, jobIndent + 2) : {}
     let block = []
     for (let next = index + 1; next < lines.length; next += 1) {
       const line = lines[next]
@@ -352,7 +392,15 @@ function workflowSteps(source) {
       const indent = line.match(/^\s*/)[0].length
       if (line.trim() && indent === stepIndent && /^\s*-\s*/.test(line)) {
         if (block.length > 0) {
-          steps.push({ lines: block, defaultWorkingDirectory: jobDefault ?? workflowDefault })
+          steps.push({
+            lines: block,
+            defaultWorkingDirectory: jobDefault ?? workflowDefault,
+            environment: {
+              ...workflowEnvironment,
+              ...jobEnvironment,
+              ...yamlEnvironment(block, 0, block.length, stepIndent + 2),
+            },
+          })
         }
         block = [line.replace(/^\s*-\s?/, '')]
       } else if (block.length > 0) {
@@ -360,16 +408,25 @@ function workflowSteps(source) {
       }
     }
     if (block.length > 0) {
-      steps.push({ lines: block, defaultWorkingDirectory: jobDefault ?? workflowDefault })
+      steps.push({
+        lines: block,
+        defaultWorkingDirectory: jobDefault ?? workflowDefault,
+        environment: {
+          ...workflowEnvironment,
+          ...jobEnvironment,
+          ...yamlEnvironment(block, 0, block.length, stepIndent + 2),
+        },
+      })
     }
   }
 
-  return steps.map(({ lines: linesInStep, defaultWorkingDirectory }) => {
+  return steps.map(({ lines: linesInStep, defaultWorkingDirectory, environment }) => {
     const stepSource = linesInStep.join('\n')
     const workingDirectory = stepSource.match(/^\s*working-directory:\s*(.*?)\s*$/m)?.[1]
     return {
       source: stepSource,
       workingDirectory: workingDirectory ? yamlScalar(workingDirectory) : defaultWorkingDirectory,
+      environment,
     }
   })
 }
@@ -387,7 +444,70 @@ function defaultComposePaths(root, workingDirectory) {
   return paths
 }
 
-export async function collectComposeFiles(root, sources) {
+function dotenvValue(value, file) {
+  const trimmed = value.trim()
+  if (trimmed.startsWith("'") || trimmed.startsWith('"')) {
+    const quote = trimmed[0]
+    const end = trimmed.indexOf(quote, 1)
+    if (
+      end < 0 ||
+      (trimmed.slice(end + 1).trim() &&
+        !trimmed
+          .slice(end + 1)
+          .trimStart()
+          .startsWith('#'))
+    ) {
+      throw new Error(`Cannot statically resolve COMPOSE_FILE in ${file}`)
+    }
+    return trimmed.slice(1, end)
+  }
+
+  return trimmed.replace(/\s+#.*$/, '')
+}
+
+function dotenvComposeFile(source, file) {
+  let composeFile
+  for (const line of source.split(/\r?\n/)) {
+    const match = line.match(/^\s*(?:export\s+)?COMPOSE_FILE\s*=\s*(.*?)\s*$/)
+    if (match) composeFile = dotenvValue(match[1], file)
+  }
+  return composeFile
+}
+
+function composeFilePaths(value, workingDirectory, pathSeparator, source, file) {
+  if (pathSeparator !== undefined && pathSeparator !== ':' && pathSeparator !== '') {
+    throw new Error(
+      `Cannot statically resolve COMPOSE_FILE path separator "${pathSeparator}" in ${source}`,
+    )
+  }
+  if (typeof value !== 'string' || !isLiteralComposeFileReference(value)) {
+    throw new Error(`Cannot statically resolve COMPOSE_FILE "${value}" in ${source}`)
+  }
+
+  const references = value.split(':')
+  if (references.some(reference => !reference.trim())) {
+    throw new Error(`Cannot statically resolve COMPOSE_FILE "${value}" in ${source}`)
+  }
+
+  return references.map(reference => ({
+    path: resolve(workingDirectory, reference.trim()),
+    required: true,
+    source: file,
+  }))
+}
+
+async function readDotenvComposeFile(workingDirectory, source) {
+  const dotenvPath = join(workingDirectory, '.env')
+  try {
+    const dotenv = await readFile(dotenvPath, 'utf8')
+    return { value: dotenvComposeFile(dotenv, dotenvPath), path: dotenvPath }
+  } catch (error) {
+    if (error.code === 'ENOENT') return { value: undefined, path: dotenvPath }
+    throw error
+  }
+}
+
+export async function collectComposeFiles(root, sources, environment = process.env) {
   const references = new Map()
 
   for (const { path, source } of sources) {
@@ -413,8 +533,56 @@ export async function collectComposeFiles(root, sources) {
           references.set(resolve(workingDirectory, reference), { required: true, source: path })
         }
       } else {
-        for (const path of defaultComposePaths(root, workingDirectory)) {
-          if (!references.has(path)) references.set(path, { required: false, source: path })
+        const commandEnvironment = command.environment || {}
+        const hasWorkflowComposeFile = Object.hasOwn(commandEnvironment, 'COMPOSE_FILE')
+        const hasRunnerComposeFile = Object.hasOwn(environment, 'COMPOSE_FILE')
+        const hasComposeFile = hasWorkflowComposeFile || hasRunnerComposeFile
+        const composeFile = hasWorkflowComposeFile
+          ? commandEnvironment.COMPOSE_FILE
+          : environment.COMPOSE_FILE
+        const pathSeparator = Object.hasOwn(commandEnvironment, 'COMPOSE_PATH_SEPARATOR')
+          ? commandEnvironment.COMPOSE_PATH_SEPARATOR
+          : environment.COMPOSE_PATH_SEPARATOR
+
+        if (hasComposeFile && !composeFile) {
+          throw new Error(`Cannot statically resolve COMPOSE_FILE in ${path}`)
+        }
+
+        if (hasComposeFile) {
+          for (const reference of composeFilePaths(
+            composeFile,
+            workingDirectory,
+            pathSeparator,
+            path,
+            path,
+          )) {
+            references.set(reference.path, reference)
+          }
+        } else if (!hasComposeFile) {
+          const dotenv = await readDotenvComposeFile(workingDirectory, path)
+          if (dotenv.value) {
+            for (const reference of composeFilePaths(
+              dotenv.value,
+              workingDirectory,
+              pathSeparator,
+              path,
+              dotenv.path,
+            )) {
+              references.set(reference.path, reference)
+            }
+          } else {
+            for (const defaultPath of defaultComposePaths(root, workingDirectory)) {
+              if (!references.has(defaultPath)) {
+                references.set(defaultPath, { required: false, source: path })
+              }
+            }
+          }
+        } else {
+          for (const defaultPath of defaultComposePaths(root, workingDirectory)) {
+            if (!references.has(defaultPath)) {
+              references.set(defaultPath, { required: false, source: path })
+            }
+          }
         }
       }
     }
