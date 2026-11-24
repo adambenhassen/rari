@@ -1038,6 +1038,95 @@ test('smoke cleanup exits nonzero when removing the container fails', async () =
   }
 })
 
+test('reads the uppercase -H root option before the subcommand', async () => {
+  assert.deepEqual(
+    findDockerSafetyViolations('docker -H tcp://host run --name fixed alpine').map(
+      ({ message }) => message,
+    ),
+    ['container name is not unique to this job'],
+  )
+
+  const root = await mkdtemp(join(tmpdir(), 'docker-safety-uppercase-host-'))
+  const workflowPath = join(root, '.github', 'workflows', 'check.yml')
+  const workflow = [
+    'jobs:',
+    '  check:',
+    '    steps:',
+    '      - run: docker -H host compose -f custom.yml up',
+  ].join('\n')
+  const fixedCompose = 'services:\n  db:\n    ports:\n      - "127.0.0.1:5432:5432"'
+
+  try {
+    await mkdir(join(root, '.github', 'workflows'), { recursive: true })
+    await writeFile(join(root, 'custom.yml'), fixedCompose)
+
+    const composeFiles = await collectComposeFiles(root, [{ path: workflowPath, source: workflow }])
+
+    assert.deepEqual(
+      composeFiles.map(({ path }) => path),
+      [resolve(root, 'custom.yml')],
+    )
+    assert.deepEqual(
+      composeFiles.flatMap(({ path, source }) =>
+        findDockerSafetyViolations(source, path).map(({ message }) => message),
+      ),
+      ['fixed host-port publishing'],
+    )
+  } finally {
+    await rm(root, { recursive: true, force: true })
+  }
+})
+
+test('reads the subcommand after container, image, volume, network and system groups', () => {
+  const nameViolation = ['container name is not unique to this job']
+  assert.deepEqual(
+    findDockerSafetyViolations('docker container run --name fixed alpine').map(
+      ({ message }) => message,
+    ),
+    nameViolation,
+  )
+  assert.deepEqual(
+    findDockerSafetyViolations('docker container create --name fixed alpine').map(
+      ({ message }) => message,
+    ),
+    nameViolation,
+  )
+  assert.deepEqual(
+    findDockerSafetyViolations(
+      'docker container run --name "rari-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT-$GITHUB_JOB" alpine',
+    ),
+    [],
+  )
+  assert.deepEqual(
+    findDockerSafetyViolations('docker network create rari-fixed').map(({ message }) => message),
+    [],
+  )
+  assert.deepEqual(
+    findDockerSafetyViolations('docker container prune -f').map(({ message }) => message),
+    ['unfiltered Docker prune'],
+  )
+  assert.deepEqual(
+    findDockerSafetyViolations('docker container rm -f $(docker container ls -aq)').map(
+      ({ message }) => message,
+    ),
+    ['removing every Docker container'],
+  )
+})
+
+test('requires -a and -q in the every-container listing whatever the flag grouping', () => {
+  for (const listing of ['docker ps -a -q', 'docker ps -qa', 'docker container ls -a -q']) {
+    assert.deepEqual(
+      findDockerSafetyViolations(`docker rm -f $(${listing})`).map(({ message }) => message),
+      ['removing every Docker container'],
+      listing,
+    )
+  }
+  assert.deepEqual(
+    findDockerSafetyViolations('docker rm -f $(docker ps -q)').map(({ message }) => message),
+    [],
+  )
+})
+
 test('ignores dynamic ports and ports opened inside a container', () => {
   const workflow =
     'docker run --name "rari-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT-$GITHUB_JOB" -p 5432 postgres\nserver --port 43819'

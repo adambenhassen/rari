@@ -107,11 +107,23 @@ function unquoteShellToken(token) {
     : token
 }
 
-function commandWord(token) {
-  return unquoteShellToken(token)
-    .replace(/^[($`]+|[);`]+$/g, '')
-    .toLowerCase()
+function rawCommandToken(token) {
+  return unquoteShellToken(token).replace(/^[($`]+|[);`]+$/g, '')
 }
+
+function commandWord(token) {
+  return rawCommandToken(token).toLowerCase()
+}
+
+// Docker resources whose subcommand follows the group word: `docker container run`.
+const dockerManagementGroups = new Set([
+  'builder',
+  'container',
+  'image',
+  'network',
+  'system',
+  'volume',
+])
 
 function dockerInvocations(source) {
   const matches = [...source.matchAll(/\bdocker(?=\s|$|-compose\b)/gi)]
@@ -135,31 +147,46 @@ function dockerInvocations(source) {
         break
       }
 
-      if (dockerRootOptionsWithValue.has(token)) {
+      // Root options are case-sensitive (`-H` is not `-h`), so match them on the raw token.
+      const option = rawCommandToken(tokens[index].value)
+
+      if (dockerRootOptionsWithValue.has(option)) {
         if (!tokens[index + 1]) break
         index += 1
         continue
       }
 
       const attachedValueOption = [...dockerRootOptionsWithValue].some(
-        option =>
-          token.startsWith(`${option}=`) ||
-          (option.length === 2 &&
-            option.startsWith('-') &&
-            token.startsWith(option) &&
-            token.length > 2),
+        rootOption =>
+          option.startsWith(`${rootOption}=`) ||
+          (rootOption.length === 2 &&
+            rootOption.startsWith('-') &&
+            option.startsWith(rootOption) &&
+            option.length > 2),
       )
       if (
         attachedValueOption ||
-        dockerRootOptionsWithoutValue.has(token) ||
-        token.startsWith('-')
+        dockerRootOptionsWithoutValue.has(option) ||
+        option.startsWith('-')
       ) {
         continue
       }
 
+      let subcommandIndex = index
+      let group
+      if (dockerManagementGroups.has(token)) {
+        subcommandIndex = tokens.findIndex(
+          (candidate, candidateIndex) =>
+            candidateIndex > index && !rawCommandToken(candidate.value).startsWith('-'),
+        )
+        if (subcommandIndex === -1) break
+        group = token
+      }
+
       invocations.push({
-        subcommand: token,
-        arguments: source.slice(afterDocker + tokens[index].end, end),
+        group,
+        subcommand: commandWord(tokens[subcommandIndex].value),
+        arguments: source.slice(afterDocker + tokens[subcommandIndex].end, end),
         command: source.slice(match.index, end),
       })
       break
@@ -169,16 +196,36 @@ function dockerInvocations(source) {
   return invocations
 }
 
+// Container commands: top-level (`docker rm`) or under the `container` group (`docker container rm`).
+function isContainerCommand(invocation, subcommands) {
+  return (
+    subcommands.includes(invocation.subcommand) &&
+    (invocation.group === undefined || invocation.group === 'container')
+  )
+}
+
+// Short flags are read from grouped tokens (`-aq`, `-a -q`); long flags are kept as written.
+function dockerFlags(args) {
+  const flags = new Set()
+  for (const token of shellTokens(args)) {
+    const word = rawCommandToken(token.value)
+    if (word.startsWith('--')) flags.add(word)
+    else if (/^-[A-Za-z]+$/.test(word)) for (const letter of word.slice(1)) flags.add(letter)
+  }
+  return flags
+}
+
 function removesEveryDockerContainer(invocations) {
-  const forceRemove = invocations.some(
-    invocation =>
-      invocation.subcommand === 'rm' &&
-      /(?:^|\s)(?:--force|-[a-z]*f[a-z]*)(?:\s|$)/i.test(invocation.arguments),
-  )
-  const listsEveryContainer = invocations.some(
-    invocation =>
-      invocation.subcommand === 'ps' && /(?:^|\s)-[a-z]*aq\b/i.test(invocation.arguments),
-  )
+  const forceRemove = invocations.some(invocation => {
+    if (!isContainerCommand(invocation, ['rm'])) return false
+    const flags = dockerFlags(invocation.arguments)
+    return flags.has('f') || flags.has('--force')
+  })
+  const listsEveryContainer = invocations.some(invocation => {
+    if (!isContainerCommand(invocation, ['ps', 'ls'])) return false
+    const flags = dockerFlags(invocation.arguments)
+    return (flags.has('a') || flags.has('--all')) && (flags.has('q') || flags.has('--quiet'))
+  })
   return forceRemove && listsEveryContainer
 }
 
@@ -362,7 +409,7 @@ export function findDockerSafetyViolations(source, file = '<input>') {
     const invocations = dockerInvocations(command.text)
 
     for (const invocation of invocations) {
-      if (invocation.subcommand === 'create' || invocation.subcommand === 'run') {
+      if (isContainerCommand(invocation, ['create', 'run'])) {
         const name = dockerContainerName(invocation.command, source)
         const hasUnscopedAssignment = name?.assignments.some(
           assignment =>
@@ -388,10 +435,9 @@ export function findDockerSafetyViolations(source, file = '<input>') {
       }
 
       if (
-        /^(?:system|container|image|volume|network|builder)\s+prune\b/i.test(
-          `${invocation.subcommand}${invocation.arguments}`,
-        ) &&
-        !hasJobLabelFilter(`${invocation.subcommand}${invocation.arguments}`, matrixContext)
+        dockerManagementGroups.has(invocation.group) &&
+        invocation.subcommand === 'prune' &&
+        !hasJobLabelFilter(invocation.arguments, matrixContext)
       ) {
         violations.push({ file, line: command.line, message: 'unfiltered Docker prune' })
       }
