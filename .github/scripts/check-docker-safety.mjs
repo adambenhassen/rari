@@ -333,11 +333,18 @@ function isInScopeWorkflow(source) {
   return /\b(?:inference-x64|ubuntu-latest)\b/.test(source)
 }
 
+function normalizeShellContinuations(source) {
+  return source.replace(/\\(?:\r\n|\n|\r)[\t ]*/g, ' ')
+}
+
 function hasDockerComposeCommand(source) {
-  return /\bdocker(?:\s+compose|-compose)\b(?=\s|[);|&]|$)/i.test(source)
+  return /\bdocker(?:\s+compose|-compose)\b(?=\s|[);|&]|$)/i.test(
+    normalizeShellContinuations(source),
+  )
 }
 
 function shellCommandSegments(source) {
+  source = normalizeShellContinuations(source)
   const segments = []
   let current = ''
   let quote

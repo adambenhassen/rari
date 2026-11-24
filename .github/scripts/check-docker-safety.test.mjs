@@ -334,6 +334,44 @@ test('scans a Compose file passed as an attached -f argument', async () => {
   }
 })
 
+test('scans Compose files after shell line continuations', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'docker-safety-compose-continuation-'))
+  const workflowPath = join(root, '.github', 'workflows', 'check.yml')
+  const workflow = [
+    'jobs:',
+    '  check:',
+    '    steps:',
+    '      - run: |',
+    '          docker compose \\',
+    '            -f custom.yml up',
+  ].join('\n')
+  const fixedCompose = 'services:\n  db:\n    ports:\n      - "127.0.0.1:5432:5432"'
+
+  try {
+    await mkdir(join(root, '.github', 'workflows'), { recursive: true })
+    await writeFile(join(root, 'custom.yml'), fixedCompose)
+
+    const composeFiles = await collectComposeFiles(
+      root,
+      [{ path: workflowPath, source: workflow }],
+      {},
+    )
+
+    assert.deepEqual(
+      composeFiles.map(({ path }) => path),
+      [resolve(root, 'custom.yml')],
+    )
+    assert.deepEqual(
+      composeFiles.flatMap(({ path, source }) =>
+        findDockerSafetyViolations(source, path).map(({ message }) => message),
+      ),
+      ['fixed host-port publishing'],
+    )
+  } finally {
+    await rm(root, { recursive: true, force: true })
+  }
+})
+
 test('ignores unrelated shell flags before a Compose command', async () => {
   const root = await mkdtemp(join(tmpdir(), 'docker-safety-unrelated-shell-flags-'))
   const workflowPath = join(root, '.github', 'workflows', 'check.yml')
