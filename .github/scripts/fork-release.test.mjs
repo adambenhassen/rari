@@ -17,6 +17,47 @@ const { deleteTestRelease, publishRelease, waitForGithubMirrorTag } =
 const skipTagCheck = async () => {}
 const skipOperationLock = operation => operation()
 
+function releaseLockFailureRequest({ operationFails }) {
+  const logMessages = []
+  const request = async (path, options = {}) => {
+    const method = options.method ?? 'GET'
+    if (method === 'GET' && path.endsWith('/tags/build-0.17.9-fork.99-test.1-operation-lock')) {
+      return { response: { ok: false, status: 404 }, data: { message: 'Not Found' } }
+    }
+    if (method === 'POST' && path.endsWith('/releases')) {
+      const body = JSON.parse(options.body)
+      if (body.tag_name.endsWith('-operation-lock')) {
+        return { response: { ok: true, status: 201 }, data: { id: 90, draft: true } }
+      }
+      return { response: { ok: true, status: 201 }, data: { id: 42, draft: true } }
+    }
+    if (method === 'GET' && path.endsWith('/releases?limit=50&page=1')) {
+      if (operationFails) {
+        return {
+          response: { ok: false, status: 502 },
+          data: { message: 'release listing failed' },
+        }
+      }
+      return { response: { ok: true, status: 200 }, data: [] }
+    }
+    if (method === 'GET' && path.endsWith('/releases/42/assets')) {
+      return { response: { ok: true, status: 200 }, data: [] }
+    }
+    if (method === 'PATCH' && path.endsWith('/releases/42')) {
+      return { response: { ok: true, status: 200 }, data: { id: 42, draft: false } }
+    }
+    if (method === 'DELETE' && path.endsWith('/releases/90')) {
+      return {
+        response: { ok: false, status: 500 },
+        data: { message: 'lock delete failed' },
+      }
+    }
+    assert.fail(`Unexpected Gitea request: ${method} ${path}`)
+  }
+
+  return { request, logMessages }
+}
+
 test('retries GitHub rate limits and server errors while waiting for the mirrored tag', async () => {
   const statuses = [403, 429, 503, 200]
   const waits = []
@@ -46,6 +87,101 @@ test('retries GitHub rate limits and server errors while waiting for the mirrore
 
   assert.equal(requestCount, 4)
   assert.deepEqual(waits, [30_000, 30_000, 30_000])
+})
+
+test('waits for a missing GitHub mirror tag during cleanup', async () => {
+  const statuses = [200, 200, 404]
+  let requestCount = 0
+  const waits = []
+
+  await waitForGithubMirrorTag({
+    shouldExist: false,
+    fetchTag: async () => {
+      requestCount += 1
+      const status = statuses.shift()
+      return {
+        status,
+        ok: status >= 200 && status < 300,
+        text: async () =>
+          JSON.stringify({ message: status === 404 ? 'Not Found' : 'still present' }),
+      }
+    },
+    sleepFn: async milliseconds => waits.push(milliseconds),
+  })
+
+  assert.equal(requestCount, 3)
+  assert.deepEqual(waits, [30_000, 30_000])
+})
+
+test('mirror cleanup timeout includes the final HTTP status and body', async () => {
+  let requestCount = 0
+  let sleepCount = 0
+
+  await assert.rejects(
+    waitForGithubMirrorTag({
+      shouldExist: false,
+      fetchTag: async () => {
+        requestCount += 1
+        return {
+          status: 200,
+          ok: true,
+          text: async () => JSON.stringify({ message: 'tag still exists' }),
+        }
+      },
+      sleepFn: async () => {
+        sleepCount += 1
+      },
+    }),
+    error => {
+      assert.match(error.message, /did not remove tag/)
+      assert.match(error.message, /last HTTP status 200/)
+      assert.match(error.message, /tag still exists/)
+      return true
+    },
+  )
+
+  assert.equal(requestCount, 20)
+  assert.equal(sleepCount, 20)
+})
+
+test('reports a lock deletion failure after a successful release operation', async () => {
+  const { request, logMessages } = releaseLockFailureRequest({ operationFails: false })
+
+  await assert.rejects(
+    publishRelease({
+      request,
+      checkTagCommit: skipTagCheck,
+      assets: [],
+      waitForMirrorTag: async () => {},
+      log: message => logMessages.push(message),
+    }),
+    error => {
+      assert.match(error.message, /Could not remove Gitea operation lock/)
+      assert.match(error.cause.message, /failed \(500\)/)
+      assert.match(error.cause.message, /lock delete failed/)
+      return true
+    },
+  )
+})
+
+test('logs a lock deletion failure and preserves the operation error', async () => {
+  const { request, logMessages } = releaseLockFailureRequest({ operationFails: true })
+
+  await assert.rejects(
+    publishRelease({
+      request,
+      checkTagCommit: skipTagCheck,
+      assets: [],
+      waitForMirrorTag: async () => {},
+      log: message => logMessages.push(message),
+    }),
+    /Gitea release listing failed \(502\)/,
+  )
+
+  assert.equal(logMessages.length, 1)
+  assert.match(logMessages[0], /Could not remove Gitea operation lock/)
+  assert.match(logMessages[0], /failed \(500\)/)
+  assert.match(logMessages[0], /lock delete failed/)
 })
 
 test('creates a draft release, uploads assets, then publishes and waits for its mirrored tag', async () => {
@@ -730,6 +866,95 @@ test('deletes only the selected test release and tag', async () => {
       'wait for mirror deletion',
       'list releases',
       'release cleanup lock',
+    ])
+  } finally {
+    if (previousVersion === undefined) delete process.env.RELEASE_VERSION
+    else process.env.RELEASE_VERSION = previousVersion
+    if (previousDelete === undefined) delete process.env.DELETE_TEST_RELEASE
+    else process.env.DELETE_TEST_RELEASE = previousDelete
+  }
+})
+
+test('finds and removes a test release on page two', async () => {
+  const version = '0.17.9-fork.101-test.1'
+  const tag = `build-${version}`
+  const previousVersion = process.env.RELEASE_VERSION
+  const previousDelete = process.env.DELETE_TEST_RELEASE
+  const firstPage = Array.from({ length: 50 }, (_, index) => ({
+    id: 100 + index,
+    tag_name: `build-older-${index}`,
+  }))
+  const deletedReleaseIds = []
+  const events = []
+  let pageOneRequests = 0
+  let pageTwoRequests = 0
+
+  process.env.RELEASE_VERSION = version
+  process.env.DELETE_TEST_RELEASE = 'true'
+
+  try {
+    const cleanupModule = new URL('./fork-release.mjs?delete-release-page-two', import.meta.url)
+    const { deleteTestRelease } = await import(cleanupModule.href)
+    const request = async (path, options = {}) => {
+      const method = options.method ?? 'GET'
+      if (method === 'GET' && path.endsWith(`/tags/${tag}-operation-lock`)) {
+        return { response: { ok: false, status: 404 }, data: { message: 'Not Found' } }
+      }
+      if (method === 'POST' && path.endsWith('/releases')) {
+        events.push('acquire lock')
+        return { response: { ok: true, status: 201 }, data: { id: 90, draft: true } }
+      }
+      if (method === 'GET' && path.endsWith('/releases?limit=50&page=1')) {
+        pageOneRequests += 1
+        events.push('list page one')
+        return { response: { ok: true, status: 200 }, data: firstPage }
+      }
+      if (method === 'GET' && path.endsWith('/releases?limit=50&page=2')) {
+        pageTwoRequests += 1
+        events.push('list page two')
+        return {
+          response: { ok: true, status: 200 },
+          data: pageTwoRequests === 1 ? [{ id: 42, tag_name: tag }] : [],
+        }
+      }
+      if (method === 'DELETE' && path.endsWith('/releases/42')) {
+        events.push('delete release')
+        deletedReleaseIds.push(42)
+        return { response: { ok: true, status: 204 }, data: null }
+      }
+      if (method === 'DELETE' && path.endsWith(`/tags/${tag}`)) {
+        events.push('delete tag')
+        return { response: { ok: true, status: 204 }, data: null }
+      }
+      if (method === 'DELETE' && path.endsWith('/releases/90')) {
+        events.push('release lock')
+        return { response: { ok: true, status: 204 }, data: null }
+      }
+      assert.fail(`Unexpected Gitea request: ${method} ${path}`)
+    }
+
+    await deleteTestRelease({
+      request,
+      waitForMirrorTag: async ({ shouldExist }) => {
+        events.push('wait for mirror deletion')
+        assert.equal(shouldExist, false)
+      },
+      log: () => {},
+    })
+
+    assert.deepEqual(deletedReleaseIds, [42])
+    assert.equal(pageOneRequests, 2)
+    assert.equal(pageTwoRequests, 2)
+    assert.deepEqual(events, [
+      'acquire lock',
+      'list page one',
+      'list page two',
+      'delete release',
+      'delete tag',
+      'wait for mirror deletion',
+      'list page one',
+      'list page two',
+      'release lock',
     ])
   } finally {
     if (previousVersion === undefined) delete process.env.RELEASE_VERSION

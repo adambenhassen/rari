@@ -2,8 +2,14 @@ name: Fork PR check
 
 on:
   pull_request:
+    branches:
+      - '*/main'
 
 permissions: {}
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
 
 jobs:
   check:
@@ -17,6 +23,7 @@ jobs:
       PNPM_CONFIG_WORKSPACE_CONCURRENCY: 1
       CARGO_BUILD_JOBS: 2
       CARGO_INCREMENTAL: 0
+      RUSTUP_TOOLCHAIN: nightly-2026-11-22
     steps:
       - name: Checkout
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -33,6 +40,9 @@ jobs:
 
       - name: Test fork release publishing
         run: node --test .github/scripts/fork-release.test.mjs
+
+      - name: Test fork build dispatch guards
+        run: node --test .github/scripts/fork-build-workflow.test.mjs
 
       - name: Install JavaScript dependencies
         run: pnpm install --frozen-lockfile
@@ -61,7 +71,7 @@ jobs:
       - name: Install Rust
         uses: dtolnay/rust-toolchain@02cb101ec7c40f2c49e1d9714d64511d8e1b74de # v1
         with:
-          toolchain: nightly
+          toolchain: nightly-2026-11-22
           components: clippy, rustfmt
 
       - name: Install Rust build dependencies
@@ -76,8 +86,25 @@ jobs:
           echo 'pub static RESIDUAL_LAZY_ESM_SOURCES: &[(&str, &str)] = &[];' > crates/rari/snapshots/residual_lazy_sources.rs
           echo 'pub static RESIDUAL_LAZY_JS_SOURCES: &[(&str, &str)] = &[];' >> crates/rari/snapshots/residual_lazy_sources.rs
 
+      - name: Build snapshot generator with release profile
+        run: cargo build --release --manifest-path tools/snapshot/Cargo.toml
+        env:
+          CARGO_BUILD_JOBS: '1'
+          CARGO_PROFILE_RELEASE_DEBUG: none
+          CARGO_PROFILE_RELEASE_CODEGEN_UNITS: '16'
+          CARGO_PROFILE_RELEASE_LTO: 'false'
+          CARGO_PROFILE_RELEASE_STRIP: none
+          RUSTFLAGS: -C link-arg=-fuse-ld=mold -Cforce-frame-pointers=yes
+
       - name: Generate V8 snapshot
-        run: cargo run --manifest-path tools/snapshot/Cargo.toml -- crates/rari/snapshots
+        run: cargo run --release --manifest-path tools/snapshot/Cargo.toml -- crates/rari/snapshots
+        env:
+          CARGO_BUILD_JOBS: '1'
+          CARGO_PROFILE_RELEASE_DEBUG: none
+          CARGO_PROFILE_RELEASE_CODEGEN_UNITS: '16'
+          CARGO_PROFILE_RELEASE_LTO: 'false'
+          CARGO_PROFILE_RELEASE_STRIP: none
+          RUSTFLAGS: -C link-arg=-fuse-ld=mold -Cforce-frame-pointers=yes
 
       - name: Check Rust formatting
         run: cargo fmt --all -- --check
@@ -86,7 +113,7 @@ jobs:
         run: cargo clippy -p rari --all-targets --all-features -- -D warnings
 
       - name: Test Rust
-        run: cargo test -p rari --all-features
+        run: cargo test -p rari --all-features -- --test-threads=1
 
       - name: Detect jemalloc feature
         id: jemalloc
@@ -105,6 +132,12 @@ jobs:
           set -euo pipefail
           cargo build -p rari --bin rari --features ext-full,jemalloc
           install -D target/debug/rari packages/rari-linux-x64/bin/rari
+
+      - name: Free build space before installing Playwright
+        if: steps.jemalloc.outputs.enabled == 'true'
+        run: |
+          cargo clean
+          sudo apt-get clean
 
       - name: Install Playwright browser
         if: steps.jemalloc.outputs.enabled == 'true'

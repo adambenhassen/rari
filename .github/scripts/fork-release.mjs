@@ -76,9 +76,11 @@ export async function waitForGithubMirrorTag({
   sleepFn = pause,
 }) {
   const url = `https://api.github.com/repos/${githubMirrorRepository}/git/ref/tags/${encodeURIComponent(tag)}`
+  let lastResponse
   for (let attempt = 0; attempt < 20; attempt += 1) {
     const response = await fetchTag(url)
     const data = await readResponse(response)
+    lastResponse = { status: response.status, data }
     if (shouldExist && response.ok) {
       const actualSha = data?.object?.sha
       if (actualSha !== expectedSha) {
@@ -100,7 +102,12 @@ export async function waitForGithubMirrorTag({
     }
     await sleepFn(30_000)
   }
-  throw new Error(`GitHub mirror did not ${shouldExist ? 'receive' : 'remove'} tag ${tag} in time`)
+  const lastResponseDetail = lastResponse
+    ? `; last HTTP status ${lastResponse.status}, body: ${JSON.stringify(lastResponse.data)}`
+    : ''
+  throw new Error(
+    `GitHub mirror did not ${shouldExist ? 'receive' : 'remove'} tag ${tag} in time${lastResponseDetail}`,
+  )
 }
 
 async function findGiteaRelease(request = giteaRequest) {
@@ -188,7 +195,8 @@ async function withReleaseOperationLock(request, operation, log) {
       { cause: error },
     )
     if (operationError) {
-      log(lockError.message)
+      const causeDetail = error instanceof Error ? error.message : String(error)
+      log(`${lockError.message}: ${causeDetail}`)
       throw operationError
     }
     throw lockError
