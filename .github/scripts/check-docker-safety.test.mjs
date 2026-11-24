@@ -372,6 +372,112 @@ test('scans Compose files after shell line continuations', async () => {
   }
 })
 
+test('scans Compose files after global options with values', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'docker-safety-compose-global-option-'))
+  const workflowPath = join(root, '.github', 'workflows', 'check.yml')
+  const workflow = [
+    'jobs:',
+    '  check:',
+    '    steps:',
+    '      - run: docker compose --context remote -f custom.yml up',
+  ].join('\n')
+  const fixedCompose = 'services:\n  db:\n    ports:\n      - "127.0.0.1:5432:5432"'
+
+  try {
+    await mkdir(join(root, '.github', 'workflows'), { recursive: true })
+    await writeFile(join(root, 'custom.yml'), fixedCompose)
+
+    const composeFiles = await collectComposeFiles(root, [{ path: workflowPath, source: workflow }])
+
+    assert.deepEqual(
+      composeFiles.map(({ path }) => path),
+      [resolve(root, 'custom.yml')],
+    )
+    assert.deepEqual(
+      composeFiles.flatMap(({ path, source }) =>
+        findDockerSafetyViolations(source, path).map(({ message }) => message),
+      ),
+      ['fixed host-port publishing'],
+    )
+  } finally {
+    await rm(root, { recursive: true, force: true })
+  }
+})
+
+test('scans every Compose invocation after a single ampersand and inside substitutions', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'docker-safety-compose-ampersand-'))
+  const workflowPath = join(root, '.github', 'workflows', 'check.yml')
+  const workflow = [
+    'jobs:',
+    '  check:',
+    '    steps:',
+    '      - run: docker compose -f first.yml up & docker compose -f second.yml up',
+    '      - run: echo "$(docker compose -f third.yml up) $(docker compose -f fourth.yml up)"',
+  ].join('\n')
+  const emptyCompose = 'services: {}\n'
+  const fixedCompose = 'services:\n  db:\n    ports:\n      - "127.0.0.1:5432:5432"'
+
+  try {
+    await mkdir(join(root, '.github', 'workflows'), { recursive: true })
+    await writeFile(join(root, 'first.yml'), emptyCompose)
+    await writeFile(join(root, 'second.yml'), fixedCompose)
+    await writeFile(join(root, 'third.yml'), emptyCompose)
+    await writeFile(join(root, 'fourth.yml'), fixedCompose)
+
+    const composeFiles = await collectComposeFiles(root, [{ path: workflowPath, source: workflow }])
+
+    assert.deepEqual(
+      composeFiles.map(({ path }) => path),
+      ['first.yml', 'second.yml', 'third.yml', 'fourth.yml'].map(file => resolve(root, file)),
+    )
+    assert.deepEqual(
+      composeFiles.flatMap(({ path, source }) =>
+        findDockerSafetyViolations(source, path).map(({ message }) => message),
+      ),
+      ['fixed host-port publishing', 'fixed host-port publishing'],
+    )
+  } finally {
+    await rm(root, { recursive: true, force: true })
+  }
+})
+
+test('ignores apostrophe comments when finding subsequent Compose commands', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'docker-safety-compose-comment-'))
+  const workflowPath = join(root, '.github', 'workflows', 'check.yml')
+  const workflow = [
+    'jobs:',
+    '  check:',
+    '    steps:',
+    '      - run: |',
+    "          # don't treat this apostrophe as shell quoting",
+    '          docker compose -f first.yml up',
+    '          docker compose -f second.yml up',
+  ].join('\n')
+  const emptyCompose = 'services: {}\n'
+  const fixedCompose = 'services:\n  db:\n    ports:\n      - "127.0.0.1:5432:5432"'
+
+  try {
+    await mkdir(join(root, '.github', 'workflows'), { recursive: true })
+    await writeFile(join(root, 'first.yml'), emptyCompose)
+    await writeFile(join(root, 'second.yml'), fixedCompose)
+
+    const composeFiles = await collectComposeFiles(root, [{ path: workflowPath, source: workflow }])
+
+    assert.deepEqual(
+      composeFiles.map(({ path }) => path),
+      [resolve(root, 'first.yml'), resolve(root, 'second.yml')],
+    )
+    assert.deepEqual(
+      composeFiles.flatMap(({ path, source }) =>
+        findDockerSafetyViolations(source, path).map(({ message }) => message),
+      ),
+      ['fixed host-port publishing'],
+    )
+  } finally {
+    await rm(root, { recursive: true, force: true })
+  }
+})
+
 test('ignores unrelated shell flags before a Compose command', async () => {
   const root = await mkdtemp(join(tmpdir(), 'docker-safety-unrelated-shell-flags-'))
   const workflowPath = join(root, '.github', 'workflows', 'check.yml')

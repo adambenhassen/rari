@@ -43,12 +43,17 @@ const composeSubcommands = new Set([
 ])
 const composeGlobalOptionsWithValue = new Set([
   '--ansi',
+  '--context',
   '--env-file',
+  '--host',
+  '--log-level',
   '--parallel',
   '--profile',
   '--project-directory',
   '--project-name',
   '--progress',
+  '-c',
+  '-H',
   '-p',
 ])
 
@@ -349,41 +354,59 @@ function shellCommandSegments(source) {
   let current = ''
   let quote
   let escaped = false
+  let wordStarted = false
 
   for (let index = 0; index < source.length; index += 1) {
     const character = source[index]
     if (escaped) {
       current += character
       escaped = false
+      wordStarted = true
       continue
     }
     if (character === '\\' && quote !== "'") {
       current += character
       escaped = true
+      wordStarted = true
       continue
     }
     if (quote) {
       current += character
       if (character === quote) quote = undefined
+      wordStarted = true
       continue
     }
     if (character === '"' || character === "'") {
       quote = character
       current += character
+      wordStarted = true
+      continue
+    }
+    if (character === '#' && !wordStarted) {
+      while (index < source.length && source[index] !== '\n' && source[index] !== '\r') {
+        index += 1
+      }
+      segments.push(current)
+      current = ''
+      wordStarted = false
       continue
     }
     if (character === '\n' || character === '\r' || character === ';' || character === '|') {
       segments.push(current)
       current = ''
+      wordStarted = false
       if (character === '|' && source[index + 1] === '|') index += 1
       continue
     }
-    if (character === '&' && source[index + 1] === '&') {
+    if (character === '&') {
       segments.push(current)
       current = ''
-      index += 1
+      wordStarted = false
+      if (source[index + 1] === '&') index += 1
       continue
     }
+    if (/\s/.test(character)) wordStarted = false
+    else wordStarted = true
     current += character
   }
 
@@ -398,48 +421,49 @@ function composeFileReferences(source) {
       ? token.slice(1, -1)
       : token
 
+  const composeCommand = /\bdocker(?:\s+compose|-compose)\b(?=\s|[);|&]|$)/gi
+
   for (const segment of shellCommandSegments(source)) {
-    const command = /\bdocker(?:\s+compose|-compose)\b(?=\s|[);|&]|$)/i.exec(segment)
-    if (!command) continue
+    for (const command of segment.matchAll(composeCommand)) {
+      const argumentSource = segment.slice(command.index + command[0].length)
+      const tokens = argumentSource.match(/"(?:\\.|[^"\\])*"|'[^']*'|[^\s]+/g) || []
+      for (let index = 0; index < tokens.length; index += 1) {
+        const token = unquote(tokens[index])
+        const commandWord = token.replace(/^[($`]+|[);`]+$/g, '').toLowerCase()
+        if (composeSubcommands.has(commandWord)) break
 
-    const argumentSource = segment.slice(command.index + command[0].length)
-    const tokens = argumentSource.match(/"(?:\\.|[^"\\])*"|'[^']*'|[^\s]+/g) || []
-    for (let index = 0; index < tokens.length; index += 1) {
-      const token = unquote(tokens[index])
-      const commandWord = token.replace(/^[($`]+|[);`]+$/g, '').toLowerCase()
-      if (composeSubcommands.has(commandWord)) break
+        let reference
 
-      let reference
-
-      if (token === '-f' || token === '--file') {
-        if (!tokens[index + 1]) {
-          throw new Error(`Cannot statically resolve explicit Compose file option in ${segment}`)
+        if (token === '-f' || token === '--file') {
+          if (!tokens[index + 1]) {
+            throw new Error(`Cannot statically resolve explicit Compose file option in ${segment}`)
+          }
+          reference = unquote(tokens[++index])
+        } else if (token.startsWith('--file=')) {
+          reference = token.slice('--file='.length)
+        } else if (token.startsWith('--file')) {
+          throw new Error(
+            `Cannot statically resolve explicit Compose file option "${token}" in ${segment}`,
+          )
+        } else if (token.startsWith('-f') && token.length > 2) {
+          reference = token.slice(2).replace(/^=/, '')
+        } else if (composeGlobalOptionsWithValue.has(token)) {
+          if (!tokens[index + 1]) {
+            throw new Error(`Cannot statically resolve Compose option "${token}" in ${segment}`)
+          }
+          index += 1
+        } else if (token.startsWith('-')) {
+          continue
+        } else {
+          continue
         }
-        reference = unquote(tokens[++index])
-      } else if (token.startsWith('--file=')) {
-        reference = token.slice('--file='.length)
-      } else if (token.startsWith('--file')) {
-        throw new Error(
-          `Cannot statically resolve explicit Compose file option "${token}" in ${segment}`,
-        )
-      } else if (token.startsWith('-f') && token.length > 2) {
-        reference = token.slice(2).replace(/^=/, '')
-      } else if (composeGlobalOptionsWithValue.has(token)) {
-        if (!tokens[index + 1]) {
-          throw new Error(`Cannot statically resolve Compose option "${token}" in ${segment}`)
-        }
-        index += 1
-      } else if (token.startsWith('-')) {
-        continue
-      } else {
-        break
-      }
 
-      if (reference !== undefined) {
-        if (!reference) {
-          throw new Error(`Cannot statically resolve explicit Compose file option in ${segment}`)
+        if (reference !== undefined) {
+          if (!reference) {
+            throw new Error(`Cannot statically resolve explicit Compose file option in ${segment}`)
+          }
+          references.push(reference)
         }
-        references.push(reference)
       }
     }
   }
