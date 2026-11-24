@@ -71,6 +71,7 @@ function hasJobLabelFilter(command, matrixContext) {
       ? !matrixContext.hasMatrix ||
         hasFullMatrixExpression(value) ||
         (matrixContext.keys.length > 0 &&
+          !matrixContext.hasUnknownDimensions &&
           matrixContext.keys.every(key => hasMatrixField(value, key)))
       : hasFullMatrixExpression(value)
     if (runIdentity && matrixIdentity) return true
@@ -94,6 +95,7 @@ function workflowMatrixContext(source) {
   const lines = source.split(/\r?\n/)
   const keys = new Set()
   let hasMatrix = false
+  let hasUnknownDimensions = false
 
   for (let index = 0; index < lines.length; index += 1) {
     const match = lines[index].match(/^(\s*)matrix:\s*(.*?)\s*$/)
@@ -101,7 +103,10 @@ function workflowMatrixContext(source) {
 
     hasMatrix = true
     const matrixIndent = match[1].length
-    if (match[2] && !match[2].startsWith('#')) continue
+    if (match[2] && !match[2].startsWith('#')) {
+      hasUnknownDimensions = true
+      continue
+    }
 
     for (let next = index + 1; next < lines.length; next += 1) {
       const line = lines[next]
@@ -111,11 +116,35 @@ function workflowMatrixContext(source) {
       if (indent !== matrixIndent + 2) continue
 
       const dimension = line.trim().match(/^([\w-]+):(?:\s|$)/)
-      if (dimension && !['include', 'exclude'].includes(dimension[1])) keys.add(dimension[1])
+      if (!dimension || dimension[1] === 'exclude') continue
+      if (dimension[1] !== 'include') {
+        keys.add(dimension[1])
+        continue
+      }
+
+      if (line.trim().slice('include:'.length).trim()) {
+        hasUnknownDimensions = true
+        continue
+      }
+
+      let includeFields = 0
+      for (let includeLine = next + 1; includeLine < lines.length; includeLine += 1) {
+        const included = lines[includeLine]
+        if (!included.trim() || included.trimStart().startsWith('#')) continue
+        const includeIndent = included.match(/^\s*/)[0].length
+        if (includeIndent <= indent) break
+
+        const includedDimension = included.trim().match(/^(?:-\s*)?([\w-]+):(?:\s|$)/)
+        if (includedDimension) {
+          keys.add(includedDimension[1])
+          includeFields += 1
+        }
+      }
+      if (includeFields === 0) hasUnknownDimensions = true
     }
   }
 
-  return { hasMatrix, keys: [...keys] }
+  return { hasMatrix, hasUnknownDimensions, keys: [...keys] }
 }
 
 export function findDockerSafetyViolations(source, file = '<input>') {

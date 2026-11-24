@@ -89,6 +89,52 @@ test('rejects global Docker cleanup and filters that are not unique to a job', (
   )
   assert.deepEqual(
     findDockerSafetyViolations(
+      [
+        'jobs:',
+        '  check:',
+        '    strategy:',
+        '      matrix:',
+        '        os: [linux, windows]',
+        '        target: [x86]',
+        '        include:',
+        '          - os: linux',
+        '            target: x86',
+        '            variant: first',
+        '          - os: linux',
+        '            target: x86',
+        '            variant: second',
+        '    steps:',
+        '      - run: docker network prune --filter "label=ci.task=${{ github.run_id }}-${{ github.run_attempt }}-${{ github.job }}-${{ matrix.os }}-${{ matrix.target }}"',
+      ].join('\n'),
+      '.github/workflows/check.yml',
+    ).map(({ message }) => message),
+    ['unfiltered Docker prune'],
+  )
+  assert.deepEqual(
+    findDockerSafetyViolations(
+      [
+        'jobs:',
+        '  check:',
+        '    strategy:',
+        '      matrix:',
+        '        os: [linux, windows]',
+        '        target: [x86]',
+        '        include:',
+        '          - os: linux',
+        '            target: x86',
+        '            variant: first',
+        '          - os: linux',
+        '            target: x86',
+        '            variant: second',
+        '    steps:',
+        '      - run: docker network prune --filter "label=ci.task=${{ github.run_id }}-${{ github.run_attempt }}-${{ github.job }}-${{ matrix.os }}-${{ matrix.target }}-${{ matrix.variant }}"',
+      ].join('\n'),
+      '.github/workflows/check.yml',
+    ),
+    [],
+  )
+  assert.deepEqual(
+    findDockerSafetyViolations(
       'docker network prune --filter "label=ci.task=${{ github.run_id }}-${{ github.run_attempt }}-${{ github.job }}"',
     ).map(({ message }) => message),
     ['unfiltered Docker prune'],
