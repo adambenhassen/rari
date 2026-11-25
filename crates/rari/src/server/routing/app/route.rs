@@ -373,6 +373,7 @@ pub async fn handle_app_route(
                 &mut metadata_collected,
             )
             .await)
+        && request_context.response_cache_reads_allowed()
         && let Some(current) = state.static_fast_cache.get(&fast_key)
         && Arc::ptr_eq(&prebuilt, &current)
     {

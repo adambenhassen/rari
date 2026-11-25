@@ -195,6 +195,22 @@ test('Fast hits without getData do not wait for dynamic metadata', async ({ requ
       expect(initial.status(), path).toBe(200)
       expect(initial.headers()['x-cache'], path).toBe('MISS')
     }
+
+    const requestDataSlug = `conditional-${Date.now()}-${Math.random()}`
+    const requestDataUrl = `${origin}/cache-fast-request-data/${requestDataSlug}`
+    const sharedFastResponse = await request.get(requestDataUrl)
+    expect(sharedFastResponse.status()).toBe(200)
+    expect(sharedFastResponse.headers()['x-cache']).toBe('MISS')
+    expect(await sharedFastResponse.text()).toContain('Fast metadata shared')
+
+    const personalizedFastResponse = await request.get(requestDataUrl, {
+      headers: { 'X-Session': 'alice' },
+    })
+    expect(personalizedFastResponse.status()).toBe(200)
+    expect(personalizedFastResponse.headers()['x-cache']).toBe('MISS')
+    expect(personalizedFastResponse.headers()['cache-control']).toBe('no-store')
+    expect(await personalizedFastResponse.text()).toContain('Fast metadata alice')
+
     hold = true
     const blockingStatic = request.get(`${origin}/cache-availability-metadata/block-static`, {
       timeout: 15_000,
