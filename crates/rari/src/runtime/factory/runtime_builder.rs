@@ -155,7 +155,7 @@ mod tests {
         thread,
     };
 
-    use deno_core::RuntimeOptions;
+    use deno_core::{JsRuntime, RuntimeOptions};
     use tokio::runtime::Builder;
 
     use super::{build_js_runtime, initialize_js_runtime};
