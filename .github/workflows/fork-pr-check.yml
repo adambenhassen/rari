@@ -113,7 +113,7 @@ jobs:
         run: cargo clippy -p rari --all-targets --all-features -- -D warnings
 
       - name: Test Rust
-        run: cargo test -p rari --all-features -- --test-threads=1
+        run: cargo test -p rari --all-features
 
       - name: Detect jemalloc feature
         id: jemalloc

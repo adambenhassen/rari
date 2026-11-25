@@ -74,7 +74,6 @@ pub fn build_js_runtime(
         ..Default::default()
     });
 
-    let _init_guard = lock_v8_runtime_init();
     let options = RuntimeOptions {
         #[expect(
             clippy::clone_on_ref_ptr,
@@ -90,7 +89,10 @@ pub fn build_js_runtime(
         ..Default::default()
     };
 
-    let mut runtime = JsRuntime::new(options);
+    let mut runtime = {
+        let _init_guard = lock_v8_runtime_init();
+        JsRuntime::new(options)
+    };
 
     runtime
         .lazy_init_extensions(lazy_args)
@@ -163,11 +165,11 @@ mod tests {
             .map(|_| {
                 let start = Arc::clone(&start);
                 thread::spawn(move || {
+                    start.wait();
                     let runtime = Builder::new_current_thread()
                         .enable_all()
                         .build()
                         .expect("create Tokio runtime");
-                    start.wait();
                     runtime.block_on(async {
                         let (js_runtime, _module_loader) =
                             build_js_runtime(None).expect("build snapshot-backed JS runtime");
