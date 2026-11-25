@@ -1123,6 +1123,12 @@ test('reads the subcommand after container, image, volume, network and system gr
     ),
     ['removing every Docker container'],
   )
+  assert.deepEqual(
+    findDockerSafetyViolations('docker container remove -f $(docker container list -aq)').map(
+      ({ message }) => message,
+    ),
+    ['removing every Docker container'],
+  )
 })
 
 test('requires an every-container listing that emits identifiers for global removal', () => {

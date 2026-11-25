@@ -125,6 +125,10 @@ const dockerManagementGroups = new Set([
   'volume',
 ])
 const dockerManagementGroupAliases = new Map([['buildx', 'builder']])
+const dockerContainerSubcommandAliases = new Map([
+  ['list', 'ls'],
+  ['remove', 'rm'],
+])
 
 function dockerInvocations(source) {
   const matches = [...source.matchAll(/\bdocker(?=\s|$|-compose\b)/gi)]
@@ -186,10 +190,15 @@ function dockerInvocations(source) {
         group = managementGroup
       }
 
+      const parsedSubcommand = commandWord(tokens[subcommandIndex].value)
+      const subcommand =
+        group === 'container'
+          ? (dockerContainerSubcommandAliases.get(parsedSubcommand) ?? parsedSubcommand)
+          : parsedSubcommand
       invocations.push({
         start: match.index,
         group,
-        subcommand: commandWord(tokens[subcommandIndex].value),
+        subcommand,
         arguments: source.slice(afterDocker + tokens[subcommandIndex].end, end),
         command: source.slice(match.index, end),
       })
