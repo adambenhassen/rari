@@ -24,7 +24,7 @@ test('builds each release architecture on its assigned runner and publishes comb
     workflow.indexOf('  check-snapshot-profile-diagnostic:'),
   )
   assert.match(build, /runs-on: \$\{\{ matrix\.runner \}\}/)
-  assert.match(build, /- arch: x64\s+runner: inference-x64/)
+  assert.match(build, /- arch: x64\s+runner: ubuntu-24\.04/)
   assert.match(build, /- arch: arm64\s+runner: arm64/)
   assert.match(build, /timeout-minutes: 175/)
   assert.match(build, /name: fork-release-assets-\$\{\{ matrix\.arch \}\}/)
