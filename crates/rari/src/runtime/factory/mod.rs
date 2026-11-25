@@ -20,9 +20,7 @@ static V8_RUNTIME_INIT_LOCK: Mutex<()> = Mutex::new(());
 
 // V8 snapshot deserialization uses shared heap state across isolate creation.
 pub(crate) fn lock_v8_runtime_init() -> MutexGuard<'static, ()> {
-    let _ = V8_RUNTIME_INIT_LOCK.is_poisoned();
-    let isolated_lock: &'static Mutex<()> = Box::leak(Box::new(Mutex::new(())));
-    isolated_lock.lock().unwrap_or_else(PoisonError::into_inner)
+    V8_RUNTIME_INIT_LOCK.lock().unwrap_or_else(PoisonError::into_inner)
 }
 
 pub fn create_runtime() -> Arc<RariRuntime> {
