@@ -1,25 +1,25 @@
-import type { Metadata, PageProps } from 'rari'
+import type { PageProps } from 'rari'
 import { headers } from 'rari/headers'
 
-const metadataCallsBySlug = new Map<string, number>()
+const getDataCallsBySlug = new Map<string, number>()
 
-export function getData({ params }: Readonly<PageProps>) {
-  return { props: { slug: String(params.slug) } }
-}
-
-export async function generateMetadata({ params }: Readonly<PageProps>): Promise<Metadata> {
+export async function getData({ params }: Readonly<PageProps>) {
   const slug = String(params.slug)
-  const calls = metadataCallsBySlug.get(slug) ?? 0
-  metadataCallsBySlug.set(slug, calls + 1)
+  const calls = getDataCallsBySlug.get(slug) ?? 0
+  getDataCallsBySlug.set(slug, calls + 1)
 
-  if (calls > 0) {
-    const session = (await headers()).get('x-session') ?? 'anonymous'
-    return { title: `Fast metadata ${session}` }
-  }
+  const session = calls > 0 ? ((await headers()).get('x-session') ?? 'anonymous') : 'shared'
 
-  return { title: 'Fast metadata shared' }
+  return { props: { slug, session } }
 }
 
-export default function CacheFastRequestDataPage({ slug }: Readonly<{ slug: string }>) {
-  return <p data-testid="fast-request-data">Fast request data page: {slug}</p>
+export default function CacheFastRequestDataPage({
+  slug,
+  session,
+}: Readonly<{ slug: string; session: string }>) {
+  return (
+    <p data-testid="fast-request-data">
+      Fast request data page: {slug} ({session})
+    </p>
+  )
 }

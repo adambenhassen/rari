@@ -210,8 +210,19 @@ pub struct RequestContext {
 struct ResponseCacheState {
     reads_enabled: bool,
     writes_enabled: bool,
+    get_data_active: bool,
     unavailable_after: Option<u64>,
     has_dynamic_metadata: bool,
+}
+
+pub(crate) struct GetDataScope {
+    request_context: Arc<RequestContext>,
+}
+
+impl Drop for GetDataScope {
+    fn drop(&mut self) {
+        self.request_context.response_cache_state.lock().get_data_active = false;
+    }
 }
 
 impl RequestContext {
@@ -225,6 +236,7 @@ impl RequestContext {
             response_cache_state: Mutex::new(ResponseCacheState {
                 reads_enabled: true,
                 writes_enabled: true,
+                get_data_active: false,
                 unavailable_after: None,
                 has_dynamic_metadata: true,
             }),
@@ -313,6 +325,19 @@ impl RequestContext {
         let mut state = self.response_cache_state.lock();
         state.reads_enabled = false;
         state.writes_enabled = false;
+    }
+
+    pub(crate) fn enter_get_data_scope(self: &Arc<Self>) -> GetDataScope {
+        self.response_cache_state.lock().get_data_active = true;
+        GetDataScope { request_context: Arc::clone(self) }
+    }
+
+    pub(crate) fn mark_request_data_access(&self) {
+        let mut state = self.response_cache_state.lock();
+        if state.get_data_active {
+            state.reads_enabled = false;
+            state.writes_enabled = false;
+        }
     }
 
     pub fn must_send_no_store(&self) -> bool {
@@ -573,18 +598,33 @@ mod tests {
     }
 
     #[test]
-    fn request_data_access_disables_shared_cache_reads_and_writes() {
-        let ctx = RequestContext::new("/test".to_string());
+    fn request_data_access_only_disables_cache_inside_get_data() {
+        let unscoped = RequestContext::new("/test".to_string());
+        unscoped.mark_request_data_access();
+        assert!(unscoped.response_cache_reads_allowed());
+        assert!(unscoped.response_cache_allowed());
+        assert!(!unscoped.must_send_no_store());
 
+        let scoped = Arc::new(RequestContext::new("/test".to_string()));
+        let _get_data_scope = scoped.enter_get_data_scope();
+        scoped.mark_request_data_access();
+        assert!(!scoped.response_cache_reads_allowed());
+        assert!(!scoped.response_cache_allowed());
+        assert!(scoped.must_send_no_store());
+    }
+
+    #[test]
+    fn get_data_scope_ends_when_guard_is_dropped() {
+        let ctx = Arc::new(RequestContext::new("/test".to_string()));
+
+        {
+            let _get_data_scope = ctx.enter_get_data_scope();
+        }
+
+        ctx.mark_request_data_access();
         assert!(ctx.response_cache_reads_allowed());
         assert!(ctx.response_cache_allowed());
         assert!(!ctx.must_send_no_store());
-
-        ctx.disable_cache_reads_and_writes();
-
-        assert!(!ctx.response_cache_reads_allowed());
-        assert!(!ctx.response_cache_allowed());
-        assert!(ctx.must_send_no_store());
     }
 
     #[test]

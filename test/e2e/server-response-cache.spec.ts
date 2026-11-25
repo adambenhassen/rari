@@ -201,7 +201,7 @@ test('Fast hits without getData do not wait for dynamic metadata', async ({ requ
     const sharedFastResponse = await request.get(requestDataUrl)
     expect(sharedFastResponse.status()).toBe(200)
     expect(sharedFastResponse.headers()['x-cache']).toBe('MISS')
-    expect(await sharedFastResponse.text()).toContain('Fast metadata shared')
+    expect(await sharedFastResponse.text()).toContain('<!-- -->shared<!-- -->)')
 
     const personalizedFastResponse = await request.get(requestDataUrl, {
       headers: { 'X-Session': 'alice' },
@@ -209,7 +209,22 @@ test('Fast hits without getData do not wait for dynamic metadata', async ({ requ
     expect(personalizedFastResponse.status()).toBe(200)
     expect(personalizedFastResponse.headers()['x-cache']).toBe('MISS')
     expect(personalizedFastResponse.headers()['cache-control']).toBe('no-store')
-    expect(await personalizedFastResponse.text()).toContain('Fast metadata alice')
+    expect(await personalizedFastResponse.text()).toContain('<!-- -->alice<!-- -->)')
+
+    const publicMetadataSlug = `public-${Date.now()}-${Math.random()}`
+    const publicMetadataUrl = `${origin}/cache-metadata-public-header/${publicMetadataSlug}`
+    const initialPublicMetadata = await request.get(publicMetadataUrl, {
+      headers: { Accept: 'text/x-component' },
+    })
+    expect(initialPublicMetadata.status()).toBe(200)
+    expect(initialPublicMetadata.headers()['x-cache']).toBe('MISS')
+
+    const cachedPublicMetadata = await request.get(publicMetadataUrl, {
+      headers: { 'Accept': 'text/x-component', 'X-Session': 'alice' },
+    })
+    expect(cachedPublicMetadata.status()).toBe(200)
+    expect(cachedPublicMetadata.headers()['x-cache']).toBe('HIT')
+    expect(cachedPublicMetadata.headers()['cache-control']).not.toBe('no-store')
 
     hold = true
     const blockingStatic = request.get(`${origin}/cache-availability-metadata/block-static`, {

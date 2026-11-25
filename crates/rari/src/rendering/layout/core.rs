@@ -721,6 +721,7 @@ impl LayoutRenderer {
             let runtime = Arc::clone(&renderer.runtime);
             drop(renderer);
             if let Some(request_context) = request_context {
+                let _get_data_scope = request_context.enter_get_data_scope();
                 runtime
                     .execute_script_with_request_context(request_context, script_name, check_script)
                     .await?

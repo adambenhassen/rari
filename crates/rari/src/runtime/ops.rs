@@ -653,7 +653,7 @@ pub fn op_get_cookies(state: Rc<RefCell<OpState>>, #[string] request_id: String)
     let Some(ctx) = resolve_request_context(&op_state_ref, Some(request_id.as_str())) else {
         return String::new();
     };
-    ctx.disable_cache_reads_and_writes();
+    ctx.mark_request_data_access();
 
     let mut cookies: BTreeMap<String, String> = ctx
         .cookie_header
@@ -706,7 +706,7 @@ pub fn op_get_request_headers(state: Rc<RefCell<OpState>>, #[string] request_id:
     let Some(ctx) = resolve_request_context(&op_state_ref, Some(request_id.as_str())) else {
         return "{}".to_string();
     };
-    ctx.disable_cache_reads_and_writes();
+    ctx.mark_request_data_access();
 
     serde_json::to_string(&ctx.request_headers).unwrap_or_else(|_| "{}".to_string())
 }
@@ -719,7 +719,7 @@ pub fn op_get_csp_nonce(state: Rc<RefCell<OpState>>, #[string] request_id: Strin
     let Some(ctx) = resolve_request_context(&op_state_ref, Some(request_id.as_str())) else {
         return String::new();
     };
-    ctx.disable_cache_reads_and_writes();
+    ctx.mark_request_data_access();
 
     ctx.csp_nonce.as_deref().unwrap_or("").to_string()
 }
