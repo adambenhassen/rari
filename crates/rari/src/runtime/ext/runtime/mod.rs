@@ -356,6 +356,11 @@ fn create_web_worker_callback(options: WebWorkerCallbackOptions) -> Arc<CreateWe
             residual_lazy_esm_sources: &[],
         };
         let _init_guard = lock_v8_runtime_init();
+        #[cfg(test)]
+        assert!(
+            crate::runtime::factory::v8_runtime_init_held_by_current_thread(),
+            "web worker isolate initialization must hold the shared lock on this thread"
+        );
         WebWorker::bootstrap_from_options(services, options)
     })
 }

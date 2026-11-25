@@ -25,12 +25,15 @@ const NODE_CONSOLE_SCOPE_SPECIFIER: &str = "ext:runtime/98_global_scope_shared.j
 const NODE_CONSOLE_SCOPE_SOURCE: &str = include_str!("../ext/runtime/node_console_scope.ts");
 const RESPONSE_AVAILABILITY_INIT_SCRIPT: &str = include_str!("js/response_availability_helper.js");
 
-fn initialize_js_runtime<T>(
-    build_options: impl FnOnce() -> RuntimeOptions,
-    create_runtime: impl FnOnce(RuntimeOptions) -> T,
-) -> T {
+fn initialize_js_runtime(build_options: impl FnOnce() -> RuntimeOptions) -> JsRuntime {
     let _init_guard = lock_v8_runtime_init();
-    create_runtime(build_options())
+    let options = build_options();
+    #[cfg(test)]
+    assert!(
+        crate::runtime::factory::v8_runtime_init_held_by_current_thread(),
+        "JsRuntime::new must run under the shared lock on this thread"
+    );
+    JsRuntime::new(options)
 }
 
 fn residual_lazy_esm_sources() -> &'static [(&'static str, &'static str)] {
@@ -82,23 +85,20 @@ pub fn build_js_runtime(
         ..Default::default()
     });
 
-    let mut runtime = initialize_js_runtime(
-        || RuntimeOptions {
-            #[expect(
-                clippy::clone_on_ref_ptr,
-                reason = "Trait object coercion: Rc<RariModuleLoader> -> Rc<dyn ModuleLoader>"
-            )]
-            module_loader: Some(module_loader.clone()),
-            extensions,
-            extension_transpiler: Some(module_loader.as_extension_transpiler()),
-            startup_snapshot: Some(RUNTIME_SNAPSHOT),
-            residual_lazy_esm_sources: residual_lazy_esm_sources(),
-            residual_lazy_js_sources: RESIDUAL_LAZY_JS_SOURCES,
-            create_params: Some(runtime_create_params()),
-            ..Default::default()
-        },
-        JsRuntime::new,
-    );
+    let mut runtime = initialize_js_runtime(|| RuntimeOptions {
+        #[expect(
+            clippy::clone_on_ref_ptr,
+            reason = "Trait object coercion: Rc<RariModuleLoader> -> Rc<dyn ModuleLoader>"
+        )]
+        module_loader: Some(module_loader.clone()),
+        extensions,
+        extension_transpiler: Some(module_loader.as_extension_transpiler()),
+        startup_snapshot: Some(RUNTIME_SNAPSHOT),
+        residual_lazy_esm_sources: residual_lazy_esm_sources(),
+        residual_lazy_js_sources: RESIDUAL_LAZY_JS_SOURCES,
+        create_params: Some(runtime_create_params()),
+        ..Default::default()
+    });
 
     runtime
         .lazy_init_extensions(lazy_args)
@@ -155,36 +155,39 @@ mod tests {
         thread,
     };
 
-    use deno_core::{JsRuntime, RuntimeOptions};
+    use deno_core::RuntimeOptions;
     use tokio::runtime::Builder;
 
-    use super::{build_js_runtime, initialize_js_runtime, runtime_create_params};
-    use crate::runtime::factory::v8_runtime_init_held_by_current_thread;
+    use super::{build_js_runtime, initialize_js_runtime};
 
     #[test]
-    fn js_runtime_initialization_holds_shared_lock_for_options_and_constructor() {
-        let runtime = initialize_js_runtime(
-            || {
-                assert!(
-                    v8_runtime_init_held_by_current_thread(),
-                    "runtime create params must be initialized under the shared lock on this thread"
-                );
-                RuntimeOptions {
-                    create_params: Some(runtime_create_params()),
-                    ..Default::default()
-                }
-            },
-            |options| {
-                assert!(
-                    v8_runtime_init_held_by_current_thread(),
-                    "JsRuntime::new must run under the shared lock on this thread"
-                );
-                JsRuntime::new(options)
-            },
-        );
+    #[expect(
+        clippy::expect_used,
+        reason = "Runtime initialization failures should fail the regression test"
+    )]
+    fn default_and_rari_snapshot_isolates_can_coexist() {
+        let tokio_runtime =
+            Builder::new_current_thread().enable_all().build().expect("create Tokio runtime");
+        let _tokio_guard = tokio_runtime.enter();
 
-        assert!(!v8_runtime_init_held_by_current_thread());
-        drop(runtime);
+        // Web workers also use startup_snapshot: None, so this holds their default snapshot's
+        // read-only heap live while the production Rari snapshot is deserialized.
+        let mut default_runtime = initialize_js_runtime(RuntimeOptions::default);
+        let (mut rari_runtime, _module_loader) =
+            build_js_runtime(None).expect("build snapshot-backed JS runtime");
+        assert!(!crate::runtime::factory::v8_runtime_init_held_by_current_thread());
+
+        default_runtime
+            .execute_script("default_snapshot_lifetime.js", "1 + 1")
+            .expect("default-snapshot isolate should remain usable");
+        rari_runtime
+            .execute_script("rari_snapshot_lifetime.js", "1 + 1")
+            .expect("Rari-snapshot isolate should remain usable beside the default snapshot");
+
+        drop(rari_runtime);
+        default_runtime
+            .execute_script("default_snapshot_after_rari_drop.js", "1 + 1")
+            .expect("default-snapshot isolate should remain usable after the Rari isolate drops");
     }
 
     #[test]
