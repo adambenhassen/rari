@@ -159,27 +159,28 @@ mod tests {
     use tokio::runtime::Builder;
 
     use super::{build_js_runtime, initialize_js_runtime};
-    use crate::runtime::factory::V8_RUNTIME_INIT_LOCK;
+    use crate::runtime::factory::v8_runtime_init_held_by_current_thread;
 
     #[test]
     fn js_runtime_initialization_holds_shared_lock_for_options_and_constructor() {
         let runtime = initialize_js_runtime(
             || {
                 assert!(
-                    V8_RUNTIME_INIT_LOCK.try_lock().is_err(),
-                    "runtime create params must be initialized under the shared lock"
+                    v8_runtime_init_held_by_current_thread(),
+                    "runtime create params must be initialized under the shared lock on this thread"
                 );
                 RuntimeOptions::default()
             },
             |options| {
                 assert!(
-                    V8_RUNTIME_INIT_LOCK.try_lock().is_err(),
-                    "JsRuntime::new must run under the shared lock"
+                    v8_runtime_init_held_by_current_thread(),
+                    "JsRuntime::new must run under the shared lock on this thread"
                 );
                 JsRuntime::new(options)
             },
         );
 
+        assert!(!v8_runtime_init_held_by_current_thread());
         drop(runtime);
     }
 

@@ -18,9 +18,33 @@ use rustc_hash::FxHashMap;
 
 static V8_RUNTIME_INIT_LOCK: Mutex<()> = Mutex::new(());
 
+#[cfg(test)]
+std::thread_local! {
+    static V8_RUNTIME_INIT_HELD: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+pub(crate) struct V8RuntimeInitGuard {
+    _guard: MutexGuard<'static, ()>,
+}
+
+#[cfg(test)]
+impl Drop for V8RuntimeInitGuard {
+    fn drop(&mut self) {
+        V8_RUNTIME_INIT_HELD.with(|held| held.set(false));
+    }
+}
+
 // V8 snapshot deserialization uses shared heap state across isolate creation.
-pub(crate) fn lock_v8_runtime_init() -> MutexGuard<'static, ()> {
-    V8_RUNTIME_INIT_LOCK.lock().unwrap_or_else(PoisonError::into_inner)
+pub(crate) fn lock_v8_runtime_init() -> V8RuntimeInitGuard {
+    let guard = V8_RUNTIME_INIT_LOCK.lock().unwrap_or_else(PoisonError::into_inner);
+    #[cfg(test)]
+    V8_RUNTIME_INIT_HELD.with(|held| held.set(true));
+    V8RuntimeInitGuard { _guard: guard }
+}
+
+#[cfg(test)]
+pub(crate) fn v8_runtime_init_held_by_current_thread() -> bool {
+    V8_RUNTIME_INIT_HELD.with(|held| held.get())
 }
 
 pub fn create_runtime() -> Arc<RariRuntime> {
