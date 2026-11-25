@@ -1140,6 +1140,19 @@ test('recognizes true assignments on Docker boolean flags when removing containe
   )
 })
 
+test('recognizes true assignments on short Docker boolean flags when removing containers', () => {
+  assert.deepEqual(
+    findDockerSafetyViolations('docker rm -f=true $(docker ps -a=true -q=true)').map(
+      ({ message }) => message,
+    ),
+    ['removing every Docker container'],
+  )
+  assert.deepEqual(
+    findDockerSafetyViolations('docker rm -f=false $(docker ps -a=true -q=true)'),
+    [],
+  )
+})
+
 test('ignores dynamic ports and ports opened inside a container', () => {
   const workflow =
     'docker run --name "rari-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT-$GITHUB_JOB" -p 5432 postgres\nserver --port 43819'

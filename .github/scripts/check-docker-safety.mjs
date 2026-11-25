@@ -204,7 +204,7 @@ function isContainerCommand(invocation, subcommands) {
   )
 }
 
-// Short flags are read from grouped tokens; true long-flag assignments normalize.
+// Short flags are read from grouped tokens; true assignments normalize to the flag name.
 function dockerFlags(args) {
   const flags = new Set()
   for (const token of shellTokens(args)) {
@@ -212,6 +212,8 @@ function dockerFlags(args) {
     if (word.startsWith('--')) {
       const [name, value] = word.split('=', 2)
       flags.add(value !== undefined && /^(?:1|t|true)$/i.test(value) ? name : word)
+    } else if (/^-[A-Za-z]=(?:1|t|true)$/i.test(word)) {
+      flags.add(word[1])
     } else if (/^-[A-Za-z]+$/.test(word)) {
       for (const letter of word.slice(1)) flags.add(letter)
     }
