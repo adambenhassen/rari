@@ -68,6 +68,7 @@ const dockerRootOptionsWithValue = new Set([
   '-H',
   '-l',
 ])
+const dockerManagementGroupOptionsWithValue = new Set([...dockerRootOptionsWithValue, '--builder'])
 const dockerRootOptionsWithoutValue = new Set([
   '--debug',
   '--help',
@@ -113,6 +114,18 @@ function rawCommandToken(token) {
 
 function commandWord(token) {
   return rawCommandToken(token).toLowerCase()
+}
+
+function managementSubcommandIndex(tokens, groupIndex) {
+  for (let index = groupIndex + 1; index < tokens.length; index += 1) {
+    const option = rawCommandToken(tokens[index].value)
+    if (dockerManagementGroupOptionsWithValue.has(option)) {
+      index += 1
+      continue
+    }
+    if (!option.startsWith('-')) return index
+  }
+  return -1
 }
 
 // Docker resources whose subcommand follows the group word: `docker container run`.
@@ -182,10 +195,7 @@ function dockerInvocations(source) {
       let group
       const managementGroup = dockerManagementGroupAliases.get(token) ?? token
       if (dockerManagementGroups.has(managementGroup)) {
-        subcommandIndex = tokens.findIndex(
-          (candidate, candidateIndex) =>
-            candidateIndex > index && !rawCommandToken(candidate.value).startsWith('-'),
-        )
+        subcommandIndex = managementSubcommandIndex(tokens, index)
         if (subcommandIndex === -1) break
         group = managementGroup
       }

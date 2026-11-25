@@ -55,6 +55,12 @@ test('rejects global Docker cleanup and filters that are not unique to a job', (
     ['unfiltered Docker prune'],
   )
   assert.deepEqual(
+    findDockerSafetyViolations('docker buildx --builder ci prune -af').map(
+      ({ message }) => message,
+    ),
+    ['unfiltered Docker prune'],
+  )
+  assert.deepEqual(
     findDockerSafetyViolations('docker --context remote system prune -af').map(
       ({ message }) => message,
     ),
