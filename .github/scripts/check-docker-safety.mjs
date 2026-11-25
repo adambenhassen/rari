@@ -124,6 +124,7 @@ const dockerManagementGroups = new Set([
   'system',
   'volume',
 ])
+const dockerManagementGroupAliases = new Map([['buildx', 'builder']])
 
 function dockerInvocations(source) {
   const matches = [...source.matchAll(/\bdocker(?=\s|$|-compose\b)/gi)]
@@ -140,6 +141,7 @@ function dockerInvocations(source) {
 
       if (token === '-compose') {
         invocations.push({
+          start: match.index,
           subcommand: 'compose',
           arguments: source.slice(afterDocker + tokens[index].end, end),
           command: source.slice(match.index, end),
@@ -174,16 +176,18 @@ function dockerInvocations(source) {
 
       let subcommandIndex = index
       let group
-      if (dockerManagementGroups.has(token)) {
+      const managementGroup = dockerManagementGroupAliases.get(token) ?? token
+      if (dockerManagementGroups.has(managementGroup)) {
         subcommandIndex = tokens.findIndex(
           (candidate, candidateIndex) =>
             candidateIndex > index && !rawCommandToken(candidate.value).startsWith('-'),
         )
         if (subcommandIndex === -1) break
-        group = token
+        group = managementGroup
       }
 
       invocations.push({
+        start: match.index,
         group,
         subcommand: commandWord(tokens[subcommandIndex].value),
         arguments: source.slice(afterDocker + tokens[subcommandIndex].end, end),
@@ -222,17 +226,17 @@ function dockerFlags(args) {
 }
 
 function removesEveryDockerContainer(invocations) {
-  const forceRemove = invocations.some(invocation => {
-    if (!isContainerCommand(invocation, ['rm'])) return false
-    const flags = dockerFlags(invocation.arguments)
-    return flags.has('f') || flags.has('--force')
-  })
+  const removesContainers = invocations.some(invocation => isContainerCommand(invocation, ['rm']))
   const listsEveryContainer = invocations.some(invocation => {
     if (!isContainerCommand(invocation, ['ps', 'ls'])) return false
     const flags = dockerFlags(invocation.arguments)
-    return (flags.has('a') || flags.has('--all')) && (flags.has('q') || flags.has('--quiet'))
+    const emitsIdentifiers =
+      flags.has('q') ||
+      flags.has('--quiet') ||
+      [...flags].some(flag => flag === '--format' || flag.startsWith('--format='))
+    return (flags.has('a') || flags.has('--all')) && emitsIdentifiers
   })
-  return forceRemove && listsEveryContainer
+  return removesContainers && listsEveryContainer
 }
 
 function hasVariable(value, name) {
@@ -338,7 +342,7 @@ function hasJobLabelFilter(command, matrixContext) {
 }
 
 function hasFixedDockerPublish(command) {
-  return /(?:^|\s)(?:--publish(?:=|\s+)|-p(?:=|\s+|(?=\d)))["']?(?:(?:(?:\d{1,3}\.){3}\d{1,3}|localhost|\[[\da-f:]+\]):)?\d+(?:-\d+)?:\d+(?:-\d+)?(?:\/(?:tcp|udp))?(?=$|\s|["'])/.test(
+  return /(?:^|\s)(?:--publish(?:=|\s+)|-[A-Za-z]*p(?:=|\s+|(?=\d)))["']?(?:(?:(?:\d{1,3}\.){3}\d{1,3}|localhost|\[[\da-f:]+\]):)?\d+(?:-\d+)?:\d+(?:-\d+)?(?:\/(?:tcp|udp))?(?=$|\s|["'])/.test(
     command,
   )
 }
@@ -405,6 +409,48 @@ function workflowMatrixContext(source) {
   return { hasMatrix, hasUnknownDimensions, keys: [...keys] }
 }
 
+function shellScriptRegions(source, file) {
+  if (!/\.ya?ml$/i.test(file)) return [{ source, line: 1 }]
+
+  const lines = source.split(/\r?\n/)
+  const regions = []
+
+  for (let index = 0; index < lines.length; index += 1) {
+    const match = lines[index].match(/^(\s*)(?:-\s+)?run:\s*(.*)$/)
+    if (!match) continue
+
+    const line = index + 1
+    const scalar = match[2].trim()
+    if (!/^[|>](?:[+-][1-9]?|[1-9][+-]?)?(?:\s+#.*)?$/.test(scalar)) {
+      regions.push({ source: match[2], line })
+      continue
+    }
+
+    const mappingIndent = match[1].length
+    const scriptLines = []
+    let contentIndent
+    let next = index + 1
+    for (; next < lines.length; next += 1) {
+      const scriptLine = lines[next]
+      if (!scriptLine.trim()) {
+        scriptLines.push(scriptLine)
+        continue
+      }
+
+      const indent = scriptLine.match(/^\s*/)[0].length
+      if (indent <= mappingIndent || (contentIndent !== undefined && indent < contentIndent)) {
+        break
+      }
+      contentIndent ??= indent
+      scriptLines.push(scriptLine)
+    }
+    regions.push({ source: scriptLines.join('\n'), line: line + 1 })
+    index = next - 1
+  }
+
+  return regions.length > 0 ? regions : [{ source, line: 1 }]
+}
+
 export function findDockerSafetyViolations(source, file = '<input>') {
   const lines = source.split(/\r?\n/)
   const violations = []
@@ -448,10 +494,15 @@ export function findDockerSafetyViolations(source, file = '<input>') {
         violations.push({ file, line: command.line, message: 'unfiltered Docker prune' })
       }
     }
+  }
 
-    if (removesEveryDockerContainer(invocations)) {
-      violations.push({ file, line: command.line, message: 'removing every Docker container' })
-    }
+  for (const script of shellScriptRegions(source, file)) {
+    const invocations = dockerInvocations(script.source)
+    if (!removesEveryDockerContainer(invocations)) continue
+
+    const removal = invocations.find(invocation => isContainerCommand(invocation, ['rm']))
+    const line = script.line + (script.source.slice(0, removal.start).match(/\n/g) ?? []).length
+    violations.push({ file, line, message: 'removing every Docker container' })
   }
 
   for (let index = 0; index < lines.length; index += 1) {

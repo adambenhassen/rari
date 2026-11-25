@@ -26,6 +26,12 @@ test('rejects fixed Docker host ports and fixed compose ports', () => {
     ['fixed host-port publishing'],
   )
   assert.deepEqual(
+    findDockerSafetyViolations(`docker run --name ${name} -dp ${fixedPort} postgres`).map(
+      ({ message }) => message,
+    ),
+    ['fixed host-port publishing'],
+  )
+  assert.deepEqual(
     findDockerSafetyViolations(
       'docker run --name "rari-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT-$GITHUB_JOB" --publish "127.0.0.1:5432:5432" postgres',
     ).map(({ message }) => message),
@@ -42,6 +48,10 @@ test('rejects global Docker cleanup and filters that are not unique to a job', (
     findDockerSafetyViolations(['docker', 'system', 'prune', '-af'].join(' ')).map(
       ({ message }) => message,
     ),
+    ['unfiltered Docker prune'],
+  )
+  assert.deepEqual(
+    findDockerSafetyViolations('docker buildx prune -af').map(({ message }) => message),
     ['unfiltered Docker prune'],
   )
   assert.deepEqual(
@@ -1006,6 +1016,7 @@ test('smoke cleanup exits nonzero when removing the container fails', async () =
   try {
     const workflow = await readFile(new URL('../workflows/fork-build.yml', import.meta.url), 'utf8')
     const containerCreate = workflow.indexOf('          docker create --name')
+    assert.notEqual(containerCreate, -1)
     const cleanupStart = workflow.indexOf('          cleanup() {', containerCreate)
     const cleanupEnd = workflow.indexOf('          trap cleanup EXIT', cleanupStart)
     assert.notEqual(cleanupStart, -1)
@@ -1015,6 +1026,7 @@ test('smoke cleanup exits nonzero when removing the container fails', async () =
       .split('\n')
       .map(line => line.replace(/^ {10}/, ''))
       .join('\n')
+    assert.match(cleanupScript, /docker rm --force/)
     const bin = join(root, 'bin')
     await mkdir(bin)
     const dockerPath = join(bin, 'docker')
@@ -1113,7 +1125,7 @@ test('reads the subcommand after container, image, volume, network and system gr
   )
 })
 
-test('requires -a and -q in the every-container listing whatever the flag grouping', () => {
+test('requires an every-container listing that emits identifiers for global removal', () => {
   for (const listing of ['docker ps -a -q', 'docker ps -qa', 'docker container ls -a -q']) {
     assert.deepEqual(
       findDockerSafetyViolations(`docker rm -f $(${listing})`).map(({ message }) => message),
@@ -1125,6 +1137,55 @@ test('requires -a and -q in the every-container listing whatever the flag groupi
     findDockerSafetyViolations('docker rm -f $(docker ps -q)').map(({ message }) => message),
     [],
   )
+  assert.deepEqual(
+    findDockerSafetyViolations('docker rm $(docker ps -aq)').map(({ message }) => message),
+    ['removing every Docker container'],
+  )
+  assert.deepEqual(
+    findDockerSafetyViolations("docker rm -f $(docker ps -a --format '{{.ID}}')").map(
+      ({ message }) => message,
+    ),
+    ['removing every Docker container'],
+  )
+})
+
+test('detects global container removal across lines in a shell script', () => {
+  for (const script of [
+    ['ids=$(docker ps -aq)', 'docker rm -f $ids'].join('\n'),
+    ['docker rm -f $(', '  docker ps -aq', ')'].join('\n'),
+  ]) {
+    assert.deepEqual(
+      findDockerSafetyViolations(script).map(({ message }) => message),
+      ['removing every Docker container'],
+      script,
+    )
+  }
+
+  const workflow = [
+    'jobs:',
+    '  check:',
+    '    runs-on: inference-x64',
+    '    steps:',
+    '      - run: |',
+    '          ids=$(docker ps -aq)',
+    '          docker rm -f $ids',
+  ].join('\n')
+  assert.deepEqual(
+    findDockerSafetyViolations(workflow, '.github/workflows/check.yml').map(
+      ({ message }) => message,
+    ),
+    ['removing every Docker container'],
+  )
+
+  const separateSteps = [
+    'jobs:',
+    '  check:',
+    '    runs-on: inference-x64',
+    '    steps:',
+    '      - run: docker ps -aq',
+    '      - run: docker rm -f $ids',
+  ].join('\n')
+  assert.deepEqual(findDockerSafetyViolations(separateSteps, '.github/workflows/check.yml'), [])
 })
 
 test('recognizes true assignments on Docker boolean flags when removing containers', () => {
@@ -1148,7 +1209,7 @@ test('recognizes true assignments on short Docker boolean flags when removing co
     ['removing every Docker container'],
   )
   assert.deepEqual(
-    findDockerSafetyViolations('docker rm -f=false $(docker ps -a=true -q=true)'),
+    findDockerSafetyViolations('docker rm -f=true $(docker ps -a=true -q=false)'),
     [],
   )
 })
