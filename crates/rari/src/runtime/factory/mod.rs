@@ -7,6 +7,8 @@ mod runtime;
 mod runtime_builder;
 pub(crate) mod utils;
 
+#[cfg(test)]
+use std::cell::Cell;
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 
 pub use interface::JsRuntimeInterface;
@@ -20,7 +22,7 @@ static V8_RUNTIME_INIT_LOCK: Mutex<()> = Mutex::new(());
 
 #[cfg(test)]
 std::thread_local! {
-    static V8_RUNTIME_INIT_HELD: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+    static V8_RUNTIME_INIT_HELD: Cell<bool> = const { Cell::new(false) };
 }
 
 pub(crate) struct V8RuntimeInitGuard {
@@ -44,7 +46,7 @@ pub(crate) fn lock_v8_runtime_init() -> V8RuntimeInitGuard {
 
 #[cfg(test)]
 pub(crate) fn v8_runtime_init_held_by_current_thread() -> bool {
-    V8_RUNTIME_INIT_HELD.with(|held| held.get())
+    V8_RUNTIME_INIT_HELD.with(Cell::get)
 }
 
 pub fn create_runtime() -> Arc<RariRuntime> {
