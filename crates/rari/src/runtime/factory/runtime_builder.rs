@@ -25,6 +25,14 @@ const NODE_CONSOLE_SCOPE_SPECIFIER: &str = "ext:runtime/98_global_scope_shared.j
 const NODE_CONSOLE_SCOPE_SOURCE: &str = include_str!("../ext/runtime/node_console_scope.ts");
 const RESPONSE_AVAILABILITY_INIT_SCRIPT: &str = include_str!("js/response_availability_helper.js");
 
+fn initialize_js_runtime<T>(
+    build_options: impl FnOnce() -> RuntimeOptions,
+    create_runtime: impl FnOnce(RuntimeOptions) -> T,
+) -> T {
+    let _init_guard = lock_v8_runtime_init();
+    create_runtime(build_options())
+}
+
 fn residual_lazy_esm_sources() -> &'static [(&'static str, &'static str)] {
     static SOURCES: LazyLock<Vec<(&'static str, &'static str)>> = LazyLock::new(|| {
         let mut sources = RESIDUAL_LAZY_ESM_SOURCES.to_vec();
@@ -74,25 +82,23 @@ pub fn build_js_runtime(
         ..Default::default()
     });
 
-    let options = RuntimeOptions {
-        #[expect(
-            clippy::clone_on_ref_ptr,
-            reason = "Trait object coercion: Rc<RariModuleLoader> -> Rc<dyn ModuleLoader>"
-        )]
-        module_loader: Some(module_loader.clone()),
-        extensions,
-        extension_transpiler: Some(module_loader.as_extension_transpiler()),
-        startup_snapshot: Some(RUNTIME_SNAPSHOT),
-        residual_lazy_esm_sources: residual_lazy_esm_sources(),
-        residual_lazy_js_sources: RESIDUAL_LAZY_JS_SOURCES,
-        create_params: Some(runtime_create_params()),
-        ..Default::default()
-    };
-
-    let mut runtime = {
-        let _init_guard = lock_v8_runtime_init();
-        JsRuntime::new(options)
-    };
+    let mut runtime = initialize_js_runtime(
+        || RuntimeOptions {
+            #[expect(
+                clippy::clone_on_ref_ptr,
+                reason = "Trait object coercion: Rc<RariModuleLoader> -> Rc<dyn ModuleLoader>"
+            )]
+            module_loader: Some(module_loader.clone()),
+            extensions,
+            extension_transpiler: Some(module_loader.as_extension_transpiler()),
+            startup_snapshot: Some(RUNTIME_SNAPSHOT),
+            residual_lazy_esm_sources: residual_lazy_esm_sources(),
+            residual_lazy_js_sources: RESIDUAL_LAZY_JS_SOURCES,
+            create_params: Some(runtime_create_params()),
+            ..Default::default()
+        },
+        JsRuntime::new,
+    );
 
     runtime
         .lazy_init_extensions(lazy_args)
@@ -149,9 +155,33 @@ mod tests {
         thread,
     };
 
+    use deno_core::RuntimeOptions;
     use tokio::runtime::Builder;
 
-    use super::build_js_runtime;
+    use super::{build_js_runtime, initialize_js_runtime};
+    use crate::runtime::factory::V8_RUNTIME_INIT_LOCK;
+
+    #[test]
+    fn js_runtime_initialization_holds_shared_lock_for_options_and_constructor() {
+        let runtime = initialize_js_runtime(
+            || {
+                assert!(
+                    V8_RUNTIME_INIT_LOCK.try_lock().is_err(),
+                    "runtime create params must be initialized under the shared lock"
+                );
+                RuntimeOptions::default()
+            },
+            |options| {
+                assert!(
+                    V8_RUNTIME_INIT_LOCK.try_lock().is_err(),
+                    "JsRuntime::new must run under the shared lock"
+                );
+                JsRuntime::new(options)
+            },
+        );
+
+        drop(runtime);
+    }
 
     #[test]
     #[expect(
