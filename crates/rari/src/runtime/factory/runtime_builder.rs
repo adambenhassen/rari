@@ -158,7 +158,7 @@ mod tests {
     use deno_core::{JsRuntime, RuntimeOptions};
     use tokio::runtime::Builder;
 
-    use super::{build_js_runtime, initialize_js_runtime};
+    use super::{build_js_runtime, initialize_js_runtime, runtime_create_params};
     use crate::runtime::factory::v8_runtime_init_held_by_current_thread;
 
     #[test]
@@ -169,7 +169,10 @@ mod tests {
                     v8_runtime_init_held_by_current_thread(),
                     "runtime create params must be initialized under the shared lock on this thread"
                 );
-                RuntimeOptions::default()
+                RuntimeOptions {
+                    create_params: Some(runtime_create_params()),
+                    ..Default::default()
+                }
             },
             |options| {
                 assert!(
