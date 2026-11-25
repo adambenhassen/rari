@@ -10,6 +10,8 @@ use deno_runtime::BootstrapOptions;
 use rari_error::RariError;
 use rustc_hash::FxHashMap;
 
+#[cfg(test)]
+use crate::runtime::factory::v8_runtime_init_held_by_current_thread;
 use crate::runtime::{
     ext,
     factory::{
@@ -30,7 +32,7 @@ fn initialize_js_runtime(build_options: impl FnOnce() -> RuntimeOptions) -> JsRu
     let options = build_options();
     #[cfg(test)]
     assert!(
-        crate::runtime::factory::v8_runtime_init_held_by_current_thread(),
+        v8_runtime_init_held_by_current_thread(),
         "JsRuntime::new must run under the shared lock on this thread"
     );
     JsRuntime::new(options)
@@ -175,7 +177,7 @@ mod tests {
         let mut default_runtime = initialize_js_runtime(RuntimeOptions::default);
         let (mut rari_runtime, _module_loader) =
             build_js_runtime(None).expect("build snapshot-backed JS runtime");
-        assert!(!crate::runtime::factory::v8_runtime_init_held_by_current_thread());
+        assert!(!v8_runtime_init_held_by_current_thread());
 
         default_runtime
             .execute_script("default_snapshot_lifetime.js", "1 + 1")
