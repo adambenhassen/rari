@@ -653,6 +653,7 @@ pub fn op_get_cookies(state: Rc<RefCell<OpState>>, #[string] request_id: String)
     let Some(ctx) = resolve_request_context(&op_state_ref, Some(request_id.as_str())) else {
         return String::new();
     };
+    ctx.disable_cache_reads_and_writes();
 
     let mut cookies: BTreeMap<String, String> = ctx
         .cookie_header
@@ -705,6 +706,7 @@ pub fn op_get_request_headers(state: Rc<RefCell<OpState>>, #[string] request_id:
     let Some(ctx) = resolve_request_context(&op_state_ref, Some(request_id.as_str())) else {
         return "{}".to_string();
     };
+    ctx.disable_cache_reads_and_writes();
 
     serde_json::to_string(&ctx.request_headers).unwrap_or_else(|_| "{}".to_string())
 }
@@ -717,6 +719,7 @@ pub fn op_get_csp_nonce(state: Rc<RefCell<OpState>>, #[string] request_id: Strin
     let Some(ctx) = resolve_request_context(&op_state_ref, Some(request_id.as_str())) else {
         return String::new();
     };
+    ctx.disable_cache_reads_and_writes();
 
     ctx.csp_nonce.as_deref().unwrap_or("").to_string()
 }
@@ -781,6 +784,7 @@ pub fn op_set_cookie(
 
     let op_state_ref = state.borrow();
     if let Some(ctx) = resolve_request_context(&op_state_ref, args.request_id.as_deref()) {
+        ctx.disable_cache_reads_and_writes();
         let path = args.path.or_else(|| Some("/".to_string()));
         ctx.pending_cookies.insert(
             PendingCookieKey::new(&args.name, path.as_deref(), args.domain.as_deref()),
@@ -812,6 +816,7 @@ pub fn op_delete_cookie(
 ) {
     let op_state_ref = state.borrow();
     if let Some(ctx) = resolve_request_context(&op_state_ref, Some(request_id.as_str())) {
+        ctx.disable_cache_reads_and_writes();
         let cookies_to_delete: Vec<(Option<String>, Option<String>)> = ctx
             .pending_cookies
             .iter()

@@ -208,6 +208,7 @@ pub struct RequestContext {
 }
 
 struct ResponseCacheState {
+    reads_enabled: bool,
     writes_enabled: bool,
     unavailable_after: Option<u64>,
     has_dynamic_metadata: bool,
@@ -222,6 +223,7 @@ impl RequestContext {
             start_time: Instant::now(),
             route_path,
             response_cache_state: Mutex::new(ResponseCacheState {
+                reads_enabled: true,
                 writes_enabled: true,
                 unavailable_after: None,
                 has_dynamic_metadata: true,
@@ -299,8 +301,18 @@ impl RequestContext {
         self.response_cache_state.lock().unavailable_after
     }
 
+    pub fn clear_response_unavailable(&self) {
+        self.response_cache_state.lock().unavailable_after = None;
+    }
+
     pub fn disable_cache_writes(&self) {
         self.response_cache_state.lock().writes_enabled = false;
+    }
+
+    pub fn disable_cache_reads_and_writes(&self) {
+        let mut state = self.response_cache_state.lock();
+        state.reads_enabled = false;
+        state.writes_enabled = false;
     }
 
     pub fn must_send_no_store(&self) -> bool {
@@ -311,6 +323,10 @@ impl RequestContext {
     pub fn response_cache_allowed(&self) -> bool {
         let state = self.response_cache_state.lock();
         state.writes_enabled && state.unavailable_after.is_none()
+    }
+
+    pub fn response_cache_reads_allowed(&self) -> bool {
+        self.response_cache_state.lock().reads_enabled
     }
 
     pub(crate) fn set_has_dynamic_metadata(&self, has_dynamic_metadata: bool) {
@@ -554,6 +570,34 @@ mod tests {
         assert!(ctx.must_send_no_store());
         assert!(!ctx.response_cache_allowed());
         assert_eq!(ctx.response_unavailable_after(), None);
+    }
+
+    #[test]
+    fn request_data_access_disables_shared_cache_reads_and_writes() {
+        let ctx = RequestContext::new("/test".to_string());
+
+        assert!(ctx.response_cache_reads_allowed());
+        assert!(ctx.response_cache_allowed());
+        assert!(!ctx.must_send_no_store());
+
+        ctx.disable_cache_reads_and_writes();
+
+        assert!(!ctx.response_cache_reads_allowed());
+        assert!(!ctx.response_cache_allowed());
+        assert!(ctx.must_send_no_store());
+    }
+
+    #[test]
+    fn clearing_unavailability_keeps_not_found_uncacheable() {
+        let ctx = RequestContext::new("/not-found".to_string());
+
+        ctx.mark_response_unavailable(17);
+        ctx.disable_cache_writes();
+        ctx.clear_response_unavailable();
+
+        assert_eq!(ctx.response_unavailable_after(), None);
+        assert!(ctx.must_send_no_store());
+        assert!(!ctx.response_cache_allowed());
     }
 
     #[test]

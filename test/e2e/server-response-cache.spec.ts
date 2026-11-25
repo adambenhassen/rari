@@ -8,7 +8,9 @@ import { expect, test } from '@playwright/test'
 import { getBinaryPath } from '../../packages/rari/src/cli/platform'
 import { close, listen } from './shared/test-server'
 
-test('getData outage marks return 503 for cold and warm responses', async ({ request }) => {
+test('getData availability and request data preserve shared cache boundaries', async ({
+  request,
+}) => {
   test.setTimeout(90_000)
   let available = false
   const backend = createServer((_incoming, response) => {
@@ -29,6 +31,7 @@ test('getData outage marks return 503 for cold and warm responses', async ({ req
         ...process.env,
         NODE_ENV: 'production',
         RARI_ORIGIN: origin,
+        RARI_JS_POOL_SIZE: '1',
         RARI_TEST_AVAILABILITY_BACKEND: `http://127.0.0.1:${backendPort}`,
         RUST_LOG: 'info',
       },
@@ -79,6 +82,48 @@ test('getData outage marks return 503 for cold and warm responses', async ({ req
     expect(unavailableWarm.headers()['cache-control']).toBe('no-store')
     expect(unavailableWarm.headers()['retry-after']).toBe('17')
     expect(unavailableWarm.headers()['x-cache']).not.toBe('HIT')
+
+    const modes: { name: string; headers: Record<string, string> }[] = [
+      { name: 'HTML', headers: {} },
+      { name: 'RSC', headers: { Accept: 'text/x-component' } },
+    ]
+    for (const mode of modes) {
+      const slug = `${mode.name.toLowerCase()}-${Date.now()}-${Math.random()}`
+      const sessionUrl = `${origin}/get-data-session/${slug}`
+      const shared = await request.get(sessionUrl, { headers: mode.headers })
+      expect.soft(shared.status(), `${mode.name}: shared`).toBe(200)
+      expect.soft(shared.headers()['x-cache'], `${mode.name}: shared`).toBe('MISS')
+      expect.soft(await shared.text(), `${mode.name}: shared body`).toContain('shared')
+
+      for (const session of ['alice', 'bob']) {
+        const personalized = await request.get(sessionUrl, {
+          headers: { ...mode.headers, Cookie: `session=${session}` },
+        })
+        const body = await personalized.text()
+        expect.soft(personalized.status(), `${mode.name}: ${session}`).toBe(200)
+        expect.soft(personalized.headers()['x-cache'], `${mode.name}: ${session}`).toBe('MISS')
+        expect
+          .soft(personalized.headers()['cache-control'], `${mode.name}: ${session}`)
+          .toBe('no-store')
+        expect.soft(body, `${mode.name}: ${session} body`).toContain(session)
+        expect
+          .soft(body, `${mode.name}: ${session} body`)
+          .not.toContain(session === 'alice' ? 'bob' : 'alice')
+      }
+    }
+
+    const notFoundUrl = `${origin}/get-data-unavailable-not-found/article-${Date.now()}-${Math.random()}`
+    const cachedRoute = await request.get(notFoundUrl)
+    expect.soft(cachedRoute.status()).toBe(200)
+    expect.soft(cachedRoute.headers()['x-cache']).toBe('MISS')
+    expect.soft(await cachedRoute.text()).toContain('data-testid="not-found-cache-prime"')
+
+    const unavailableNotFound = await request.get(notFoundUrl)
+    expect.soft(unavailableNotFound.status()).toBe(404)
+    expect.soft(unavailableNotFound.headers()['cache-control']).toBe('no-store')
+    expect.soft(unavailableNotFound.headers()['retry-after']).toBeUndefined()
+    expect.soft(unavailableNotFound.headers()['x-cache']).not.toBe('HIT')
+    expect.soft(await unavailableNotFound.text()).toContain('data-testid="not-found-page"')
   } finally {
     child.kill('SIGTERM')
     await exited

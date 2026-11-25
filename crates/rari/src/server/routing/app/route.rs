@@ -331,6 +331,7 @@ pub async fn handle_app_route(
                     );
                 }
                 PageData::NotFound => {
+                    request_context.clear_response_unavailable();
                     request_context.disable_cache_writes();
                     if let Some(not_found_entry) = resolve_not_found_entry(app_router, &route_match)
                     {
@@ -360,6 +361,7 @@ pub async fn handle_app_route(
     let mut metadata_collected = false;
     if route_match.not_found.is_none()
         && request_context.response_unavailable_after().is_none()
+        && request_context.response_cache_reads_allowed()
         && let Some(fast_key) = deferred_fast_key
         && let Some(prebuilt) = state.static_fast_cache.get(&fast_key)
         && (!prebuilt.has_dynamic_metadata
@@ -410,6 +412,7 @@ pub async fn handle_app_route(
             let cached = if route_match.not_found.is_none()
                 && !warmup_publication_in_progress
                 && request_context.response_unavailable_after().is_none()
+                && request_context.response_cache_reads_allowed()
                 && context.template_navigation_id.is_none()
             {
                 let entry = match candidate.take() {
@@ -417,7 +420,7 @@ pub async fn handle_app_route(
                     None => state.response_cache.candidate(&cache_key).await,
                 };
                 let allowed = if let Some(entry) = entry.as_ref() {
-                    (entry.is_guarded() && !entry.response.metadata.has_dynamic_metadata)
+                    ((entry.is_guarded() && !entry.response.metadata.has_dynamic_metadata)
                         || metadata_allows_cache_hit(
                             &state,
                             &route_match,
@@ -425,7 +428,8 @@ pub async fn handle_app_route(
                             &request_context,
                             &mut metadata_collected,
                         )
-                        .await
+                        .await)
+                        && request_context.response_cache_reads_allowed()
                 } else {
                     false
                 };
@@ -611,13 +615,14 @@ pub async fn handle_app_route(
             let cached = if route_match.not_found.is_none()
                 && !warmup_publication_in_progress
                 && request_context.response_unavailable_after().is_none()
+                && request_context.response_cache_reads_allowed()
             {
                 let entry = match candidate.take() {
                     Some(entry) => entry,
                     None => state.response_cache.candidate(&cache_key).await,
                 };
                 let allowed = if let Some(entry) = entry.as_ref() {
-                    (entry.is_guarded() && !entry.response.metadata.has_dynamic_metadata)
+                    ((entry.is_guarded() && !entry.response.metadata.has_dynamic_metadata)
                         || metadata_allows_cache_hit(
                             &state,
                             &route_match,
@@ -625,7 +630,8 @@ pub async fn handle_app_route(
                             &request_context,
                             &mut metadata_collected,
                         )
-                        .await
+                        .await)
+                        && request_context.response_cache_reads_allowed()
                 } else {
                     false
                 };
