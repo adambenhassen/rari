@@ -211,6 +211,26 @@ test('Fast hits without getData do not wait for dynamic metadata', async ({ requ
     expect(personalizedFastResponse.headers()['cache-control']).toBe('no-store')
     expect(await personalizedFastResponse.text()).toContain('<!-- -->alice<!-- -->)')
 
+    const renderedSessionSlug = `render-${Date.now()}-${Math.random()}`
+    const renderedSessionUrl = `${origin}/cache-render-session/${renderedSessionSlug}`
+    const aliceRendered = await request.get(renderedSessionUrl, {
+      headers: { 'X-Session': 'alice' },
+    })
+    expect(aliceRendered.status()).toBe(200)
+    expect(aliceRendered.headers()['x-cache']).toBe('MISS')
+    expect(aliceRendered.headers()['cache-control']).toBe('no-store')
+    expect(await aliceRendered.text()).toContain('Session alice')
+
+    const bobRendered = await request.get(renderedSessionUrl, {
+      headers: { 'X-Session': 'bob' },
+    })
+    expect(bobRendered.status()).toBe(200)
+    expect(bobRendered.headers()['x-cache']).toBe('MISS')
+    expect(bobRendered.headers()['cache-control']).toBe('no-store')
+    const bobRenderedHtml = await bobRendered.text()
+    expect(bobRenderedHtml).toContain('Session bob')
+    expect(bobRenderedHtml).not.toContain('Session alice')
+
     const publicMetadataSlug = `public-${Date.now()}-${Math.random()}`
     const publicMetadataUrl = `${origin}/cache-metadata-public-header/${publicMetadataSlug}`
     const initialPublicMetadata = await request.get(publicMetadataUrl, {
