@@ -106,10 +106,9 @@ fn metadata_cache_hit_decision(input: MetadataCacheHitInput<'_>) -> MetadataCach
         (response::RequestDataCheck::Validated(_), CurrentMetadata::Serialized(_)) => {
             return MetadataCacheHitDecision::RequestDataMismatch;
         }
-        (
-            response::RequestDataCheck::Validated(_) | response::RequestDataCheck::Unvalidated,
-            _,
-        ) => return MetadataCacheHitDecision::Miss,
+        (response::RequestDataCheck::Validated(_) | response::RequestDataCheck::Unvalidated, _) => {
+            return MetadataCacheHitDecision::Miss;
+        }
     }
     if input.unavailable && !input.page_data_props_present {
         MetadataCacheHitDecision::Miss
