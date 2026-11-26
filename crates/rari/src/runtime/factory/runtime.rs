@@ -694,7 +694,8 @@ async fn handle_js_request(
             clear_page_cache_tags(js_runtime);
             reset_use_cache_dynamic_context(js_runtime);
             sync_action_form_state_for_context(js_runtime, &request_context);
-            let mut op_state = js_runtime.op_state().borrow_mut();
+            let op_state = js_runtime.op_state();
+            let mut op_state = op_state.borrow_mut();
             op_state.put(access_scope);
             op_state.put(request_context);
             let _ = result_tx.send(Ok(()));
@@ -711,7 +712,8 @@ async fn handle_js_request(
             };
 
             if should_clear {
-                let mut op_state = js_runtime.op_state().borrow_mut();
+                let op_state = js_runtime.op_state();
+                let mut op_state = op_state.borrow_mut();
                 op_state.try_take::<Arc<RequestContext>>();
                 op_state.try_take::<RequestDataAccessScope>();
                 drop(op_state);
