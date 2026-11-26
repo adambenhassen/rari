@@ -208,11 +208,33 @@ pub struct RequestContext {
 }
 
 struct ResponseCacheState {
-    reads_enabled: bool,
-    writes_enabled: bool,
+    access: ResponseCacheAccess,
     get_data_active: bool,
     unavailable_after: Option<u64>,
     has_dynamic_metadata: bool,
+}
+
+#[derive(Clone, Copy)]
+enum ResponseCacheAccess {
+    ReadWrite,
+    ReadOnly,
+    Disabled,
+}
+
+impl ResponseCacheAccess {
+    fn disable_writes(&mut self) {
+        if matches!(*self, Self::ReadWrite) {
+            *self = Self::ReadOnly;
+        }
+    }
+
+    fn reads_enabled(self) -> bool {
+        !matches!(self, Self::Disabled)
+    }
+
+    fn writes_enabled(self) -> bool {
+        matches!(self, Self::ReadWrite)
+    }
 }
 
 pub(crate) struct GetDataScope {
@@ -234,8 +256,7 @@ impl RequestContext {
             start_time: Instant::now(),
             route_path,
             response_cache_state: Mutex::new(ResponseCacheState {
-                reads_enabled: true,
-                writes_enabled: true,
+                access: ResponseCacheAccess::ReadWrite,
                 get_data_active: false,
                 unavailable_after: None,
                 has_dynamic_metadata: true,
@@ -318,13 +339,11 @@ impl RequestContext {
     }
 
     pub fn disable_cache_writes(&self) {
-        self.response_cache_state.lock().writes_enabled = false;
+        self.response_cache_state.lock().access.disable_writes();
     }
 
     pub fn disable_cache_reads_and_writes(&self) {
-        let mut state = self.response_cache_state.lock();
-        state.reads_enabled = false;
-        state.writes_enabled = false;
+        self.response_cache_state.lock().access = ResponseCacheAccess::Disabled;
     }
 
     pub(crate) fn enter_get_data_scope(self: &Arc<Self>) -> GetDataScope {
@@ -335,23 +354,22 @@ impl RequestContext {
     pub(crate) fn mark_request_data_access(&self) {
         let mut state = self.response_cache_state.lock();
         if state.get_data_active {
-            state.reads_enabled = false;
-            state.writes_enabled = false;
+            state.access = ResponseCacheAccess::Disabled;
         }
     }
 
     pub fn must_send_no_store(&self) -> bool {
         let state = self.response_cache_state.lock();
-        !state.writes_enabled || state.unavailable_after.is_some()
+        !state.access.writes_enabled() || state.unavailable_after.is_some()
     }
 
     pub fn response_cache_allowed(&self) -> bool {
         let state = self.response_cache_state.lock();
-        state.writes_enabled && state.unavailable_after.is_none()
+        state.access.writes_enabled() && state.unavailable_after.is_none()
     }
 
     pub fn response_cache_reads_allowed(&self) -> bool {
-        self.response_cache_state.lock().reads_enabled
+        self.response_cache_state.lock().access.reads_enabled()
     }
 
     pub(crate) fn set_has_dynamic_metadata(&self, has_dynamic_metadata: bool) {
