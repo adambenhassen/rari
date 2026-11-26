@@ -22,6 +22,10 @@ use crate::server::{
 
 #[derive(Clone)]
 #[non_exhaustive]
+#[expect(
+    clippy::struct_excessive_bools,
+    reason = "Each flag records an independent property of the cached response"
+)]
 pub struct PrebuiltResponse {
     pub identity: Bytes,
     pub gzip: Option<Bytes>,
