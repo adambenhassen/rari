@@ -7,9 +7,7 @@ export async function getData({ params }: Readonly<PageProps>) {
   return { props: { unavailable: !response.ok, slug: String(params.slug) } }
 }
 
-export async function generateMetadata({
-  unavailable,
-}: Readonly<{ unavailable?: boolean }>): Promise<Metadata> {
+export function generateMetadata({ unavailable }: Readonly<{ unavailable?: boolean }>): Metadata {
   if (unavailable) throw new Error('metadata generation failed without an outage marker')
   return { title: 'Metadata failure fixture' }
 }
