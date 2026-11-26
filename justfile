@@ -41,7 +41,7 @@ build-snapshot:
     if [ ! -s "$SNAPSHOT" ]; then
         NEEDS_REBUILD=true
     else
-        STALE_SOURCES=$(find Cargo.toml crates/rari/Cargo.toml crates/rari/src/runtime/ext -newer "$SNAPSHOT" \( -name "*.toml" -o -name "*.js" -o -name "*.ts" \) 2>/dev/null | head -1)
+        STALE_SOURCES=$(find Cargo.toml crates/rari/Cargo.toml crates/rari/src/runtime/ext tools/snapshot/src -newer "$SNAPSHOT" \( -name "*.toml" -o -name "*.js" -o -name "*.ts" -o -name "*.rs" \) 2>/dev/null | head -1)
         if [ -n "$STALE_SOURCES" ]; then
             NEEDS_REBUILD=true
         fi

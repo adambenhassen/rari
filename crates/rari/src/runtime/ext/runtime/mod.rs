@@ -35,7 +35,7 @@ use super::{
     ExtensionOptions, ExtensionTrait, lazy, node::resolvers::Resolver,
     web::PermissionsContainer as WebPermissionsContainer,
 };
-use crate::runtime::module_loader::RariModuleLoader;
+use crate::runtime::{factory::lock_v8_runtime_init, module_loader::RariModuleLoader};
 
 type WorkerHostOptions = (Arc<CreateWebWorkerCb>, Option<Arc<FormatJsErrorFn>>);
 
@@ -355,6 +355,7 @@ fn create_web_worker_callback(options: WebWorkerCallbackOptions) -> Arc<CreateWe
             residual_lazy_js_sources: &[],
             residual_lazy_esm_sources: &[],
         };
+        let _init_guard = lock_v8_runtime_init();
         WebWorker::bootstrap_from_options(services, options)
     })
 }

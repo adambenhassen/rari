@@ -15,6 +15,18 @@ function jobBlock(name) {
   return nextJob === -1 ? remainder : remainder.slice(0, nextJob)
 }
 
+function stepBlock(jobName, stepName) {
+  const job = jobBlock(jobName)
+  const marker = `      - name: ${stepName}\n`
+  const start = job.indexOf(marker)
+  assert.notEqual(start, -1, `Missing ${stepName} step in ${jobName} job`)
+  const bodyStart = start + marker.length
+  const remainder = job.slice(bodyStart)
+  const nextStep = remainder.search(/^      - name:/m)
+  return nextStep === -1 ? remainder : remainder.slice(0, nextStep)
+}
+
+const artifactUploadStep = stepBlock('build', 'Upload Linux assets for the trusted publisher')
 const cleanupValidationJob = jobBlock('validate-cleanup-ref')
 const deleteJob = jobBlock('delete-test-release')
 const buildJob = jobBlock('build')
@@ -32,6 +44,15 @@ const validationScript = validationRun[1]
   .split(/\r?\n/)
   .map(line => line.replace(/^ {10}/, ''))
   .join('\n')
+
+test('Linux build artifacts retain enough time for the publisher handoff', () => {
+  const retentionDays = artifactUploadStep.match(/^\s+retention-days:\s*(\d+)\s*$/m)
+  assert.ok(retentionDays, 'Linux build artifact upload must set retention-days explicitly')
+  assert.ok(
+    Number(retentionDays[1]) >= 2,
+    `Linux build artifacts need at least two retention days, got ${retentionDays[1]}`,
+  )
+})
 
 test('combined cleanup and diagnostic inputs fail validation and skip deletion', () => {
   assert.match(validationScript, /DIAGNOSE_SNAPSHOT_PROFILES.*== "true"/)

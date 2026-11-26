@@ -328,7 +328,7 @@ jobs:
             dist-tarballs/
             release-assets/
           if-no-files-found: error
-          retention-days: 1
+          retention-days: 2
 
   check-snapshot-profile-diagnostic:
     if: ${{ (inputs.diagnose_snapshot_profiles == true || inputs.diagnose_snapshot_profiles == 'true') && inputs.delete_test_release != true && inputs.delete_test_release != 'true' }}

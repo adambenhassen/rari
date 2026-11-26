@@ -25,3 +25,12 @@ test('uses hash-addressed APT indexes with retries before package installation',
     'APT configuration must precede Playwright dependencies',
   )
 })
+
+test('jemalloc E2E server build runs with one Cargo job', () => {
+  const buildStep = workflow.match(
+    /      - name: Build jemalloc E2E server\n([\s\S]*?)(?=      - name:|\s*$)/,
+  )
+
+  assert.ok(buildStep, 'Missing jemalloc E2E server build step')
+  assert.match(buildStep[1], /        env:\n          CARGO_BUILD_JOBS: '1'\n/)
+})

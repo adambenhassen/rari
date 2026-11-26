@@ -21,6 +21,8 @@ jobs:
     env:
       NODE_OPTIONS: --max-old-space-size=6144
       PNPM_CONFIG_WORKSPACE_CONCURRENCY: 1
+      CARGO_BUILD_JOBS: 2
+      CARGO_INCREMENTAL: 0
       RUSTUP_TOOLCHAIN: nightly-2026-11-22
     steps:
       - name: Checkout
@@ -42,7 +44,7 @@ jobs:
       - name: Test fork build dispatch guards
         run: node --test .github/scripts/fork-build-workflow.test.mjs
 
-      - name: Test APT mirror handling
+      - name: Test fork PR check workflow guards
         run: node --test .github/scripts/fork-pr-check-workflow.test.mjs
 
       - name: Install JavaScript dependencies
@@ -122,7 +124,7 @@ jobs:
         run: cargo clippy -p rari --all-targets --all-features -- -D warnings
 
       - name: Test Rust
-        run: cargo test -p rari --all-features -- --test-threads=1
+        run: cargo test -p rari --all-features
 
       - name: Detect jemalloc feature
         id: jemalloc
@@ -141,6 +143,8 @@ jobs:
           set -euo pipefail
           cargo build -p rari --bin rari --features ext-full,jemalloc
           install -D target/debug/rari packages/rari-linux-x64/bin/rari
+        env:
+          CARGO_BUILD_JOBS: '1'
 
       - name: Free build space before installing Playwright
         if: steps.jemalloc.outputs.enabled == 'true'
