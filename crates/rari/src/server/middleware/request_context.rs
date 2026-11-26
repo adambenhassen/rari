@@ -722,7 +722,12 @@ mod tests {
             let _get_data_scope = ctx.enter_get_data_scope();
         }
 
-        ctx.mark_request_data_access();
+        {
+            let _metadata_scope = ctx.enter_metadata_scope();
+            ctx.mark_request_data_access();
+        }
+
+        assert!(ctx.metadata_uses_request_data());
         assert!(ctx.response_cache_reads_allowed());
         assert!(ctx.response_cache_allowed());
         assert!(!ctx.must_send_no_store());
