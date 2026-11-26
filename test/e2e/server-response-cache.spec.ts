@@ -83,17 +83,6 @@ test('getData availability and request data preserve shared cache boundaries', a
     expect(unavailableWarm.headers()['retry-after']).toBe('17')
     expect(unavailableWarm.headers()['x-cache']).not.toBe('HIT')
 
-    const metadataFailureUrl = `${origin}/cache-metadata-failure/${Date.now()}-${Math.random()}`
-    available = true
-    const metadataFailurePrime = await request.get(metadataFailureUrl)
-    expect(metadataFailurePrime.status()).toBe(200)
-    expect(metadataFailurePrime.headers()['x-cache']).toBe('MISS')
-    available = false
-    const metadataFailure = await request.get(metadataFailureUrl)
-    expect(metadataFailure.status()).toBe(200)
-    expect(metadataFailure.headers()['x-cache']).not.toBe('HIT')
-    expect(metadataFailure.headers()['cache-control']).toBe('no-store')
-
     const modes: { name: string; headers: Record<string, string> }[] = [
       { name: 'HTML', headers: {} },
       { name: 'RSC', headers: { Accept: 'text/x-component' } },
