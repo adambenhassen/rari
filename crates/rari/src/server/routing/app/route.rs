@@ -68,7 +68,7 @@ async fn metadata_allows_cache_hit(
     cached_metadata: &response::CacheMetadata,
     collected: &mut bool,
 ) -> bool {
-    if !cached_metadata.metadata_uses_request_data {
+    if !cached_metadata.has_dynamic_metadata {
         return true;
     }
     if !*collected {
@@ -77,17 +77,16 @@ async fn metadata_allows_cache_hit(
                 .await;
         *collected = true;
     }
-    if let Some(metadata) = context.metadata.as_ref()
-        && !serde_json::to_value(metadata).is_ok_and(|generated_metadata| {
+    if cached_metadata.metadata_uses_request_data {
+        let Some(metadata) = context.metadata.as_ref() else {
+            return false;
+        };
+        if !serde_json::to_value(metadata).is_ok_and(|generated_metadata| {
             cached_metadata.generated_metadata.as_ref() == Some(&generated_metadata)
-        })
-    {
-        request_context.disable_cache_writes();
-        return false;
-    }
-    // A failed metadata collection cannot validate a request-specific cache entry.
-    if context.metadata.is_none() {
-        return false;
+        }) {
+            request_context.disable_cache_writes();
+            return false;
+        }
     }
     let unavailable = request_context.response_unavailable_after().is_some();
     !unavailable || context.page_data_props.is_some()
