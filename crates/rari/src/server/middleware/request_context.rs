@@ -334,7 +334,7 @@ impl RequestContext {
         self.response_cache_state.lock().unavailable_after
     }
 
-    pub fn clear_response_unavailable(&self) {
+    pub(crate) fn clear_response_unavailable(&self) {
         self.response_cache_state.lock().unavailable_after = None;
     }
 

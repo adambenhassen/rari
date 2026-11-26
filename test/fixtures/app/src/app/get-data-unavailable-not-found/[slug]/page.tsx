@@ -6,6 +6,10 @@ export function getData({ params }: Readonly<PageProps>) {
   const slug = String(params.slug)
   const calls = callsBySlug.get(slug) ?? 0
   callsBySlug.set(slug, calls + 1)
+  if (slug.startsWith('uncached-') && calls === 0) {
+    globalThis.markResponseUnavailable(17)
+    return { notFound: true }
+  }
   if (calls > 0) {
     globalThis.markResponseUnavailable(17)
     return { notFound: true }

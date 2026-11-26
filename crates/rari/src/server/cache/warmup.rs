@@ -273,6 +273,8 @@ async fn warm_route(
     context.metadata =
         collect_page_metadata(state, &route_match, &context, Some(Arc::clone(&request_context)))
             .await;
+    let request_data_check =
+        response::request_data_check(&request_context, context.metadata.as_ref());
 
     if request_context.response_unavailable_after().is_some() {
         tracing::debug!("Skipping cache warmup for {path}: response marked unavailable");
@@ -335,7 +337,7 @@ async fn warm_route(
             is_not_found: false,
             has_page_data,
             has_dynamic_metadata: request_context.has_dynamic_metadata(),
-            metadata_uses_request_data: request_context.metadata_uses_request_data(),
+            request_data_check: request_data_check.clone(),
             tags: merged_tags.clone(),
             cached_at: Instant::now(),
             route: None,
@@ -355,11 +357,7 @@ async fn warm_route(
                     tags: merged_tags,
                     has_page_data,
                     has_dynamic_metadata: request_context.has_dynamic_metadata(),
-                    generated_metadata: context
-                        .metadata
-                        .as_ref()
-                        .and_then(|metadata| serde_json::to_value(metadata).ok()),
-                    metadata_uses_request_data: request_context.metadata_uses_request_data(),
+                    request_data_check: request_data_check.clone(),
                 },
                 compressed_zstd,
                 compressed_br,
@@ -407,11 +405,7 @@ async fn warm_route(
                         tags: merged_tags,
                         has_page_data,
                         has_dynamic_metadata: request_context.has_dynamic_metadata(),
-                        generated_metadata: context
-                            .metadata
-                            .as_ref()
-                            .and_then(|metadata| serde_json::to_value(metadata).ok()),
-                        metadata_uses_request_data: request_context.metadata_uses_request_data(),
+                        request_data_check: request_data_check.clone(),
                     },
                     compressed_zstd: None,
                     compressed_br: None,
@@ -578,8 +572,8 @@ mod tests {
                     async_trait,
                 },
                 response::{
-                    CacheConfig, CacheMetadata, CachedResponse, PrebuiltResponse, ResponseCache,
-                    StaticFastCache, insert_static_fast_cache,
+                    CacheConfig, CacheMetadata, CachedResponse, PrebuiltResponse, RequestDataCheck,
+                    ResponseCache, StaticFastCache, insert_static_fast_cache,
                 },
             },
             config::{Config, Mode},
@@ -648,8 +642,7 @@ mod tests {
                 tags: Vec::new(),
                 has_page_data: true,
                 has_dynamic_metadata: true,
-                generated_metadata: None,
-                metadata_uses_request_data: false,
+                request_data_check: RequestDataCheck::NotRequired,
             },
             compressed_zstd: None,
             compressed_br: None,
@@ -669,7 +662,7 @@ mod tests {
             is_not_found: false,
             has_page_data: false,
             has_dynamic_metadata: false,
-            metadata_uses_request_data: false,
+            request_data_check: RequestDataCheck::NotRequired,
             tags: Vec::new(),
             cached_at: Instant::now(),
             route: None,

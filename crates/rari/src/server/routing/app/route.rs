@@ -77,16 +77,32 @@ async fn metadata_allows_cache_hit(
                 .await;
         *collected = true;
     }
-    if cached_metadata.metadata_uses_request_data {
-        let Some(metadata) = context.metadata.as_ref() else {
-            return false;
-        };
-        if !serde_json::to_value(metadata).is_ok_and(|generated_metadata| {
-            cached_metadata.generated_metadata.as_ref() == Some(&generated_metadata)
-        }) {
-            request_context.disable_cache_writes();
-            return false;
+    if context.metadata.is_none() && request_context.response_unavailable_after().is_none() {
+        return false;
+    }
+    match &cached_metadata.request_data_check {
+        response::RequestDataCheck::NotRequired => {}
+        response::RequestDataCheck::Validated(expected_metadata) => {
+            let Some(metadata) = context.metadata.as_ref() else {
+                return false;
+            };
+            match serde_json::to_value(metadata) {
+                Ok(metadata) if &metadata == expected_metadata => {}
+                Ok(_) => {
+                    request_context.disable_cache_writes();
+                    return false;
+                }
+                Err(error) => {
+                    request_context.disable_cache_writes();
+                    tracing::warn!(
+                        %error,
+                        "Failed to serialize request-specific metadata while validating response cache hit"
+                    );
+                    return false;
+                }
+            }
         }
+        response::RequestDataCheck::Unvalidated => return false,
     }
     let unavailable = request_context.response_unavailable_after().is_some();
     !unavailable || context.page_data_props.is_some()
@@ -233,7 +249,7 @@ pub async fn handle_app_route(
             response::ResponseCache::generate_static_fast_cache_key(path, query_params_ref, None);
 
         if let Some(prebuilt) = state.static_fast_cache.get(&fast_key) {
-            if !prebuilt.has_page_data && !prebuilt.metadata_uses_request_data {
+            if prebuilt.can_use_fast_cache() {
                 return Ok(fast_cache_response(&prebuilt, &headers, accept_encoding));
             }
             deferred_fast_key = Some(fast_key);
@@ -345,7 +361,20 @@ pub async fn handle_app_route(
                     );
                 }
                 PageData::NotFound => {
-                    request_context.clear_response_unavailable();
+                    let has_response_cache_entry = if candidate.is_some() {
+                        candidate.as_ref().is_some_and(Option::is_some)
+                    } else if let Some(key) = lookup_key.as_deref() {
+                        state.response_cache.candidate(key).await.is_some()
+                    } else {
+                        false
+                    };
+                    let has_cached_entry = has_response_cache_entry
+                        || deferred_fast_key
+                            .as_deref()
+                            .is_some_and(|key| state.static_fast_cache.get(key).is_some());
+                    if has_cached_entry {
+                        request_context.clear_response_unavailable();
+                    }
                     request_context.disable_cache_writes();
                     if let Some(not_found_entry) = resolve_not_found_entry(app_router, &route_match)
                     {
@@ -376,7 +405,7 @@ pub async fn handle_app_route(
     if route_match.not_found.is_none()
         && request_context.response_unavailable_after().is_none()
         && request_context.response_cache_reads_allowed()
-        && let Some(fast_key) = deferred_fast_key
+        && let Some(fast_key) = deferred_fast_key.as_deref()
         && let Some(prebuilt) = state.static_fast_cache.get(&fast_key)
         && !prebuilt.has_dynamic_metadata
         && request_context.response_cache_reads_allowed()
@@ -571,6 +600,8 @@ pub async fn handle_app_route(
                 let cache_policy =
                     response::RouteCachePolicy::from_cache_control(cache_control, path);
 
+                let request_data_check =
+                    response::request_data_check(&request_context, context.metadata.as_ref());
                 let can_cache_rsc = !router_state_sensitive
                     && route_match.not_found.is_none()
                     && request_context.response_cache_allowed()
@@ -591,12 +622,7 @@ pub async fn handle_app_route(
                             tags: response_cache_tags,
                             has_page_data,
                             has_dynamic_metadata: request_context.has_dynamic_metadata(),
-                            generated_metadata: context
-                                .metadata
-                                .as_ref()
-                                .and_then(|metadata| serde_json::to_value(metadata).ok()),
-                            metadata_uses_request_data: request_context
-                                .metadata_uses_request_data(),
+                            request_data_check,
                         },
                         compressed_zstd: None,
                         compressed_br: None,
@@ -784,10 +810,11 @@ pub async fn handle_app_route(
                     Some(metadata_rx),
                 ))
                 .await;
-                let _metadata = metadata_task.await.map_err(|error| {
+                let metadata = metadata_task.await.map_err(|error| {
                     tracing::error!("Streaming metadata task failed: {error}");
                     StatusCode::INTERNAL_SERVER_ERROR
                 })?;
+                context.metadata = metadata;
                 let mut response = response_result?;
                 if let Some(retry_after) = request_context.response_unavailable_after() {
                     *response.status_mut() = StatusCode::SERVICE_UNAVAILABLE;
@@ -826,6 +853,8 @@ pub async fn handle_app_route(
                         policy
                     };
 
+                    let request_data_check =
+                        response::request_data_check(&request_context, context.metadata.as_ref());
                     if request_context.response_cache_allowed()
                         && should_store_response_cache(&state, &cache_policy).await
                     {
@@ -896,12 +925,7 @@ pub async fn handle_app_route(
                                 tags: merged_tags,
                                 has_page_data,
                                 has_dynamic_metadata: request_context.has_dynamic_metadata(),
-                                generated_metadata: context
-                                    .metadata
-                                    .as_ref()
-                                    .and_then(|metadata| serde_json::to_value(metadata).ok()),
-                                metadata_uses_request_data: request_context
-                                    .metadata_uses_request_data(),
+                                request_data_check,
                             },
                             compressed_zstd,
                             compressed_br,
@@ -1130,6 +1154,8 @@ pub async fn handle_app_route(
                 let (compressed_gzip, compressed_zstd, compressed_br) =
                     compress_all_encodings(body_bytes.clone()).await;
 
+                let request_data_check =
+                    response::request_data_check(&request_context, context.metadata.as_ref());
                 if can_use_static_fast_cache(cookie_header)
                     && request_context.response_cache_allowed()
                 {
@@ -1152,8 +1178,7 @@ pub async fn handle_app_route(
                             is_not_found: route_match.not_found.is_some(),
                             has_page_data,
                             has_dynamic_metadata: request_context.has_dynamic_metadata(),
-                            metadata_uses_request_data: request_context
-                                .metadata_uses_request_data(),
+                            request_data_check: request_data_check.clone(),
                             tags: response_cache_tags.clone(),
                             cached_at: Instant::now(),
                             route: None,
@@ -1172,11 +1197,7 @@ pub async fn handle_app_route(
                         tags: response_cache_tags,
                         has_page_data,
                         has_dynamic_metadata: request_context.has_dynamic_metadata(),
-                        generated_metadata: context
-                            .metadata
-                            .as_ref()
-                            .and_then(|metadata| serde_json::to_value(metadata).ok()),
-                        metadata_uses_request_data: request_context.metadata_uses_request_data(),
+                        request_data_check,
                     },
                     compressed_zstd,
                     compressed_br,

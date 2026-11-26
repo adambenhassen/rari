@@ -83,6 +83,17 @@ test('getData availability and request data preserve shared cache boundaries', a
     expect(unavailableWarm.headers()['retry-after']).toBe('17')
     expect(unavailableWarm.headers()['x-cache']).not.toBe('HIT')
 
+    const metadataFailureUrl = `${origin}/cache-metadata-failure/${Date.now()}-${Math.random()}`
+    available = true
+    const metadataFailurePrime = await request.get(metadataFailureUrl)
+    expect(metadataFailurePrime.status()).toBe(200)
+    expect(metadataFailurePrime.headers()['x-cache']).toBe('MISS')
+    available = false
+    const metadataFailure = await request.get(metadataFailureUrl)
+    expect(metadataFailure.status()).toBe(200)
+    expect(metadataFailure.headers()['x-cache']).not.toBe('HIT')
+    expect(metadataFailure.headers()['cache-control']).toBe('no-store')
+
     const modes: { name: string; headers: Record<string, string> }[] = [
       { name: 'HTML', headers: {} },
       { name: 'RSC', headers: { Accept: 'text/x-component' } },
@@ -124,6 +135,13 @@ test('getData availability and request data preserve shared cache boundaries', a
     expect.soft(unavailableNotFound.headers()['retry-after']).toBeUndefined()
     expect.soft(unavailableNotFound.headers()['x-cache']).not.toBe('HIT')
     expect.soft(await unavailableNotFound.text()).toContain('data-testid="not-found-page"')
+
+    const uncachedNotFoundUrl = `${origin}/get-data-unavailable-not-found/uncached-${Date.now()}-${Math.random()}`
+    const uncachedUnavailableNotFound = await request.get(uncachedNotFoundUrl)
+    expect(uncachedUnavailableNotFound.status()).toBe(503)
+    expect(uncachedUnavailableNotFound.headers()['cache-control']).toBe('no-store')
+    expect(uncachedUnavailableNotFound.headers()['retry-after']).toBe('17')
+    expect(uncachedUnavailableNotFound.headers()['x-cache']).not.toBe('HIT')
   } finally {
     child.kill('SIGTERM')
     await exited

@@ -22,10 +22,6 @@ use crate::server::{
 
 #[derive(Clone)]
 #[non_exhaustive]
-#[expect(
-    clippy::struct_excessive_bools,
-    reason = "Each flag records an independent property of the cached response"
-)]
 pub struct PrebuiltResponse {
     pub identity: Bytes,
     pub gzip: Option<Bytes>,
@@ -39,8 +35,8 @@ pub struct PrebuiltResponse {
     pub has_page_data: bool,
     /// A page or layout exports generateMetadata.
     pub has_dynamic_metadata: bool,
-    /// Metadata generation read request-scoped data, so a hit must revalidate it.
-    pub metadata_uses_request_data: bool,
+    /// Whether a cache hit can skip request-specific metadata validation.
+    pub request_data_check: RequestDataCheck,
     pub tags: Vec<String>,
     pub cached_at: Instant,
     /// Matched route pattern, reported as `x-rari-route` on hits (guest
@@ -49,6 +45,10 @@ pub struct PrebuiltResponse {
 }
 
 impl PrebuiltResponse {
+    pub(crate) fn can_use_fast_cache(&self) -> bool {
+        !self.has_page_data && self.request_data_check == RequestDataCheck::NotRequired
+    }
+
     fn is_fresh(&self) -> bool {
         match RouteCachePolicy::max_age_from_cache_control(&self.cache_control) {
             Some(secs) => self.cached_at.elapsed() < Duration::from_secs(secs),
@@ -75,7 +75,19 @@ impl PrebuiltResponse {
     }
 }
 
-#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
+#[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
+#[serde(tag = "state", content = "metadata", rename_all = "snake_case")]
+#[non_exhaustive]
+pub enum RequestDataCheck {
+    /// Metadata does not depend on request-scoped data.
+    NotRequired,
+    /// Metadata used request-scoped data and must match on cache hits.
+    Validated(serde_json::Value),
+    /// Request-specific metadata could not be captured or validated safely.
+    Unvalidated,
+}
+
+#[derive(Clone, Debug, serde::Serialize)]
 #[non_exhaustive]
 pub struct CacheMetadata {
     #[serde(with = "instant_serde")]
@@ -87,12 +99,81 @@ pub struct CacheMetadata {
     pub has_page_data: bool,
     #[serde(default = "default_true")]
     pub has_dynamic_metadata: bool,
-    /// Final generated metadata used to validate request-specific cache hits.
-    #[serde(default)]
-    pub generated_metadata: Option<serde_json::Value>,
-    /// Whether metadata generation used request-scoped data. Legacy entries are checked.
+    /// Request-specific metadata validation state for this cached response.
+    pub request_data_check: RequestDataCheck,
+}
+
+#[derive(serde::Deserialize)]
+struct CacheMetadataWire {
+    #[serde(with = "instant_serde")]
+    cached_at: Instant,
+    ttl: u64,
+    etag: Option<String>,
+    tags: Vec<String>,
     #[serde(default = "default_true")]
-    pub metadata_uses_request_data: bool,
+    has_page_data: bool,
+    #[serde(default = "default_true")]
+    has_dynamic_metadata: bool,
+    #[serde(default)]
+    request_data_check: Option<RequestDataCheck>,
+    #[serde(default)]
+    generated_metadata: Option<serde_json::Value>,
+    #[serde(default = "default_true")]
+    metadata_uses_request_data: bool,
+}
+
+impl<'de> serde::Deserialize<'de> for CacheMetadata {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        let wire = <CacheMetadataWire as serde::Deserialize>::deserialize(deserializer)?;
+        let request_data_check = wire.request_data_check.unwrap_or_else(|| {
+            if !wire.metadata_uses_request_data {
+                RequestDataCheck::NotRequired
+            } else if let Some(metadata) = wire.generated_metadata {
+                RequestDataCheck::Validated(metadata)
+            } else {
+                RequestDataCheck::Unvalidated
+            }
+        });
+        Ok(Self {
+            cached_at: wire.cached_at,
+            ttl: wire.ttl,
+            etag: wire.etag,
+            tags: wire.tags,
+            has_page_data: wire.has_page_data,
+            has_dynamic_metadata: wire.has_dynamic_metadata,
+            request_data_check,
+        })
+    }
+}
+
+pub(crate) fn request_data_check<T: serde::Serialize>(
+    request_context: &RequestContext,
+    metadata: Option<&T>,
+) -> RequestDataCheck {
+    if !request_context.metadata_uses_request_data() {
+        return RequestDataCheck::NotRequired;
+    }
+
+    let Some(metadata) = metadata else {
+        request_context.disable_cache_writes();
+        tracing::warn!("Request-specific metadata is unavailable; disabling response cache writes");
+        return RequestDataCheck::Unvalidated;
+    };
+
+    match serde_json::to_value(metadata) {
+        Ok(metadata) => RequestDataCheck::Validated(metadata),
+        Err(error) => {
+            request_context.disable_cache_writes();
+            tracing::warn!(
+                %error,
+                "Failed to serialize request-specific metadata; disabling response cache writes"
+            );
+            RequestDataCheck::Unvalidated
+        }
+    }
 }
 
 const fn default_true() -> bool {
@@ -948,8 +1029,7 @@ mod tests {
                 tags: vec!["test-tag".to_string()],
                 has_page_data: true,
                 has_dynamic_metadata: true,
-                generated_metadata: None,
-                metadata_uses_request_data: true,
+                request_data_check: RequestDataCheck::Unvalidated,
             },
             compressed_zstd: None,
             compressed_br: None,
@@ -1055,13 +1135,44 @@ mod tests {
         let metadata = value["metadata"].as_object_mut().unwrap();
         metadata.remove("has_page_data");
         metadata.remove("has_dynamic_metadata");
-        metadata.remove("generated_metadata");
-        metadata.remove("metadata_uses_request_data");
+        metadata.remove("request_data_check");
         let cached: CachedResponse = serde_json::from_value(value).unwrap();
         assert!(cached.metadata.has_page_data);
         assert!(cached.metadata.has_dynamic_metadata);
-        assert!(cached.metadata.generated_metadata.is_none());
-        assert!(cached.metadata.metadata_uses_request_data);
+        assert_eq!(cached.metadata.request_data_check, RequestDataCheck::Unvalidated);
+    }
+
+    #[test]
+    fn legacy_request_data_metadata_is_mapped_to_explicit_check_state() {
+        let mut value = serde_json::to_value(create_test_response("old", 60)).unwrap();
+        let metadata = value["metadata"].as_object_mut().unwrap();
+        metadata.remove("request_data_check");
+        metadata.insert("metadata_uses_request_data".to_string(), false.into());
+        let cached: CachedResponse = serde_json::from_value(value.clone()).unwrap();
+        assert_eq!(cached.metadata.request_data_check, RequestDataCheck::NotRequired);
+
+        let metadata = value["metadata"].as_object_mut().unwrap();
+        metadata.insert("metadata_uses_request_data".to_string(), true.into());
+        metadata
+            .insert("generated_metadata".to_string(), serde_json::json!({"title": "Legacy title"}));
+        let cached: CachedResponse = serde_json::from_value(value).unwrap();
+        assert_eq!(
+            cached.metadata.request_data_check,
+            RequestDataCheck::Validated(serde_json::json!({"title": "Legacy title"}))
+        );
+    }
+
+    #[test]
+    fn request_metadata_serialization_failure_disables_cache_writes() {
+        let request_context = RequestContext::new("/test".to_string());
+        request_context.mark_request_data_access(
+            crate::server::middleware::request_context::RequestDataAccessScope::Metadata,
+        );
+
+        let request_data_check = request_data_check(&request_context, Some(&f64::NAN));
+
+        assert_eq!(request_data_check, RequestDataCheck::Unvalidated);
+        assert!(!request_context.response_cache_allowed());
     }
 
     #[test]
@@ -1568,8 +1679,9 @@ mod tests {
                 tags: vec!["alpha".to_string(), "beta".to_string()],
                 has_page_data: true,
                 has_dynamic_metadata: true,
-                generated_metadata: Some(serde_json::json!({"title": "Cached title"})),
-                metadata_uses_request_data: true,
+                request_data_check: RequestDataCheck::Validated(serde_json::json!({
+                    "title": "Cached title"
+                })),
             },
             compressed_zstd: Some(Bytes::from_static(b"zstd-bytes")),
             compressed_br: Some(Bytes::from_static(b"br-bytes")),
@@ -1584,7 +1696,7 @@ mod tests {
         assert_eq!(got.metadata.etag, original.metadata.etag);
         assert_eq!(got.metadata.ttl, original.metadata.ttl);
         assert_eq!(got.metadata.tags, original.metadata.tags);
-        assert_eq!(got.metadata.generated_metadata, original.metadata.generated_metadata);
+        assert_eq!(got.metadata.request_data_check, original.metadata.request_data_check);
         assert_eq!(got.compressed_zstd, original.compressed_zstd);
         assert_eq!(got.compressed_br, original.compressed_br);
         assert_eq!(got.compressed_gzip, original.compressed_gzip);
@@ -1648,7 +1760,7 @@ mod tests {
                 is_not_found: false,
                 has_page_data: false,
                 has_dynamic_metadata: false,
-                metadata_uses_request_data: false,
+                request_data_check: RequestDataCheck::NotRequired,
                 tags: Vec::new(),
                 cached_at: Instant::now(),
                 route: None,
@@ -1678,6 +1790,37 @@ mod tests {
     }
 
     #[test]
+    fn prebuilt_fast_cache_requires_no_page_data_or_request_metadata() {
+        let make_prebuilt = |has_page_data, request_data_check| PrebuiltResponse {
+            identity: Bytes::new(),
+            gzip: None,
+            br: None,
+            zstd: None,
+            etag: String::new(),
+            content_type: String::new(),
+            cache_control: String::new(),
+            is_not_found: false,
+            has_page_data,
+            has_dynamic_metadata: false,
+            request_data_check,
+            tags: Vec::new(),
+            cached_at: Instant::now(),
+            route: None,
+        };
+
+        assert!(make_prebuilt(false, RequestDataCheck::NotRequired).can_use_fast_cache());
+        assert!(!make_prebuilt(false, RequestDataCheck::Unvalidated).can_use_fast_cache());
+        assert!(
+            !make_prebuilt(
+                false,
+                RequestDataCheck::Validated(serde_json::json!({"title": "Session title"}))
+            )
+            .can_use_fast_cache()
+        );
+        assert!(!make_prebuilt(true, RequestDataCheck::NotRequired).can_use_fast_cache());
+    }
+
+    #[test]
     fn fast_cache_invalidation_does_not_scan_unrelated_entries() {
         let cache = Arc::new(StaticFastCache::new());
         for index in 0..2048 {
@@ -1696,7 +1839,7 @@ mod tests {
                     is_not_found: false,
                     has_page_data: false,
                     has_dynamic_metadata: false,
-                    metadata_uses_request_data: false,
+                    request_data_check: RequestDataCheck::NotRequired,
                     tags: vec![format!("tag-{index}")],
                     cached_at: Instant::now(),
                     route: None,
@@ -1752,7 +1895,7 @@ mod tests {
                 is_not_found: false,
                 has_page_data: false,
                 has_dynamic_metadata: false,
-                metadata_uses_request_data: false,
+                request_data_check: RequestDataCheck::NotRequired,
                 tags: vec![tag.to_string()],
                 cached_at,
                 route: None,
@@ -1806,7 +1949,7 @@ mod tests {
                 is_not_found: false,
                 has_page_data: false,
                 has_dynamic_metadata: false,
-                metadata_uses_request_data: false,
+                request_data_check: RequestDataCheck::NotRequired,
                 tags: Vec::new(),
                 cached_at: Instant::now(),
                 route: None,
@@ -1848,7 +1991,7 @@ mod tests {
                 is_not_found: false,
                 has_page_data: false,
                 has_dynamic_metadata: false,
-                metadata_uses_request_data: false,
+                request_data_check: RequestDataCheck::NotRequired,
                 tags: Vec::new(),
                 cached_at: Instant::now(),
                 route: None,
@@ -1894,7 +2037,7 @@ mod tests {
                         is_not_found: false,
                         has_page_data: false,
                         has_dynamic_metadata: false,
-                        metadata_uses_request_data: false,
+                        request_data_check: RequestDataCheck::NotRequired,
                         tags: Vec::new(),
                         cached_at: Instant::now(),
                         route: None,
@@ -1931,7 +2074,7 @@ mod tests {
                 is_not_found: false,
                 has_page_data: false,
                 has_dynamic_metadata: false,
-                metadata_uses_request_data: false,
+                request_data_check: RequestDataCheck::NotRequired,
                 tags: Vec::new(),
                 cached_at,
                 route: None,
@@ -1958,7 +2101,7 @@ mod tests {
                 is_not_found: false,
                 has_page_data: false,
                 has_dynamic_metadata: false,
-                metadata_uses_request_data: false,
+                request_data_check: RequestDataCheck::NotRequired,
                 tags: Vec::new(),
                 cached_at,
                 route: None,
@@ -1984,7 +2127,7 @@ mod tests {
             is_not_found: false,
             has_page_data: false,
             has_dynamic_metadata: false,
-            metadata_uses_request_data: false,
+            request_data_check: RequestDataCheck::NotRequired,
             tags: Vec::new(),
             cached_at: stale_at,
             route: None,
@@ -2002,7 +2145,7 @@ mod tests {
             is_not_found: false,
             has_page_data: false,
             has_dynamic_metadata: false,
-            metadata_uses_request_data: false,
+            request_data_check: RequestDataCheck::NotRequired,
             tags: Vec::new(),
             cached_at: Instant::now(),
             route: None,

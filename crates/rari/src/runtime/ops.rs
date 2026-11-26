@@ -177,9 +177,18 @@ fn resolve_request_data_access_scope(
         return op_state
             .try_borrow::<RequestContextStore>()
             .and_then(|store| store.access_scope(id))
-            .unwrap_or_default();
+            .unwrap_or_else(|| {
+                tracing::debug!(
+                    request_id = id,
+                    "Request data access scope missing; using Unscoped"
+                );
+                RequestDataAccessScope::Unscoped
+            });
     }
-    op_state.try_borrow::<RequestDataAccessScope>().copied().unwrap_or_default()
+    op_state.try_borrow::<RequestDataAccessScope>().copied().unwrap_or_else(|| {
+        tracing::debug!("Request data access scope missing for unscoped runtime; using Unscoped");
+        RequestDataAccessScope::Unscoped
+    })
 }
 
 fn parse_hex_row_id(row_id: &str, context: &str) -> Result<u32, JsErrorBox> {
@@ -959,6 +968,19 @@ mod tests {
         assert!(context.metadata_uses_request_data());
         assert!(context.response_cache_reads_allowed());
         assert!(context.response_cache_allowed());
+    }
+
+    #[test]
+    fn empty_request_id_uses_runtime_request_data_scope() {
+        let context = RequestContext::new("/test".to_string());
+        let mut op_state = OpState::new(None);
+        op_state.put(RequestDataAccessScope::Render);
+
+        let scope = resolve_request_data_access_scope(&op_state, Some(""));
+
+        assert_eq!(scope, RequestDataAccessScope::Render);
+        context.mark_request_data_access(scope);
+        assert!(!context.response_cache_reads_allowed());
     }
 
     fn create_module_operation(
