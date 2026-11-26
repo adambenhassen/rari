@@ -153,7 +153,7 @@ fn get_streaming_ops() -> Vec<deno_core::OpDecl> {
 #[cfg(test)]
 mod tests {
     use std::{
-        sync::{Arc, Barrier},
+        sync::{Arc, Barrier, mpsc},
         thread,
     };
 
@@ -168,28 +168,45 @@ mod tests {
         reason = "Runtime initialization failures should fail the regression test"
     )]
     fn default_and_rari_snapshot_isolates_can_coexist() {
+        // Web workers run on their own threads with startup_snapshot: None. A deno_core runtime
+        // must be driven from the thread that created it, so the default-snapshot isolate lives on
+        // a separate thread and stays alive while the Rari snapshot is deserialized here.
+        let (created_tx, created_rx) = mpsc::channel::<()>();
+        let (step_tx, step_rx) = mpsc::channel::<()>();
+        let default_thread = thread::spawn(move || {
+            let tokio_runtime =
+                Builder::new_current_thread().enable_all().build().expect("create Tokio runtime");
+            let _tokio_guard = tokio_runtime.enter();
+            let mut default_runtime = initialize_js_runtime(RuntimeOptions::default);
+            created_tx.send(()).expect("report default runtime creation");
+
+            step_rx.recv().expect("wait for Rari runtime creation");
+            default_runtime
+                .execute_script("default_snapshot_lifetime.js", "1 + 1")
+                .expect("default-snapshot isolate should remain usable");
+
+            step_rx.recv().expect("wait for Rari runtime drop");
+            default_runtime.execute_script("default_snapshot_after_rari_drop.js", "1 + 1").expect(
+                "default-snapshot isolate should remain usable after the Rari isolate drops",
+            );
+        });
+        created_rx.recv().expect("default runtime should be created");
+
         let tokio_runtime =
             Builder::new_current_thread().enable_all().build().expect("create Tokio runtime");
         let _tokio_guard = tokio_runtime.enter();
-
-        // Web workers also use startup_snapshot: None, so this holds their default snapshot's
-        // read-only heap live while the production Rari snapshot is deserialized.
-        let mut default_runtime = initialize_js_runtime(RuntimeOptions::default);
         let (mut rari_runtime, _module_loader) =
             build_js_runtime(None).expect("build snapshot-backed JS runtime");
         assert!(!v8_runtime_init_held_by_current_thread());
 
-        default_runtime
-            .execute_script("default_snapshot_lifetime.js", "1 + 1")
-            .expect("default-snapshot isolate should remain usable");
+        step_tx.send(()).expect("default runtime thread should be waiting");
         rari_runtime
             .execute_script("rari_snapshot_lifetime.js", "1 + 1")
             .expect("Rari-snapshot isolate should remain usable beside the default snapshot");
 
         drop(rari_runtime);
-        default_runtime
-            .execute_script("default_snapshot_after_rari_drop.js", "1 + 1")
-            .expect("default-snapshot isolate should remain usable after the Rari isolate drops");
+        step_tx.send(()).expect("default runtime thread should be waiting");
+        default_thread.join().expect("default-snapshot runtime thread should succeed");
     }
 
     #[test]
