@@ -36,9 +36,7 @@ test('jemalloc E2E server build runs with one Cargo job', () => {
 })
 
 test('Rust tests link with mold', () => {
-  const testStep = workflow.match(
-    /      - name: Test Rust\n([\s\S]*?)(?=      - name:|\s*$)/,
-  )
+  const testStep = workflow.match(/      - name: Test Rust\n([\s\S]*?)(?=      - name:|\s*$)/)
 
   assert.ok(testStep, 'Missing Rust test step')
   assert.match(testStep[1], /run: cargo test -p rari --all-features/)
