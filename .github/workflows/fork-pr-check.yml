@@ -42,6 +42,9 @@ jobs:
       - name: Test fork build dispatch guards
         run: node --test .github/scripts/fork-build-workflow.test.mjs
 
+      - name: Test APT mirror handling
+        run: node --test .github/scripts/fork-pr-check-workflow.test.mjs
+
       - name: Install JavaScript dependencies
         run: pnpm install --frozen-lockfile
 
@@ -71,6 +74,14 @@ jobs:
         with:
           toolchain: nightly-2026-11-22
           components: clippy, rustfmt
+
+      - name: Configure APT index fetches
+        run: |
+          set -euo pipefail
+          printf '%s\n' \
+            'Acquire::By-Hash "force";' \
+            'Acquire::Retries "3";' \
+            | sudo tee /etc/apt/apt.conf.d/99-ci-apt >/dev/null
 
       - name: Install Rust build dependencies
         run: |
