@@ -1167,11 +1167,13 @@ mod tests {
 
     #[test]
     fn request_metadata_serialization_failure_disables_cache_writes() {
+        use serde::{Serialize, Serializer, ser::Error as _};
+
         struct Unserializable;
 
-        impl serde::Serialize for Unserializable {
-            fn serialize<S: serde::Serializer>(&self, _serializer: S) -> Result<S::Ok, S::Error> {
-                Err(<S::Error as serde::ser::Error>::custom("cannot serialize"))
+        impl Serialize for Unserializable {
+            fn serialize<S: Serializer>(&self, _serializer: S) -> Result<S::Ok, S::Error> {
+                Err(S::Error::custom("cannot serialize"))
             }
         }
 
