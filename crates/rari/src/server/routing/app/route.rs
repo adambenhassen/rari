@@ -60,6 +60,39 @@ use crate::{
     },
 };
 
+fn can_skip_metadata_validation(
+    has_dynamic_metadata: bool,
+    request_data_check: &response::RequestDataCheck,
+) -> bool {
+    !has_dynamic_metadata && request_data_check == &response::RequestDataCheck::NotRequired
+}
+
+fn metadata_allows_cached_hit(
+    has_dynamic_metadata: bool,
+    request_data_check: &response::RequestDataCheck,
+    metadata_present: bool,
+    current_request_metadata: Option<&serde_json::Value>,
+    unavailable: bool,
+    page_data_props_present: bool,
+) -> bool {
+    if can_skip_metadata_validation(has_dynamic_metadata, request_data_check) {
+        return true;
+    }
+    if !metadata_present && !unavailable {
+        return false;
+    }
+    match request_data_check {
+        response::RequestDataCheck::NotRequired => {}
+        response::RequestDataCheck::Validated(expected_metadata) => {
+            if current_request_metadata != Some(expected_metadata) {
+                return false;
+            }
+        }
+        response::RequestDataCheck::Unvalidated => return false,
+    }
+    !unavailable || page_data_props_present
+}
+
 async fn metadata_allows_cache_hit(
     state: &ServerState,
     route_match: &AppRouteMatch,
@@ -68,7 +101,10 @@ async fn metadata_allows_cache_hit(
     cached_metadata: &response::CacheMetadata,
     collected: &mut bool,
 ) -> bool {
-    if !cached_metadata.has_dynamic_metadata {
+    if can_skip_metadata_validation(
+        cached_metadata.has_dynamic_metadata,
+        &cached_metadata.request_data_check,
+    ) {
         return true;
     }
     if !*collected {
@@ -77,21 +113,13 @@ async fn metadata_allows_cache_hit(
                 .await;
         *collected = true;
     }
-    if context.metadata.is_none() && request_context.response_unavailable_after().is_none() {
-        return false;
-    }
-    match &cached_metadata.request_data_check {
-        response::RequestDataCheck::NotRequired => {}
-        response::RequestDataCheck::Validated(expected_metadata) => {
-            let Some(metadata) = context.metadata.as_ref() else {
-                return false;
-            };
+    let current_request_metadata = match (
+        &cached_metadata.request_data_check,
+        context.metadata.as_ref(),
+    ) {
+        (response::RequestDataCheck::Validated(_), Some(metadata)) => {
             match serde_json::to_value(metadata) {
-                Ok(metadata) if &metadata == expected_metadata => {}
-                Ok(_) => {
-                    request_context.disable_cache_writes();
-                    return false;
-                }
+                Ok(metadata) => Some(metadata),
                 Err(error) => {
                     request_context.disable_cache_writes();
                     tracing::warn!(
@@ -102,10 +130,16 @@ async fn metadata_allows_cache_hit(
                 }
             }
         }
-        response::RequestDataCheck::Unvalidated => return false,
-    }
-    let unavailable = request_context.response_unavailable_after().is_some();
-    !unavailable || context.page_data_props.is_some()
+        _ => None,
+    };
+    metadata_allows_cached_hit(
+        cached_metadata.has_dynamic_metadata,
+        &cached_metadata.request_data_check,
+        context.metadata.is_some(),
+        current_request_metadata.as_ref(),
+        request_context.response_unavailable_after().is_some(),
+        context.page_data_props.is_some(),
+    )
 }
 
 fn fast_cache_response(
@@ -407,7 +441,7 @@ pub async fn handle_app_route(
         && request_context.response_cache_reads_allowed()
         && let Some(fast_key) = deferred_fast_key.as_deref()
         && let Some(prebuilt) = state.static_fast_cache.get(fast_key)
-        && !prebuilt.has_dynamic_metadata
+        && can_skip_metadata_validation(prebuilt.has_dynamic_metadata, &prebuilt.request_data_check)
         && request_context.response_cache_reads_allowed()
         && let Some(current) = state.static_fast_cache.get(fast_key)
         && Arc::ptr_eq(&prebuilt, &current)
@@ -456,7 +490,11 @@ pub async fn handle_app_route(
                     None => state.response_cache.candidate(&cache_key).await,
                 };
                 let allowed = if let Some(entry) = entry.as_ref() {
-                    ((entry.is_guarded() && !entry.response.metadata.has_dynamic_metadata)
+                    ((entry.is_guarded()
+                        && can_skip_metadata_validation(
+                            entry.response.metadata.has_dynamic_metadata,
+                            &entry.response.metadata.request_data_check,
+                        ))
                         || metadata_allows_cache_hit(
                             &state,
                             &route_match,
@@ -662,7 +700,11 @@ pub async fn handle_app_route(
                     None => state.response_cache.candidate(&cache_key).await,
                 };
                 let allowed = if let Some(entry) = entry.as_ref() {
-                    ((entry.is_guarded() && !entry.response.metadata.has_dynamic_metadata)
+                    ((entry.is_guarded()
+                        && can_skip_metadata_validation(
+                            entry.response.metadata.has_dynamic_metadata,
+                            &entry.response.metadata.request_data_check,
+                        ))
                         || metadata_allows_cache_hit(
                             &state,
                             &route_match,
@@ -1229,5 +1271,55 @@ pub async fn handle_app_route(
                 ))
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{can_skip_metadata_validation, metadata_allows_cached_hit};
+    use crate::server::cache::response::RequestDataCheck;
+
+    #[test]
+    fn metadata_cache_gate_checks_outage_and_request_data_states() {
+        assert!(!metadata_allows_cached_hit(
+            true,
+            &RequestDataCheck::NotRequired,
+            false,
+            None,
+            false,
+            false,
+        ));
+        assert!(metadata_allows_cached_hit(
+            true,
+            &RequestDataCheck::NotRequired,
+            false,
+            None,
+            true,
+            true,
+        ));
+
+        let expected = serde_json::json!({"title": "Alice"});
+        let current = serde_json::json!({"title": "Bob"});
+        assert!(!can_skip_metadata_validation(
+            false,
+            &RequestDataCheck::Validated(expected.clone()),
+        ));
+        assert!(!metadata_allows_cached_hit(
+            false,
+            &RequestDataCheck::Validated(expected),
+            true,
+            Some(&current),
+            false,
+            false,
+        ));
+        assert!(!metadata_allows_cached_hit(
+            false,
+            &RequestDataCheck::Unvalidated,
+            false,
+            None,
+            true,
+            true,
+        ));
+        assert!(can_skip_metadata_validation(false, &RequestDataCheck::NotRequired));
     }
 }
