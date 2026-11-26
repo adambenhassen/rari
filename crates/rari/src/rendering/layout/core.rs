@@ -330,7 +330,7 @@ async fn queue_streaming_script(
     };
 
     let request_id = request_context.as_ref().map(|ctx| ctx.request_id().to_string());
-    let render_scope = request_context.as_ref().map(|ctx| ctx.enter_render_scope());
+    let render_scope = request_context.as_ref().map(RequestContext::enter_render_scope);
 
     if let Some(context) = request_context.as_ref()
         && let Err(e) = handle.register_request_context(Arc::clone(context)).await
@@ -399,7 +399,7 @@ async fn compose_then_queue_streaming_script(
     };
 
     let request_id = request_context.as_ref().map(|ctx| ctx.request_id().to_string());
-    let render_scope = request_context.as_ref().map(|ctx| ctx.enter_render_scope());
+    let render_scope = request_context.as_ref().map(RequestContext::enter_render_scope);
 
     if let Some(context) = request_context.as_ref()
         && let Err(e) = handle.register_request_context(Arc::clone(context)).await
@@ -743,7 +743,7 @@ impl LayoutRenderer {
         context: &LayoutRenderContext,
         request_context: Option<Arc<RequestContext>>,
     ) -> Result<String, RariError> {
-        let _render_scope = request_context.as_ref().map(|ctx| ctx.enter_render_scope());
+        let _render_scope = request_context.as_ref().map(RequestContext::enter_render_scope);
         let loading_enabled = Config::get().map(|config| config.loading.enabled).unwrap_or(true);
 
         let loading_component_id = if loading_enabled {
@@ -895,7 +895,7 @@ impl LayoutRenderer {
         return_rsc_on_fallback: bool,
         metadata_rx: Option<oneshot::Receiver<Option<PageMetadata>>>,
     ) -> Result<RenderResult, RariError> {
-        let _render_scope = request_context.as_ref().map(|ctx| ctx.enter_render_scope());
+        let _render_scope = request_context.as_ref().map(RequestContext::enter_render_scope);
         let loading_enabled = Config::get().map(|config| config.loading.enabled).unwrap_or(true);
 
         let loading_component_id = if loading_enabled {
