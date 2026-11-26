@@ -1167,10 +1167,18 @@ mod tests {
 
     #[test]
     fn request_metadata_serialization_failure_disables_cache_writes() {
+        struct Unserializable;
+
+        impl serde::Serialize for Unserializable {
+            fn serialize<S: serde::Serializer>(&self, _serializer: S) -> Result<S::Ok, S::Error> {
+                Err(<S::Error as serde::ser::Error>::custom("cannot serialize"))
+            }
+        }
+
         let request_context = RequestContext::new("/test".to_string());
         request_context.mark_request_data_access(RequestDataAccessScope::Metadata);
 
-        let request_data_check = request_data_check(&request_context, Some(&f64::NAN));
+        let request_data_check = request_data_check(&request_context, Some(&Unserializable));
 
         assert_eq!(request_data_check, RequestDataCheck::Unvalidated);
         assert!(!request_context.response_cache_allowed());
