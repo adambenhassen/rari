@@ -14,9 +14,14 @@ test('uses hash-addressed APT indexes with retries before package installation',
 
   const aptConfigPosition = workflow.indexOf(aptConfigStep[0])
   const aptUpdatePosition = workflow.indexOf('sudo apt-get update')
-  const playwrightInstallPosition = workflow.indexOf('pnpm exec playwright install chromium --with-deps')
+  const playwrightInstallPosition = workflow.indexOf(
+    'pnpm exec playwright install chromium --with-deps',
+  )
   assert.ok(aptUpdatePosition !== -1, 'Missing APT update')
   assert.ok(playwrightInstallPosition !== -1, 'Missing Playwright dependency installation')
   assert.ok(aptConfigPosition < aptUpdatePosition, 'APT configuration must precede apt-get update')
-  assert.ok(aptConfigPosition < playwrightInstallPosition, 'APT configuration must precede Playwright dependencies')
+  assert.ok(
+    aptConfigPosition < playwrightInstallPosition,
+    'APT configuration must precede Playwright dependencies',
+  )
 })
