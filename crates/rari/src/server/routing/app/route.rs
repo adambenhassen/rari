@@ -78,7 +78,7 @@ async fn metadata_allows_cache_hit(
         *collected = true;
     }
     if let Some(metadata) = context.metadata.as_ref()
-        && !serde_json::to_value(metadata).ok().is_some_and(|generated_metadata| {
+        && !serde_json::to_value(metadata).is_ok_and(|generated_metadata| {
             cached_metadata.generated_metadata.as_ref() == Some(&generated_metadata)
         })
     {
