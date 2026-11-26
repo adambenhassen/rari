@@ -233,7 +233,7 @@ pub async fn handle_app_route(
             response::ResponseCache::generate_static_fast_cache_key(path, query_params_ref, None);
 
         if let Some(prebuilt) = state.static_fast_cache.get(&fast_key) {
-            if !prebuilt.has_page_data && !prebuilt.has_dynamic_metadata {
+            if !prebuilt.has_page_data && !prebuilt.metadata_uses_request_data {
                 return Ok(fast_cache_response(&prebuilt, &headers, accept_encoding));
             }
             deferred_fast_key = Some(fast_key);
@@ -1152,6 +1152,8 @@ pub async fn handle_app_route(
                             is_not_found: route_match.not_found.is_some(),
                             has_page_data,
                             has_dynamic_metadata: request_context.has_dynamic_metadata(),
+                            metadata_uses_request_data: request_context
+                                .metadata_uses_request_data(),
                             tags: response_cache_tags.clone(),
                             cached_at: Instant::now(),
                             route: None,
