@@ -35,8 +35,6 @@ use super::{
     ExtensionOptions, ExtensionTrait, lazy, node::resolvers::Resolver,
     web::PermissionsContainer as WebPermissionsContainer,
 };
-#[cfg(test)]
-use crate::runtime::factory::v8_runtime_init_held_by_current_thread;
 use crate::runtime::{factory::lock_v8_runtime_init, module_loader::RariModuleLoader};
 
 type WorkerHostOptions = (Arc<CreateWebWorkerCb>, Option<Arc<FormatJsErrorFn>>);
@@ -358,11 +356,6 @@ fn create_web_worker_callback(options: WebWorkerCallbackOptions) -> Arc<CreateWe
             residual_lazy_esm_sources: &[],
         };
         let _init_guard = lock_v8_runtime_init();
-        #[cfg(test)]
-        assert!(
-            v8_runtime_init_held_by_current_thread(),
-            "web worker isolate initialization must hold the shared lock on this thread"
-        );
         WebWorker::bootstrap_from_options(services, options)
     })
 }

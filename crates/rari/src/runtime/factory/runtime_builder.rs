@@ -10,11 +10,10 @@ use deno_runtime::BootstrapOptions;
 use rari_error::RariError;
 use rustc_hash::FxHashMap;
 
-#[cfg(test)]
-use crate::runtime::factory::v8_runtime_init_held_by_current_thread;
 use crate::runtime::{
     ext,
     factory::{
+        V8RuntimeInitGuard,
         create_params::runtime_create_params,
         lock_v8_runtime_init,
         utils::constants::{ENV_INJECTION_SCRIPT, MODULE_CHECK_SCRIPT, NODE_BOOTSTRAP_SCRIPT},
@@ -27,14 +26,11 @@ const NODE_CONSOLE_SCOPE_SPECIFIER: &str = "ext:runtime/98_global_scope_shared.j
 const NODE_CONSOLE_SCOPE_SOURCE: &str = include_str!("../ext/runtime/node_console_scope.ts");
 const RESPONSE_AVAILABILITY_INIT_SCRIPT: &str = include_str!("js/response_availability_helper.js");
 
-fn initialize_js_runtime(build_options: impl FnOnce() -> RuntimeOptions) -> JsRuntime {
-    let _init_guard = lock_v8_runtime_init();
-    let options = build_options();
-    #[cfg(test)]
-    assert!(
-        v8_runtime_init_held_by_current_thread(),
-        "JsRuntime::new must run under the shared lock on this thread"
-    );
+fn initialize_js_runtime(
+    build_options: impl FnOnce(&V8RuntimeInitGuard) -> RuntimeOptions,
+) -> JsRuntime {
+    let init_guard = lock_v8_runtime_init();
+    let options = build_options(&init_guard);
     JsRuntime::new(options)
 }
 
@@ -87,7 +83,7 @@ pub fn build_js_runtime(
         ..Default::default()
     });
 
-    let mut runtime = initialize_js_runtime(|| RuntimeOptions {
+    let mut runtime = initialize_js_runtime(|init_guard| RuntimeOptions {
         #[expect(
             clippy::clone_on_ref_ptr,
             reason = "Trait object coercion: Rc<RariModuleLoader> -> Rc<dyn ModuleLoader>"
@@ -98,7 +94,7 @@ pub fn build_js_runtime(
         startup_snapshot: Some(RUNTIME_SNAPSHOT),
         residual_lazy_esm_sources: residual_lazy_esm_sources(),
         residual_lazy_js_sources: RESIDUAL_LAZY_JS_SOURCES,
-        create_params: Some(runtime_create_params()),
+        create_params: Some(runtime_create_params(init_guard)),
         ..Default::default()
     });
 
@@ -160,7 +156,7 @@ mod tests {
     use deno_core::RuntimeOptions;
     use tokio::runtime::Builder;
 
-    use super::{build_js_runtime, initialize_js_runtime, v8_runtime_init_held_by_current_thread};
+    use super::{build_js_runtime, initialize_js_runtime};
 
     #[test]
     #[expect(
@@ -177,7 +173,7 @@ mod tests {
             let tokio_runtime =
                 Builder::new_current_thread().enable_all().build().expect("create Tokio runtime");
             let _tokio_guard = tokio_runtime.enter();
-            let mut default_runtime = initialize_js_runtime(RuntimeOptions::default);
+            let mut default_runtime = initialize_js_runtime(|_| RuntimeOptions::default());
             created_tx.send(()).expect("report default runtime creation");
 
             step_rx.recv().expect("wait for Rari runtime creation");
@@ -197,7 +193,6 @@ mod tests {
         let _tokio_guard = tokio_runtime.enter();
         let (mut rari_runtime, _module_loader) =
             build_js_runtime(None).expect("build snapshot-backed JS runtime");
-        assert!(!v8_runtime_init_held_by_current_thread());
 
         step_tx.send(()).expect("default runtime thread should be waiting");
         rari_runtime

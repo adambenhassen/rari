@@ -5,18 +5,11 @@ use deno_core::{
     v8::{CreateParams, V8, cppgc},
 };
 
-#[cfg(test)]
-use crate::runtime::factory::v8_runtime_init_held_by_current_thread;
+use crate::runtime::factory::V8RuntimeInitGuard;
 
 static V8_READY: Once = Once::new();
 
-pub fn runtime_create_params() -> CreateParams {
-    #[cfg(test)]
-    assert!(
-        v8_runtime_init_held_by_current_thread(),
-        "runtime create params must be initialized under the shared lock on this thread"
-    );
-
+pub fn runtime_create_params(_init_guard: &V8RuntimeInitGuard) -> CreateParams {
     V8_READY.call_once(|| {
         let _ = JsRuntime::new(RuntimeOptions { extensions: vec![], ..Default::default() });
     });
