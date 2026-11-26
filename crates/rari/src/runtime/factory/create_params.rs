@@ -5,8 +5,11 @@ use deno_core::{
     v8::{CreateParams, V8, cppgc},
 };
 
-pub fn runtime_create_params() -> CreateParams {
-    static V8_READY: Once = Once::new();
+use crate::runtime::factory::V8RuntimeInitGuard;
+
+static V8_READY: Once = Once::new();
+
+pub fn runtime_create_params(_init_guard: &V8RuntimeInitGuard) -> CreateParams {
     V8_READY.call_once(|| {
         let _ = JsRuntime::new(RuntimeOptions { extensions: vec![], ..Default::default() });
     });

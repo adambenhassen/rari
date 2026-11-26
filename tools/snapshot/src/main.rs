@@ -25,6 +25,10 @@ type Transpiler = dyn Fn(
 
 #[expect(clippy::too_many_lines, clippy::cast_precision_loss)]
 fn main() {
+    // Runtime and worker isolates share V8's default isolate group, so this
+    // snapshot must keep the default V8 read-only heap unchanged.
+    v8::V8::set_flags_from_string("--no-extensible-ro-snapshot");
+
     let output_dir = env::args()
         .nth(1)
         .map(PathBuf::from)

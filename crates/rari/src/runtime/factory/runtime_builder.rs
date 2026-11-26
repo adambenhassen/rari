@@ -10,10 +10,14 @@ use deno_runtime::BootstrapOptions;
 use rari_error::RariError;
 use rustc_hash::FxHashMap;
 
+#[cfg(test)]
+use crate::runtime::factory::assert_v8_runtime_init_held_by_current_thread;
 use crate::runtime::{
     ext,
     factory::{
+        V8RuntimeInitGuard,
         create_params::runtime_create_params,
+        lock_v8_runtime_init,
         utils::constants::{ENV_INJECTION_SCRIPT, MODULE_CHECK_SCRIPT, NODE_BOOTSTRAP_SCRIPT},
     },
     module_loader::RariModuleLoader,
@@ -23,6 +27,23 @@ use crate::runtime::{
 const NODE_CONSOLE_SCOPE_SPECIFIER: &str = "ext:runtime/98_global_scope_shared.js";
 const NODE_CONSOLE_SCOPE_SOURCE: &str = include_str!("../ext/runtime/node_console_scope.ts");
 const RESPONSE_AVAILABILITY_INIT_SCRIPT: &str = include_str!("js/response_availability_helper.js");
+
+/// Constructs the main `JsRuntime` for Rari and for tests. It holds the shared V8 init lock
+/// across `JsRuntime::new` and hands the guard to the options builder for
+/// `runtime_create_params`. The guard type does not stop other code from calling
+/// `JsRuntime::new` directly, so new main-runtime construction should go through here.
+///
+/// Web workers are a separate path: `create_web_worker_callback` builds them through
+/// `WebWorker::bootstrap_from_options` and takes the same lock itself.
+pub fn initialize_js_runtime(
+    build_options: impl FnOnce(&V8RuntimeInitGuard) -> RuntimeOptions,
+) -> JsRuntime {
+    let init_guard = lock_v8_runtime_init();
+    let options = build_options(&init_guard);
+    #[cfg(test)]
+    assert_v8_runtime_init_held_by_current_thread();
+    JsRuntime::new(options)
+}
 
 fn residual_lazy_esm_sources() -> &'static [(&'static str, &'static str)] {
     static SOURCES: LazyLock<Vec<(&'static str, &'static str)>> = LazyLock::new(|| {
@@ -73,7 +94,7 @@ pub fn build_js_runtime(
         ..Default::default()
     });
 
-    let options = RuntimeOptions {
+    let mut runtime = initialize_js_runtime(|init_guard| RuntimeOptions {
         #[expect(
             clippy::clone_on_ref_ptr,
             reason = "Trait object coercion: Rc<RariModuleLoader> -> Rc<dyn ModuleLoader>"
@@ -84,11 +105,9 @@ pub fn build_js_runtime(
         startup_snapshot: Some(RUNTIME_SNAPSHOT),
         residual_lazy_esm_sources: residual_lazy_esm_sources(),
         residual_lazy_js_sources: RESIDUAL_LAZY_JS_SOURCES,
-        create_params: Some(runtime_create_params()),
+        create_params: Some(runtime_create_params(init_guard)),
         ..Default::default()
-    };
-
-    let mut runtime = JsRuntime::new(options);
+    });
 
     runtime
         .lazy_init_extensions(lazy_args)
@@ -136,4 +155,224 @@ pub fn build_js_runtime(
 
 fn get_streaming_ops() -> Vec<deno_core::OpDecl> {
     ops::get_streaming_ops()
+}
+
+#[cfg(test)]
+mod tests {
+    use std::{
+        env,
+        process::Command,
+        sync::{
+            Arc, Barrier,
+            atomic::{AtomicBool, Ordering},
+            mpsc,
+        },
+        thread,
+    };
+
+    use deno_core::RuntimeOptions;
+    use tokio::runtime::Builder;
+
+    use super::{build_js_runtime, initialize_js_runtime};
+
+    #[test]
+    #[expect(
+        clippy::expect_used,
+        reason = "Runtime initialization failures should fail the regression test"
+    )]
+    fn default_and_rari_snapshot_isolates_can_coexist_in_fresh_processes() {
+        // V8 initializes shared read-only pages per process, so each order must start clean.
+        const ORDER_ENV: &str = "RARI_SNAPSHOT_COMPATIBILITY_ORDER";
+
+        if let Ok(order) = env::var(ORDER_ENV) {
+            assert!(
+                matches!(order.as_str(), "default-first" | "rari-first"),
+                "unknown snapshot compatibility test order: {order}"
+            );
+            if order == "default-first" {
+                run_default_then_rari_snapshot_order();
+            } else {
+                run_rari_then_default_snapshot_order();
+            }
+            return;
+        }
+
+        for order in ["default-first", "rari-first"] {
+            let output = Command::new(env::current_exe().expect("test executable path"))
+                .arg("default_and_rari_snapshot_isolates_can_coexist_in_fresh_processes")
+                .arg("--nocapture")
+                .env(ORDER_ENV, order)
+                .output()
+                .expect("spawn fresh snapshot compatibility test process");
+
+            assert!(
+                output.status.success(),
+                "snapshot compatibility child ({order}) failed\nstdout:\n{}\nstderr:\n{}",
+                String::from_utf8_lossy(&output.stdout),
+                String::from_utf8_lossy(&output.stderr),
+            );
+        }
+    }
+
+    #[expect(
+        clippy::expect_used,
+        reason = "Runtime initialization failures should fail the regression test"
+    )]
+    fn run_default_then_rari_snapshot_order() {
+        let (first_created_tx, first_created_rx) = mpsc::channel::<()>();
+        let (second_ready_tx, second_ready_rx) = mpsc::channel::<()>();
+        let (first_checked_tx, first_checked_rx) = mpsc::channel::<()>();
+        let first_thread = thread::spawn(move || {
+            let tokio_runtime = Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .expect("create first-isolate Tokio runtime");
+            let _tokio_guard = tokio_runtime.enter();
+            let mut first_runtime = initialize_js_runtime(|_| RuntimeOptions::default());
+            first_created_tx.send(()).expect("report first default isolate creation");
+
+            second_ready_rx.recv().expect("wait for second isolate creation");
+            first_runtime
+                .execute_script("default_snapshot_lifetime.js", "1 + 1")
+                .expect("first default isolate should work beside Rari snapshot");
+            first_checked_tx.send(()).expect("report first default isolate check");
+
+            second_ready_rx.recv().expect("wait for second isolate drop");
+            first_runtime
+                .execute_script("default_snapshot_after_rari_drop.js", "1 + 1")
+                .expect("first default isolate should remain usable after Rari drops");
+        });
+
+        first_created_rx.recv().expect("first default isolate should be created");
+        let tokio_runtime = Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("create second-isolate Tokio runtime");
+        let _tokio_guard = tokio_runtime.enter();
+        let (mut second_runtime, _module_loader) =
+            build_js_runtime(None).expect("build second Rari snapshot runtime");
+        second_runtime
+            .execute_script("rari_snapshot_lifetime.js", "1 + 1")
+            .expect("second Rari isolate should remain usable beside default snapshot");
+        second_ready_tx.send(()).expect("first default isolate should be waiting");
+        first_checked_rx.recv().expect("first default isolate should remain usable");
+        drop(second_runtime);
+        second_ready_tx.send(()).expect("first default isolate should wait for second drop");
+        first_thread.join().expect("first default isolate should remain usable after Rari drops");
+    }
+
+    #[expect(
+        clippy::expect_used,
+        reason = "Runtime initialization failures should fail the regression test"
+    )]
+    fn run_rari_then_default_snapshot_order() {
+        let (first_created_tx, first_created_rx) = mpsc::channel::<()>();
+        let (second_ready_tx, second_ready_rx) = mpsc::channel::<()>();
+        let (first_checked_tx, first_checked_rx) = mpsc::channel::<()>();
+        let first_thread = thread::spawn(move || {
+            let tokio_runtime = Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .expect("create first-isolate Tokio runtime");
+            let _tokio_guard = tokio_runtime.enter();
+            let (mut first_runtime, _module_loader) =
+                build_js_runtime(None).expect("build first Rari snapshot runtime");
+            first_created_tx.send(()).expect("report first Rari isolate creation");
+
+            second_ready_rx.recv().expect("wait for second isolate creation");
+            first_runtime
+                .execute_script("rari_snapshot_lifetime.js", "1 + 1")
+                .expect("first Rari isolate should work beside default snapshot");
+            first_checked_tx.send(()).expect("report first Rari isolate check");
+
+            second_ready_rx.recv().expect("wait for second isolate drop");
+            first_runtime
+                .execute_script("rari_snapshot_after_default_drop.js", "1 + 1")
+                .expect("first Rari isolate should remain usable after default drops");
+        });
+
+        first_created_rx.recv().expect("first Rari isolate should be created");
+        let tokio_runtime = Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("create second-isolate Tokio runtime");
+        let _tokio_guard = tokio_runtime.enter();
+        let mut second_runtime = initialize_js_runtime(|_| RuntimeOptions::default());
+        second_runtime
+            .execute_script("default_snapshot_lifetime.js", "1 + 1")
+            .expect("second default isolate should remain usable beside Rari snapshot");
+        second_ready_tx.send(()).expect("first Rari isolate should be waiting");
+        first_checked_rx.recv().expect("first Rari isolate should remain usable");
+        drop(second_runtime);
+        second_ready_tx.send(()).expect("first Rari isolate should wait for second drop");
+        first_thread.join().expect("first Rari isolate should remain usable after default drops");
+    }
+
+    #[test]
+    #[expect(
+        clippy::expect_used,
+        reason = "Runtime initialization failures should fail the regression test"
+    )]
+    fn runtime_constructor_holds_shared_lock_on_current_thread() {
+        const THREAD_COUNT: usize = 12;
+        let start = Arc::new(Barrier::new(THREAD_COUNT));
+        let handles = (0..THREAD_COUNT)
+            .map(|_| {
+                let start = Arc::clone(&start);
+                thread::spawn(move || {
+                    start.wait();
+                    let tokio_runtime = Builder::new_current_thread()
+                        .enable_all()
+                        .build()
+                        .expect("create Tokio runtime");
+                    let _tokio_guard = tokio_runtime.enter();
+                    let runtime = initialize_js_runtime(|_| RuntimeOptions::default());
+                    drop(runtime);
+                })
+            })
+            .collect::<Vec<_>>();
+
+        for handle in handles {
+            handle.join().expect("runtime initialization thread should succeed");
+        }
+    }
+
+    #[test]
+    #[expect(
+        clippy::expect_used,
+        reason = "Runtime initialization failures should fail the regression test"
+    )]
+    fn parallel_snapshot_runtime_creation_is_safe() {
+        const RUNTIME_COUNT: usize = 12;
+        const RUNTIME_ROUNDS: usize = 16;
+        // Released by the test thread after every worker is spawned, so a worker that panics
+        // cannot leave its peers waiting; they only spin until the gate opens.
+        let start = Arc::new(AtomicBool::new(false));
+        let handles = (0..RUNTIME_COUNT)
+            .map(|_| {
+                let start = Arc::clone(&start);
+                thread::spawn(move || {
+                    let runtime = Builder::new_current_thread()
+                        .enable_all()
+                        .build()
+                        .expect("create Tokio runtime");
+                    while !start.load(Ordering::Acquire) {
+                        thread::yield_now();
+                    }
+                    for _ in 0..RUNTIME_ROUNDS {
+                        runtime.block_on(async {
+                            let (js_runtime, _module_loader) =
+                                build_js_runtime(None).expect("build snapshot-backed JS runtime");
+                            drop(js_runtime);
+                        });
+                    }
+                })
+            })
+            .collect::<Vec<_>>();
+        start.store(true, Ordering::Release);
+
+        for handle in handles {
+            handle.join().expect("snapshot-backed runtime thread should succeed");
+        }
+    }
 }

@@ -1693,10 +1693,13 @@ impl LayoutRenderer {
 #[cfg(test)]
 #[expect(clippy::expect_used)]
 mod tests {
-    use deno_core::{JsRuntime, PollEventLoopOptions, RuntimeOptions, serde_v8, v8};
+    use deno_core::{JsRuntime, PollEventLoopOptions, serde_v8, v8};
 
     use super::*;
-    use crate::server::cache::handler::{NoOpCacheHandler, SetOutcome};
+    use crate::{
+        runtime::factory::initialize_js_runtime,
+        server::cache::handler::{NoOpCacheHandler, SetOutcome},
+    };
 
     fn v8_json_value(runtime: &mut JsRuntime, value: v8::Global<v8::Value>) -> Value {
         let context = runtime.main_context();
@@ -1823,7 +1826,7 @@ mod tests {
 
     #[tokio::test]
     async fn static_composition_failure_keeps_its_error_and_clears_the_capture() {
-        let mut runtime = JsRuntime::new(RuntimeOptions::default());
+        let mut runtime = initialize_js_runtime(|_| deno_core::RuntimeOptions::default());
         runtime
             .execute_script(
                 "init_static_render_test".to_string(),
