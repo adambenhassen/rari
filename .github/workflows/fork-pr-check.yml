@@ -125,6 +125,8 @@ jobs:
 
       - name: Test Rust
         run: cargo test -p rari --all-features
+        env:
+          RUSTFLAGS: -C link-arg=-fuse-ld=mold
 
       - name: Detect jemalloc feature
         id: jemalloc
