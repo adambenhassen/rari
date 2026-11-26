@@ -83,12 +83,19 @@ struct MetadataCacheHitInput<'a> {
     page_data_props_present: bool,
 }
 
-fn metadata_allows_cached_hit(input: MetadataCacheHitInput<'_>) -> bool {
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum MetadataCacheHitDecision {
+    Allow,
+    Miss,
+    RequestDataMismatch,
+}
+
+fn metadata_cache_hit_decision(input: MetadataCacheHitInput<'_>) -> MetadataCacheHitDecision {
     if can_skip_metadata_validation(input.has_dynamic_metadata, input.request_data_check) {
-        return true;
+        return MetadataCacheHitDecision::Allow;
     }
     if matches!(input.current_metadata, CurrentMetadata::Missing) && !input.unavailable {
-        return false;
+        return MetadataCacheHitDecision::Miss;
     }
     match (input.request_data_check, input.current_metadata) {
         (response::RequestDataCheck::NotRequired, _) => {}
@@ -96,12 +103,17 @@ fn metadata_allows_cached_hit(input: MetadataCacheHitInput<'_>) -> bool {
             response::RequestDataCheck::Validated(expected_metadata),
             CurrentMetadata::Serialized(current_metadata),
         ) if current_metadata == expected_metadata => {}
-        (response::RequestDataCheck::Validated(_), _) => {
-            return false;
+        (response::RequestDataCheck::Validated(_), CurrentMetadata::Serialized(_)) => {
+            return MetadataCacheHitDecision::RequestDataMismatch;
         }
-        (response::RequestDataCheck::Unvalidated, _) => return false,
+        (response::RequestDataCheck::Validated(_), _) => return MetadataCacheHitDecision::Miss,
+        (response::RequestDataCheck::Unvalidated, _) => return MetadataCacheHitDecision::Miss,
     }
-    !input.unavailable || input.page_data_props_present
+    if input.unavailable && !input.page_data_props_present {
+        MetadataCacheHitDecision::Miss
+    } else {
+        MetadataCacheHitDecision::Allow
+    }
 }
 
 async fn metadata_allows_cache_hit(
@@ -145,13 +157,20 @@ async fn metadata_allows_cache_hit(
         (true, Some(metadata)) => CurrentMetadata::Serialized(metadata),
         (true, None) => CurrentMetadata::Present,
     };
-    metadata_allows_cached_hit(MetadataCacheHitInput {
+    match metadata_cache_hit_decision(MetadataCacheHitInput {
         has_dynamic_metadata: cached_metadata.has_dynamic_metadata,
         request_data_check: &cached_metadata.request_data_check,
         current_metadata,
         unavailable: request_context.response_unavailable_after().is_some(),
         page_data_props_present: context.page_data_props.is_some(),
-    })
+    }) {
+        MetadataCacheHitDecision::Allow => true,
+        MetadataCacheHitDecision::Miss => false,
+        MetadataCacheHitDecision::RequestDataMismatch => {
+            request_context.disable_cache_writes();
+            false
+        }
+    }
 }
 
 fn fast_cache_response(
@@ -1289,8 +1308,8 @@ pub async fn handle_app_route(
 #[cfg(test)]
 mod tests {
     use super::{
-        CurrentMetadata, MetadataCacheHitInput, can_skip_metadata_validation,
-        metadata_allows_cached_hit,
+        CurrentMetadata, MetadataCacheHitDecision, MetadataCacheHitInput,
+        can_skip_metadata_validation, metadata_cache_hit_decision,
     };
     use crate::server::cache::response::RequestDataCheck;
 
@@ -1304,12 +1323,15 @@ mod tests {
             unavailable: false,
             page_data_props_present: false,
         };
-        assert!(!metadata_allows_cached_hit(metadata_missing));
-        assert!(metadata_allows_cached_hit(MetadataCacheHitInput {
-            unavailable: true,
-            page_data_props_present: true,
-            ..metadata_missing
-        }));
+        assert_eq!(metadata_cache_hit_decision(metadata_missing), MetadataCacheHitDecision::Miss);
+        assert_eq!(
+            metadata_cache_hit_decision(MetadataCacheHitInput {
+                unavailable: true,
+                page_data_props_present: true,
+                ..metadata_missing
+            }),
+            MetadataCacheHitDecision::Allow
+        );
 
         let expected = serde_json::json!({"title": "Alice"});
         let current = serde_json::json!({"title": "Bob"});
@@ -1317,21 +1339,27 @@ mod tests {
             false,
             &RequestDataCheck::Validated(expected.clone()),
         ));
-        assert!(!metadata_allows_cached_hit(MetadataCacheHitInput {
-            has_dynamic_metadata: false,
-            request_data_check: &RequestDataCheck::Validated(expected),
-            current_metadata: CurrentMetadata::Serialized(&current),
-            unavailable: false,
-            page_data_props_present: false,
-        }));
+        assert_eq!(
+            metadata_cache_hit_decision(MetadataCacheHitInput {
+                has_dynamic_metadata: false,
+                request_data_check: &RequestDataCheck::Validated(expected),
+                current_metadata: CurrentMetadata::Serialized(&current),
+                unavailable: false,
+                page_data_props_present: false,
+            }),
+            MetadataCacheHitDecision::RequestDataMismatch
+        );
         let unvalidated = RequestDataCheck::Unvalidated;
-        assert!(!metadata_allows_cached_hit(MetadataCacheHitInput {
-            has_dynamic_metadata: false,
-            request_data_check: &unvalidated,
-            current_metadata: CurrentMetadata::Missing,
-            unavailable: true,
-            page_data_props_present: true,
-        }));
+        assert_eq!(
+            metadata_cache_hit_decision(MetadataCacheHitInput {
+                has_dynamic_metadata: false,
+                request_data_check: &unvalidated,
+                current_metadata: CurrentMetadata::Missing,
+                unavailable: true,
+                page_data_props_present: true,
+            }),
+            MetadataCacheHitDecision::Miss
+        );
         assert!(can_skip_metadata_validation(false, &RequestDataCheck::NotRequired));
     }
 }
