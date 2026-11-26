@@ -160,7 +160,7 @@ mod tests {
     use deno_core::RuntimeOptions;
     use tokio::runtime::Builder;
 
-    use super::{build_js_runtime, initialize_js_runtime};
+    use super::{build_js_runtime, initialize_js_runtime, v8_runtime_init_held_by_current_thread};
 
     #[test]
     #[expect(
