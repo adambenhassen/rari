@@ -208,6 +208,7 @@ pub struct RequestContext {
 }
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+#[non_exhaustive]
 pub enum RequestDataAccessScope {
     #[default]
     Unscoped,
