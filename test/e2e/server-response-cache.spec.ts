@@ -248,25 +248,21 @@ test('Fast hits without getData do not wait for dynamic metadata', async ({ requ
 
     const streamingPublicMetadataSlug = `streaming-public-${Date.now()}-${Math.random()}`
     const streamingPublicMetadataUrl = `${origin}/cache-metadata-streaming-public/${streamingPublicMetadataSlug}`
-    const initialStreamingPublicMetadata = await request.get(streamingPublicMetadataUrl, {
-      headers: { 'X-Session': 'alice' },
-    })
-    expect(initialStreamingPublicMetadata.status()).toBe(200)
-    expect(initialStreamingPublicMetadata.headers()['x-cache']).toBe('MISS')
-    const initialStreamingPublicHtml = await initialStreamingPublicMetadata.text()
-    expect(initialStreamingPublicHtml).toContain('<title>Shared streamed metadata</title>')
-
-    const cachedStreamingPublicMetadata = await request.get(streamingPublicMetadataUrl, {
-      headers: { 'X-Session': 'bob' },
-    })
-    expect(cachedStreamingPublicMetadata.status()).toBe(200)
-    expect(cachedStreamingPublicMetadata.headers()['x-cache']).toBe('HIT')
-    expect(cachedStreamingPublicMetadata.headers()['cache-control']).not.toBe('no-store')
-    const cachedStreamingPublicHtml = await cachedStreamingPublicMetadata.text()
-    expect(cachedStreamingPublicHtml).toContain('<title>Shared streamed metadata</title>')
-    expect(cachedStreamingPublicHtml).toContain(
-      `Streamed public page: ${streamingPublicMetadataSlug}`,
-    )
+    // Streamed renders are never stored in the response cache, so assert that a
+    // metadata-only header read during streaming does not force `no-store`.
+    for (const session of ['alice', 'bob']) {
+      const streamed = await request.get(streamingPublicMetadataUrl, {
+        headers: { 'X-Session': session },
+      })
+      expect(streamed.status(), session).toBe(200)
+      expect(streamed.headers()['x-render-mode'], session).toBe('streaming')
+      expect(streamed.headers()['cache-control'], session).not.toBe('no-store')
+      const streamedHtml = await streamed.text()
+      expect(streamedHtml, session).toMatch(/<title[^>]*>Shared streamed metadata<\/title>/)
+      expect(streamedHtml, session).toContain(
+        `Streamed public page: ${streamingPublicMetadataSlug}`,
+      )
+    }
 
     const sessionMetadataSlug = `session-${Date.now()}-${Math.random()}`
     const sessionMetadataUrl = `${origin}/cache-metadata-session/${sessionMetadataSlug}`

@@ -11,5 +11,5 @@ export async function generateMetadata(): Promise<Metadata> {
 }
 
 export default function CacheMetadataStreamingPublicPage({ params }: Readonly<PageProps>) {
-  return <p>Streamed public page: {String(params.slug)}</p>
+  return <p>{`Streamed public page: ${String(params.slug)}`}</p>
 }
