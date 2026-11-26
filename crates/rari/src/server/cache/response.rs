@@ -1016,7 +1016,10 @@ mod tests {
     use tokio::time;
 
     use super::*;
-    use crate::server::cache::handler::{CacheError, CacheRead, SetOutcome};
+    use crate::server::{
+        cache::handler::{CacheError, CacheRead, SetOutcome},
+        middleware::request_context::RequestDataAccessScope,
+    };
 
     fn create_test_response(body: &str, ttl: u64) -> CachedResponse {
         CachedResponse {
@@ -1165,9 +1168,7 @@ mod tests {
     #[test]
     fn request_metadata_serialization_failure_disables_cache_writes() {
         let request_context = RequestContext::new("/test".to_string());
-        request_context.mark_request_data_access(
-            crate::server::middleware::request_context::RequestDataAccessScope::Metadata,
-        );
+        request_context.mark_request_data_access(RequestDataAccessScope::Metadata);
 
         let request_data_check = request_data_check(&request_context, Some(&f64::NAN));
 

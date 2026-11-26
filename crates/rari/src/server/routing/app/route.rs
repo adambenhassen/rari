@@ -406,10 +406,10 @@ pub async fn handle_app_route(
         && request_context.response_unavailable_after().is_none()
         && request_context.response_cache_reads_allowed()
         && let Some(fast_key) = deferred_fast_key.as_deref()
-        && let Some(prebuilt) = state.static_fast_cache.get(&fast_key)
+        && let Some(prebuilt) = state.static_fast_cache.get(fast_key)
         && !prebuilt.has_dynamic_metadata
         && request_context.response_cache_reads_allowed()
-        && let Some(current) = state.static_fast_cache.get(&fast_key)
+        && let Some(current) = state.static_fast_cache.get(fast_key)
         && Arc::ptr_eq(&prebuilt, &current)
     {
         return Ok(apply_request_no_store(
