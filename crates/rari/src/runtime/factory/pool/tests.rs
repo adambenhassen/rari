@@ -125,6 +125,7 @@ impl JsRuntimeInterface for CountingRuntime {
     fn set_request_context(
         &self,
         _request_context: Arc<RequestContext>,
+        _access_scope: RequestDataAccessScope,
     ) -> Pin<Box<dyn Future<Output = Result<(), RariError>> + Send>> {
         Box::pin(async move { Ok(()) })
     }
@@ -153,6 +154,7 @@ impl JsRuntimeInterface for CountingRuntime {
         _script_code: String,
         _chunk_sender: mpsc::Sender<Result<Vec<u8>, RariError>>,
         _request_context: Option<Arc<RequestContext>>,
+        _access_scope: RequestDataAccessScope,
     ) -> QueueStreamingScriptFuture {
         Box::pin(async move {
             let completion: Pin<Box<dyn Future<Output = Result<(), RariError>> + Send>> =
@@ -164,6 +166,7 @@ impl JsRuntimeInterface for CountingRuntime {
     fn register_request_context(
         &self,
         _request_context: Arc<RequestContext>,
+        _access_scope: RequestDataAccessScope,
     ) -> Pin<Box<dyn Future<Output = Result<(), RariError>> + Send>> {
         Box::pin(async move { Ok(()) })
     }
@@ -520,6 +523,7 @@ impl JsRuntimeInterface for BroadcastingRuntime {
     fn set_request_context(
         &self,
         _request_context: Arc<RequestContext>,
+        _access_scope: RequestDataAccessScope,
     ) -> Pin<Box<dyn Future<Output = Result<(), RariError>> + Send>> {
         Box::pin(async move { Ok(()) })
     }
@@ -548,6 +552,7 @@ impl JsRuntimeInterface for BroadcastingRuntime {
         _script_code: String,
         _chunk_sender: mpsc::Sender<Result<Vec<u8>, RariError>>,
         _request_context: Option<Arc<RequestContext>>,
+        _access_scope: RequestDataAccessScope,
     ) -> QueueStreamingScriptFuture {
         Box::pin(async move {
             let completion: Pin<Box<dyn Future<Output = Result<(), RariError>> + Send>> =
@@ -559,6 +564,7 @@ impl JsRuntimeInterface for BroadcastingRuntime {
     fn register_request_context(
         &self,
         _request_context: Arc<RequestContext>,
+        _access_scope: RequestDataAccessScope,
     ) -> Pin<Box<dyn Future<Output = Result<(), RariError>> + Send>> {
         Box::pin(async move { Ok(()) })
     }
@@ -897,6 +903,7 @@ impl JsRuntimeInterface for RequestContextRuntime {
     fn set_request_context(
         &self,
         request_context: Arc<RequestContext>,
+        _access_scope: RequestDataAccessScope,
     ) -> Pin<Box<dyn Future<Output = Result<(), RariError>> + Send>> {
         let last_seen = Arc::clone(&self.last_seen);
         Box::pin(async move {
@@ -949,6 +956,7 @@ impl JsRuntimeInterface for RequestContextRuntime {
         _script_code: String,
         _chunk_sender: mpsc::Sender<Result<Vec<u8>, RariError>>,
         _request_context: Option<Arc<RequestContext>>,
+        _access_scope: RequestDataAccessScope,
     ) -> QueueStreamingScriptFuture {
         Box::pin(async move {
             let completion: Pin<Box<dyn Future<Output = Result<(), RariError>> + Send>> =
@@ -960,6 +968,7 @@ impl JsRuntimeInterface for RequestContextRuntime {
     fn register_request_context(
         &self,
         _request_context: Arc<RequestContext>,
+        _access_scope: RequestDataAccessScope,
     ) -> Pin<Box<dyn Future<Output = Result<(), RariError>> + Send>> {
         Box::pin(async move { Ok(()) })
     }
@@ -999,7 +1008,7 @@ async fn pooled_runtime_set_and_clear_request_context_round_trip() -> Result<(),
     let picked_idx = handle.idx();
     let ctx = Arc::new(RequestContext::new("/test".to_string()));
 
-    handle.set_request_context(Arc::clone(&ctx)).await?;
+    handle.set_request_context(Arc::clone(&ctx), RequestDataAccessScope::Unscoped).await?;
     assert!(
         last_seens[picked_idx].lock().map(|guard| guard.is_some()).unwrap_or(false),
         "set_request_context must touch the picked runtime, not another slot"

@@ -4,7 +4,7 @@ use rari_error::RariError;
 use serde_json::Value;
 use tokio::sync::{mpsc, mpsc::Sender};
 
-use crate::server::middleware::request_context::RequestContext;
+use crate::server::middleware::request_context::{RequestContext, RequestDataAccessScope};
 
 pub type BatchResultReceiver = mpsc::UnboundedReceiver<(usize, Result<Value, RariError>)>;
 pub type AsyncBatchResult = Pin<Box<dyn Future<Output = BatchResultReceiver> + Send>>;
@@ -56,6 +56,7 @@ pub trait JsRuntimeInterface: Send + Sync {
     fn set_request_context(
         &self,
         request_context: Arc<RequestContext>,
+        access_scope: RequestDataAccessScope,
     ) -> Pin<Box<dyn Future<Output = Result<(), RariError>> + Send>>;
 
     fn clear_request_context_if_matches(
@@ -81,11 +82,13 @@ pub trait JsRuntimeInterface: Send + Sync {
         script_code: String,
         chunk_sender: Sender<Result<Vec<u8>, RariError>>,
         request_context: Option<Arc<RequestContext>>,
+        access_scope: RequestDataAccessScope,
     ) -> QueueStreamingScriptFuture;
 
     fn register_request_context(
         &self,
         request_context: Arc<RequestContext>,
+        access_scope: RequestDataAccessScope,
     ) -> Pin<Box<dyn Future<Output = Result<(), RariError>> + Send>>;
 
     fn unregister_request_context(

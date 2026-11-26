@@ -207,19 +207,20 @@ pub struct RequestContext {
     pub csp_nonce: Option<String>,
 }
 
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub enum RequestDataAccessScope {
+    #[default]
+    Unscoped,
+    GetData,
+    Metadata,
+    Render,
+}
+
 struct ResponseCacheState {
     access: ResponseCacheAccess,
-    scopes: RequestDataScopes,
     metadata_uses_request_data: bool,
     unavailable_after: Option<u64>,
     has_dynamic_metadata: bool,
-}
-
-#[derive(Default)]
-struct RequestDataScopes {
-    get_data_active: bool,
-    metadata_active: bool,
-    render_depth: usize,
 }
 
 #[derive(Clone, Copy)]
@@ -245,37 +246,6 @@ impl ResponseCacheAccess {
     }
 }
 
-pub(crate) struct GetDataScope {
-    request_context: Arc<RequestContext>,
-}
-
-impl Drop for GetDataScope {
-    fn drop(&mut self) {
-        self.request_context.response_cache_state.lock().scopes.get_data_active = false;
-    }
-}
-
-pub(crate) struct MetadataScope {
-    request_context: Arc<RequestContext>,
-}
-
-impl Drop for MetadataScope {
-    fn drop(&mut self) {
-        self.request_context.response_cache_state.lock().scopes.metadata_active = false;
-    }
-}
-
-pub(crate) struct RenderScope {
-    request_context: Arc<RequestContext>,
-}
-
-impl Drop for RenderScope {
-    fn drop(&mut self) {
-        let mut state = self.request_context.response_cache_state.lock();
-        state.scopes.render_depth = state.scopes.render_depth.saturating_sub(1);
-    }
-}
-
 impl RequestContext {
     pub fn new(route_path: String) -> Self {
         Self {
@@ -286,7 +256,6 @@ impl RequestContext {
             route_path,
             response_cache_state: Mutex::new(ResponseCacheState {
                 access: ResponseCacheAccess::ReadWrite,
-                scopes: RequestDataScopes::default(),
                 metadata_uses_request_data: false,
                 unavailable_after: None,
                 has_dynamic_metadata: true,
@@ -376,32 +345,13 @@ impl RequestContext {
         self.response_cache_state.lock().access = ResponseCacheAccess::Disabled;
     }
 
-    pub(crate) fn enter_get_data_scope(self: &Arc<Self>) -> GetDataScope {
-        self.response_cache_state.lock().scopes.get_data_active = true;
-        GetDataScope { request_context: Arc::clone(self) }
-    }
-
-    pub(crate) fn enter_metadata_scope(self: &Arc<Self>) -> MetadataScope {
-        self.response_cache_state.lock().scopes.metadata_active = true;
-        MetadataScope { request_context: Arc::clone(self) }
-    }
-
-    pub(crate) fn enter_render_scope(self: &Arc<Self>) -> RenderScope {
-        self.response_cache_state.lock().scopes.render_depth += 1;
-        RenderScope { request_context: Arc::clone(self) }
-    }
-
-    pub(crate) fn mark_request_data_access(&self) {
+    pub(crate) fn mark_request_data_access(&self, scope: RequestDataAccessScope) {
         let mut state = self.response_cache_state.lock();
-        // Rendering can overlap metadata collection, so only metadata-only reads stay shareable.
-        if state.scopes.get_data_active
-            || state.scopes.render_depth > 0
-            || !state.scopes.metadata_active
-        {
-            state.access = ResponseCacheAccess::Disabled;
-        }
-        if state.scopes.metadata_active {
-            state.metadata_uses_request_data = true;
+        match scope {
+            RequestDataAccessScope::Metadata => state.metadata_uses_request_data = true,
+            RequestDataAccessScope::Unscoped
+            | RequestDataAccessScope::GetData
+            | RequestDataAccessScope::Render => state.access = ResponseCacheAccess::Disabled,
         }
     }
 
@@ -669,7 +619,7 @@ mod tests {
     #[test]
     fn unscoped_request_data_access_disables_shared_cache() {
         let unscoped = RequestContext::new("/test".to_string());
-        unscoped.mark_request_data_access();
+        unscoped.mark_request_data_access(RequestDataAccessScope::Unscoped);
         assert!(!unscoped.response_cache_reads_allowed());
         assert!(!unscoped.response_cache_allowed());
         assert!(unscoped.must_send_no_store());
@@ -677,9 +627,8 @@ mod tests {
 
     #[test]
     fn request_data_access_inside_get_data_disables_cache() {
-        let scoped = Arc::new(RequestContext::new("/test".to_string()));
-        let _get_data_scope = scoped.enter_get_data_scope();
-        scoped.mark_request_data_access();
+        let scoped = RequestContext::new("/test".to_string());
+        scoped.mark_request_data_access(RequestDataAccessScope::GetData);
         assert!(!scoped.response_cache_reads_allowed());
         assert!(!scoped.response_cache_allowed());
         assert!(scoped.must_send_no_store());
@@ -687,12 +636,8 @@ mod tests {
 
     #[test]
     fn request_data_access_in_metadata_is_tracked_without_disabling_cache() {
-        let scoped = Arc::new(RequestContext::new("/test".to_string()));
-
-        {
-            let _metadata_scope = scoped.enter_metadata_scope();
-            scoped.mark_request_data_access();
-        }
+        let scoped = RequestContext::new("/test".to_string());
+        scoped.mark_request_data_access(RequestDataAccessScope::Metadata);
 
         assert!(scoped.metadata_uses_request_data());
         assert!(scoped.response_cache_reads_allowed());
@@ -701,36 +646,14 @@ mod tests {
     }
 
     #[test]
-    fn request_data_access_in_render_disables_cache_during_metadata_collection() {
-        let scoped = Arc::new(RequestContext::new("/test".to_string()));
-        let _metadata_scope = scoped.enter_metadata_scope();
-        let _render_scope = scoped.enter_render_scope();
+    fn request_data_access_during_render_disables_shared_cache() {
+        let scoped = RequestContext::new("/test".to_string());
+        scoped.mark_request_data_access(RequestDataAccessScope::Render);
 
-        scoped.mark_request_data_access();
-
-        assert!(scoped.metadata_uses_request_data());
+        assert!(!scoped.metadata_uses_request_data());
         assert!(!scoped.response_cache_reads_allowed());
         assert!(!scoped.response_cache_allowed());
         assert!(scoped.must_send_no_store());
-    }
-
-    #[test]
-    fn get_data_scope_ends_when_guard_is_dropped() {
-        let ctx = Arc::new(RequestContext::new("/test".to_string()));
-
-        {
-            let _get_data_scope = ctx.enter_get_data_scope();
-        }
-
-        {
-            let _metadata_scope = ctx.enter_metadata_scope();
-            ctx.mark_request_data_access();
-        }
-
-        assert!(ctx.metadata_uses_request_data());
-        assert!(ctx.response_cache_reads_allowed());
-        assert!(ctx.response_cache_allowed());
-        assert!(!ctx.must_send_no_store());
     }
 
     #[test]

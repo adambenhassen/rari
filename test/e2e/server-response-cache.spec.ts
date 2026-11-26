@@ -246,6 +246,28 @@ test('Fast hits without getData do not wait for dynamic metadata', async ({ requ
     expect(cachedPublicMetadata.headers()['x-cache']).toBe('HIT')
     expect(cachedPublicMetadata.headers()['cache-control']).not.toBe('no-store')
 
+    const streamingPublicMetadataSlug = `streaming-public-${Date.now()}-${Math.random()}`
+    const streamingPublicMetadataUrl = `${origin}/cache-metadata-streaming-public/${streamingPublicMetadataSlug}`
+    const initialStreamingPublicMetadata = await request.get(streamingPublicMetadataUrl, {
+      headers: { 'X-Session': 'alice' },
+    })
+    expect(initialStreamingPublicMetadata.status()).toBe(200)
+    expect(initialStreamingPublicMetadata.headers()['x-cache']).toBe('MISS')
+    const initialStreamingPublicHtml = await initialStreamingPublicMetadata.text()
+    expect(initialStreamingPublicHtml).toContain('<title>Shared streamed metadata</title>')
+
+    const cachedStreamingPublicMetadata = await request.get(streamingPublicMetadataUrl, {
+      headers: { 'X-Session': 'bob' },
+    })
+    expect(cachedStreamingPublicMetadata.status()).toBe(200)
+    expect(cachedStreamingPublicMetadata.headers()['x-cache']).toBe('HIT')
+    expect(cachedStreamingPublicMetadata.headers()['cache-control']).not.toBe('no-store')
+    const cachedStreamingPublicHtml = await cachedStreamingPublicMetadata.text()
+    expect(cachedStreamingPublicHtml).toContain('<title>Shared streamed metadata</title>')
+    expect(cachedStreamingPublicHtml).toContain(
+      `Streamed public page: ${streamingPublicMetadataSlug}`,
+    )
+
     const sessionMetadataSlug = `session-${Date.now()}-${Math.random()}`
     const sessionMetadataUrl = `${origin}/cache-metadata-session/${sessionMetadataSlug}`
     const aliceMetadata = await request.get(sessionMetadataUrl, {

@@ -41,7 +41,10 @@ use crate::{
         module_loader::RariModuleLoader,
         ops::{RequestContextStore, StreamOpState},
     },
-    server::{actions::action_form_state_sync_script, middleware::request_context::RequestContext},
+    server::{
+        actions::action_form_state_sync_script,
+        middleware::request_context::{RequestContext, RequestDataAccessScope},
+    },
     with_scope,
 };
 
@@ -140,6 +143,7 @@ enum JsRequest {
     },
     SetRequestContext {
         request_context: Arc<RequestContext>,
+        access_scope: RequestDataAccessScope,
         result_tx: oneshot::Sender<Result<(), RariError>>,
     },
     ClearRequestContextIfMatches {
@@ -152,10 +156,12 @@ enum JsRequest {
         script_code: String,
         chunk_sender: mpsc::Sender<Result<Vec<u8>, RariError>>,
         request_context: Option<Arc<RequestContext>>,
+        access_scope: RequestDataAccessScope,
         result_tx: oneshot::Sender<Result<(), RariError>>,
     },
     RegisterRequestContext {
         request_context: Arc<RequestContext>,
+        access_scope: RequestDataAccessScope,
         result_tx: oneshot::Sender<Result<(), RariError>>,
     },
     UnregisterRequestContext {
@@ -684,11 +690,13 @@ async fn handle_js_request(
             module_loader.clear_component_caches(&component_id);
             let _ = result_tx.send(Ok(()));
         }
-        JsRequest::SetRequestContext { request_context, result_tx } => {
+        JsRequest::SetRequestContext { request_context, access_scope, result_tx } => {
             clear_page_cache_tags(js_runtime);
             reset_use_cache_dynamic_context(js_runtime);
             sync_action_form_state_for_context(js_runtime, &request_context);
-            js_runtime.op_state().borrow_mut().put(request_context);
+            let mut op_state = js_runtime.op_state().borrow_mut();
+            op_state.put(access_scope);
+            op_state.put(request_context);
             let _ = result_tx.send(Ok(()));
         }
         JsRequest::ClearRequestContextIfMatches { expected_context, result_tx } => {
@@ -703,7 +711,10 @@ async fn handle_js_request(
             };
 
             if should_clear {
-                js_runtime.op_state().borrow_mut().try_take::<Arc<RequestContext>>();
+                let mut op_state = js_runtime.op_state().borrow_mut();
+                op_state.try_take::<Arc<RequestContext>>();
+                op_state.try_take::<RequestDataAccessScope>();
+                drop(op_state);
                 clear_action_form_state(js_runtime);
             }
             let _ = result_tx.send(Ok(()));
@@ -714,6 +725,7 @@ async fn handle_js_request(
             script_code,
             chunk_sender,
             request_context,
+            access_scope,
             result_tx,
         } => {
             if let Some(request_context) = request_context {
@@ -721,10 +733,10 @@ async fn handle_js_request(
                 let op_state = js_runtime.op_state();
                 let mut borrowed = op_state.borrow_mut();
                 if let Some(store) = borrowed.try_borrow_mut::<RequestContextStore>() {
-                    store.insert(request_context);
+                    store.insert(request_context, access_scope);
                 } else {
                     let mut store = RequestContextStore::default();
-                    store.insert(request_context);
+                    store.insert(request_context, access_scope);
                     borrowed.put(store);
                 }
                 drop(borrowed);
@@ -784,14 +796,14 @@ async fn handle_js_request(
                 }
             }
         }
-        JsRequest::RegisterRequestContext { request_context, result_tx } => {
+        JsRequest::RegisterRequestContext { request_context, access_scope, result_tx } => {
             let op_state = js_runtime.op_state();
             let mut borrowed = op_state.borrow_mut();
             if let Some(store) = borrowed.try_borrow_mut::<RequestContextStore>() {
-                store.insert(request_context);
+                store.insert(request_context, access_scope);
             } else {
                 let mut store = RequestContextStore::default();
-                store.insert(request_context);
+                store.insert(request_context, access_scope);
                 borrowed.put(store);
             }
             let _ = result_tx.send(Ok(()));
@@ -1481,13 +1493,18 @@ impl JsRuntimeInterface for RariRuntime {
     fn set_request_context(
         &self,
         request_context: Arc<RequestContext>,
+        access_scope: RequestDataAccessScope,
     ) -> Pin<Box<dyn Future<Output = Result<(), RariError>> + Send>> {
         let request_sender = self.request_sender.clone();
 
         Box::pin(async move {
             let (response_sender, response_receiver) = oneshot::channel();
             request_sender
-                .send(JsRequest::SetRequestContext { request_context, result_tx: response_sender })
+                .send(JsRequest::SetRequestContext {
+                    request_context,
+                    access_scope,
+                    result_tx: response_sender,
+                })
                 .await
                 .map_err(|_| {
                     RariError::js_runtime(
@@ -1543,7 +1560,14 @@ impl JsRuntimeInterface for RariRuntime {
 
         Box::pin(async move {
             let completion = runtime
-                .queue_script_for_streaming(stream_id, script_name, script_code, chunk_sender, None)
+                .queue_script_for_streaming(
+                    stream_id,
+                    script_name,
+                    script_code,
+                    chunk_sender,
+                    None,
+                    RequestDataAccessScope::Unscoped,
+                )
                 .await?;
             completion.await
         })
@@ -1556,6 +1580,7 @@ impl JsRuntimeInterface for RariRuntime {
         script_code: String,
         chunk_sender: mpsc::Sender<Result<Vec<u8>, RariError>>,
         request_context: Option<Arc<RequestContext>>,
+        access_scope: RequestDataAccessScope,
     ) -> QueueStreamingScriptFuture {
         let runtime = Self {
             request_sender: self.request_sender.clone(),
@@ -1572,6 +1597,7 @@ impl JsRuntimeInterface for RariRuntime {
                     script_code,
                     chunk_sender,
                     request_context,
+                    access_scope,
                     result_tx: response_sender,
                 })
                 .await?;
@@ -1592,6 +1618,7 @@ impl JsRuntimeInterface for RariRuntime {
     fn register_request_context(
         &self,
         request_context: Arc<RequestContext>,
+        access_scope: RequestDataAccessScope,
     ) -> Pin<Box<dyn Future<Output = Result<(), RariError>> + Send>> {
         let runtime = Self {
             request_sender: self.request_sender.clone(),
@@ -1603,6 +1630,7 @@ impl JsRuntimeInterface for RariRuntime {
             runtime
                 .send_js_request(JsRequest::RegisterRequestContext {
                     request_context,
+                    access_scope,
                     result_tx: response_sender,
                 })
                 .await?;

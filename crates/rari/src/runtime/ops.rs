@@ -21,7 +21,9 @@ use crate::{
     server::{
         actions,
         host::utils::client,
-        middleware::request_context::{PendingCookie, PendingCookieKey, RequestContext},
+        middleware::request_context::{
+            PendingCookie, PendingCookieKey, RequestContext, RequestDataAccessScope,
+        },
     },
 };
 
@@ -131,22 +133,29 @@ impl StreamOpState {
 
 /// Multiplexed request contexts keyed by `RequestContext::request_id`.
 #[derive(Default)]
-#[non_exhaustive]
-pub struct RequestContextStore {
-    pub by_id: FxHashMap<String, Arc<RequestContext>>,
+pub(crate) struct RequestContextStore {
+    by_id: FxHashMap<String, Arc<RequestContext>>,
+    access_scopes: FxHashMap<String, RequestDataAccessScope>,
 }
 
 impl RequestContextStore {
-    pub fn insert(&mut self, ctx: Arc<RequestContext>) {
-        self.by_id.insert(ctx.request_id().to_string(), ctx);
+    pub(crate) fn insert(&mut self, ctx: Arc<RequestContext>, scope: RequestDataAccessScope) {
+        let request_id = ctx.request_id().to_string();
+        self.by_id.insert(request_id.clone(), ctx);
+        self.access_scopes.insert(request_id, scope);
     }
 
-    pub fn remove(&mut self, request_id: &str) -> Option<Arc<RequestContext>> {
+    pub(crate) fn remove(&mut self, request_id: &str) -> Option<Arc<RequestContext>> {
+        self.access_scopes.remove(request_id);
         self.by_id.remove(request_id)
     }
 
-    pub fn get(&self, request_id: &str) -> Option<Arc<RequestContext>> {
+    pub(crate) fn get(&self, request_id: &str) -> Option<Arc<RequestContext>> {
         self.by_id.get(request_id).cloned()
+    }
+
+    pub(crate) fn access_scope(&self, request_id: &str) -> Option<RequestDataAccessScope> {
+        self.access_scopes.get(request_id).copied()
     }
 }
 
@@ -158,6 +167,19 @@ fn resolve_request_context(
         return op_state.try_borrow::<RequestContextStore>().and_then(|store| store.get(id));
     }
     op_state.try_borrow::<Arc<RequestContext>>().cloned()
+}
+
+fn resolve_request_data_access_scope(
+    op_state: &OpState,
+    request_id: Option<&str>,
+) -> RequestDataAccessScope {
+    if let Some(id) = request_id.filter(|id| !id.is_empty()) {
+        return op_state
+            .try_borrow::<RequestContextStore>()
+            .and_then(|store| store.access_scope(id))
+            .unwrap_or_default();
+    }
+    op_state.try_borrow::<RequestDataAccessScope>().copied().unwrap_or_default()
 }
 
 fn parse_hex_row_id(row_id: &str, context: &str) -> Result<u32, JsErrorBox> {
@@ -653,7 +675,10 @@ pub fn op_get_cookies(state: Rc<RefCell<OpState>>, #[string] request_id: String)
     let Some(ctx) = resolve_request_context(&op_state_ref, Some(request_id.as_str())) else {
         return String::new();
     };
-    ctx.mark_request_data_access();
+    ctx.mark_request_data_access(resolve_request_data_access_scope(
+        &op_state_ref,
+        Some(request_id.as_str()),
+    ));
 
     let mut cookies: BTreeMap<String, String> = ctx
         .cookie_header
@@ -706,7 +731,10 @@ pub fn op_get_request_headers(state: Rc<RefCell<OpState>>, #[string] request_id:
     let Some(ctx) = resolve_request_context(&op_state_ref, Some(request_id.as_str())) else {
         return "{}".to_string();
     };
-    ctx.mark_request_data_access();
+    ctx.mark_request_data_access(resolve_request_data_access_scope(
+        &op_state_ref,
+        Some(request_id.as_str()),
+    ));
 
     serde_json::to_string(&ctx.request_headers).unwrap_or_else(|_| "{}".to_string())
 }
@@ -719,7 +747,10 @@ pub fn op_get_csp_nonce(state: Rc<RefCell<OpState>>, #[string] request_id: Strin
     let Some(ctx) = resolve_request_context(&op_state_ref, Some(request_id.as_str())) else {
         return String::new();
     };
-    ctx.mark_request_data_access();
+    ctx.mark_request_data_access(resolve_request_data_access_scope(
+        &op_state_ref,
+        Some(request_id.as_str()),
+    ));
 
     ctx.csp_nonce.as_deref().unwrap_or("").to_string()
 }
@@ -902,6 +933,33 @@ mod tests {
     use tokio::sync::mpsc;
 
     use super::*;
+
+    #[test]
+    fn request_context_store_tracks_the_executing_scope_per_runtime() {
+        let context = Arc::new(RequestContext::new("/test".to_string()));
+        let mut metadata_runtime = RequestContextStore::default();
+        metadata_runtime.insert(Arc::clone(&context), RequestDataAccessScope::Metadata);
+        let mut render_runtime = RequestContextStore::default();
+        render_runtime.insert(Arc::clone(&context), RequestDataAccessScope::Render);
+        let mut metadata_op_state = OpState::new(None);
+        metadata_op_state.put(metadata_runtime);
+        let mut render_op_state = OpState::new(None);
+        render_op_state.put(render_runtime);
+
+        let metadata_scope =
+            resolve_request_data_access_scope(&metadata_op_state, Some(context.request_id()));
+        let render_scope =
+            resolve_request_data_access_scope(&render_op_state, Some(context.request_id()));
+
+        assert_eq!(metadata_scope, RequestDataAccessScope::Metadata);
+        assert_eq!(render_scope, RequestDataAccessScope::Render);
+
+        context.mark_request_data_access(metadata_scope);
+
+        assert!(context.metadata_uses_request_data());
+        assert!(context.response_cache_reads_allowed());
+        assert!(context.response_cache_allowed());
+    }
 
     fn create_module_operation(
         row_id: &str,

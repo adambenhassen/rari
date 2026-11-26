@@ -14,7 +14,9 @@ pub mod transpile;
 use factory::{JsRuntimePool, PooledRuntime};
 
 use crate::server::{
-    document::metadata, middleware::request_context::RequestContext, routing::types::ParamValue,
+    document::metadata,
+    middleware::request_context::{RequestContext, RequestDataAccessScope},
+    routing::types::ParamValue,
 };
 
 pub const DEFAULT_JS_POOL_SIZE: usize = 1;
@@ -168,9 +170,9 @@ impl JsExecutionRuntime {
 
         let metadata_context = request_context.clone();
         let metadata_result = if let Some(request_context) = request_context.as_ref() {
-            let _metadata_scope = request_context.enter_metadata_scope();
             self.execute_script_with_request_context(
                 Arc::clone(request_context),
+                RequestDataAccessScope::Metadata,
                 "collect_metadata".to_string(),
                 script,
             )
@@ -280,11 +282,12 @@ impl JsExecutionRuntime {
     pub async fn execute_script_with_request_context(
         self: &Arc<Self>,
         request_context: Arc<RequestContext>,
+        access_scope: RequestDataAccessScope,
         script_name: String,
         script_code: String,
     ) -> Result<Value, RariError> {
         self.pool
-            .with_request_context(request_context, move |runtime| async move {
+            .with_request_context_scoped(request_context, access_scope, move |runtime| async move {
                 runtime.execute_script(script_name, script_code).await
             })
             .await
@@ -301,6 +304,20 @@ impl JsExecutionRuntime {
         Fut: Future<Output = Result<T, RariError>> + Send + 'static,
     {
         self.pool.with_request_context(request_context, operation).await
+    }
+
+    pub async fn with_request_context_scoped<F, Fut, T>(
+        self: &Arc<Self>,
+        request_context: Arc<RequestContext>,
+        access_scope: RequestDataAccessScope,
+        operation: F,
+    ) -> Result<T, RariError>
+    where
+        T: Send + 'static,
+        F: FnOnce(Arc<dyn factory::JsRuntimeInterface>) -> Fut + Send + 'static,
+        Fut: Future<Output = Result<T, RariError>> + Send + 'static,
+    {
+        self.pool.with_request_context_scoped(request_context, access_scope, operation).await
     }
 
     pub async fn acquire_request_runtime(
