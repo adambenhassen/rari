@@ -65,17 +65,32 @@ async fn metadata_allows_cache_hit(
     route_match: &AppRouteMatch,
     context: &mut LayoutRenderContext,
     request_context: &Arc<RequestContext>,
+    cached_metadata: &response::CacheMetadata,
     collected: &mut bool,
 ) -> bool {
+    if !cached_metadata.metadata_uses_request_data {
+        return true;
+    }
     if !*collected {
         context.metadata =
             collect_page_metadata(state, route_match, context, Some(Arc::clone(request_context)))
                 .await;
         *collected = true;
     }
+    if let Some(metadata) = context.metadata.as_ref()
+        && !serde_json::to_value(metadata).ok().is_some_and(|generated_metadata| {
+            cached_metadata.generated_metadata.as_ref() == Some(&generated_metadata)
+        })
+    {
+        request_context.disable_cache_writes();
+        return false;
+    }
+    // A failed metadata collection cannot validate a request-specific cache entry.
+    if context.metadata.is_none() {
+        return false;
+    }
     let unavailable = request_context.response_unavailable_after().is_some();
-    (context.metadata.is_some() || unavailable)
-        && (!unavailable || context.page_data_props.is_some())
+    !unavailable || context.page_data_props.is_some()
 }
 
 fn fast_cache_response(
@@ -219,7 +234,7 @@ pub async fn handle_app_route(
             response::ResponseCache::generate_static_fast_cache_key(path, query_params_ref, None);
 
         if let Some(prebuilt) = state.static_fast_cache.get(&fast_key) {
-            if !prebuilt.has_page_data {
+            if !prebuilt.has_page_data && !prebuilt.has_dynamic_metadata {
                 return Ok(fast_cache_response(&prebuilt, &headers, accept_encoding));
             }
             deferred_fast_key = Some(fast_key);
@@ -364,15 +379,7 @@ pub async fn handle_app_route(
         && request_context.response_cache_reads_allowed()
         && let Some(fast_key) = deferred_fast_key
         && let Some(prebuilt) = state.static_fast_cache.get(&fast_key)
-        && (!prebuilt.has_dynamic_metadata
-            || metadata_allows_cache_hit(
-                &state,
-                &route_match,
-                &mut context,
-                &request_context,
-                &mut metadata_collected,
-            )
-            .await)
+        && !prebuilt.has_dynamic_metadata
         && request_context.response_cache_reads_allowed()
         && let Some(current) = state.static_fast_cache.get(&fast_key)
         && Arc::ptr_eq(&prebuilt, &current)
@@ -427,6 +434,7 @@ pub async fn handle_app_route(
                             &route_match,
                             &mut context,
                             &request_context,
+                            &entry.response.metadata,
                             &mut metadata_collected,
                         )
                         .await)
@@ -584,6 +592,12 @@ pub async fn handle_app_route(
                             tags: response_cache_tags,
                             has_page_data,
                             has_dynamic_metadata: request_context.has_dynamic_metadata(),
+                            generated_metadata: context
+                                .metadata
+                                .as_ref()
+                                .and_then(|metadata| serde_json::to_value(metadata).ok()),
+                            metadata_uses_request_data: request_context
+                                .metadata_uses_request_data(),
                         },
                         compressed_zstd: None,
                         compressed_br: None,
@@ -629,6 +643,7 @@ pub async fn handle_app_route(
                             &route_match,
                             &mut context,
                             &request_context,
+                            &entry.response.metadata,
                             &mut metadata_collected,
                         )
                         .await)
@@ -882,6 +897,12 @@ pub async fn handle_app_route(
                                 tags: merged_tags,
                                 has_page_data,
                                 has_dynamic_metadata: request_context.has_dynamic_metadata(),
+                                generated_metadata: context
+                                    .metadata
+                                    .as_ref()
+                                    .and_then(|metadata| serde_json::to_value(metadata).ok()),
+                                metadata_uses_request_data: request_context
+                                    .metadata_uses_request_data(),
                             },
                             compressed_zstd,
                             compressed_br,
@@ -1150,6 +1171,11 @@ pub async fn handle_app_route(
                         tags: response_cache_tags,
                         has_page_data,
                         has_dynamic_metadata: request_context.has_dynamic_metadata(),
+                        generated_metadata: context
+                            .metadata
+                            .as_ref()
+                            .and_then(|metadata| serde_json::to_value(metadata).ok()),
+                        metadata_uses_request_data: request_context.metadata_uses_request_data(),
                     },
                     compressed_zstd,
                     compressed_br,

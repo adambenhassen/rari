@@ -81,6 +81,12 @@ pub struct CacheMetadata {
     pub has_page_data: bool,
     #[serde(default = "default_true")]
     pub has_dynamic_metadata: bool,
+    /// Final generated metadata used to validate request-specific cache hits.
+    #[serde(default)]
+    pub generated_metadata: Option<serde_json::Value>,
+    /// Whether metadata generation used request-scoped data. Legacy entries are checked.
+    #[serde(default = "default_true")]
+    pub metadata_uses_request_data: bool,
 }
 
 const fn default_true() -> bool {
@@ -936,6 +942,8 @@ mod tests {
                 tags: vec!["test-tag".to_string()],
                 has_page_data: true,
                 has_dynamic_metadata: true,
+                generated_metadata: None,
+                metadata_uses_request_data: true,
             },
             compressed_zstd: None,
             compressed_br: None,
@@ -1041,9 +1049,13 @@ mod tests {
         let metadata = value["metadata"].as_object_mut().unwrap();
         metadata.remove("has_page_data");
         metadata.remove("has_dynamic_metadata");
+        metadata.remove("generated_metadata");
+        metadata.remove("metadata_uses_request_data");
         let cached: CachedResponse = serde_json::from_value(value).unwrap();
         assert!(cached.metadata.has_page_data);
         assert!(cached.metadata.has_dynamic_metadata);
+        assert!(cached.metadata.generated_metadata.is_none());
+        assert!(cached.metadata.metadata_uses_request_data);
     }
 
     #[test]
@@ -1550,6 +1562,8 @@ mod tests {
                 tags: vec!["alpha".to_string(), "beta".to_string()],
                 has_page_data: true,
                 has_dynamic_metadata: true,
+                generated_metadata: Some(serde_json::json!({"title": "Cached title"})),
+                metadata_uses_request_data: true,
             },
             compressed_zstd: Some(Bytes::from_static(b"zstd-bytes")),
             compressed_br: Some(Bytes::from_static(b"br-bytes")),
@@ -1564,6 +1578,7 @@ mod tests {
         assert_eq!(got.metadata.etag, original.metadata.etag);
         assert_eq!(got.metadata.ttl, original.metadata.ttl);
         assert_eq!(got.metadata.tags, original.metadata.tags);
+        assert_eq!(got.metadata.generated_metadata, original.metadata.generated_metadata);
         assert_eq!(got.compressed_zstd, original.compressed_zstd);
         assert_eq!(got.compressed_br, original.compressed_br);
         assert_eq!(got.compressed_gzip, original.compressed_gzip);

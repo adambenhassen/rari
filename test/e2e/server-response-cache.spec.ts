@@ -226,6 +226,33 @@ test('Fast hits without getData do not wait for dynamic metadata', async ({ requ
     expect(cachedPublicMetadata.headers()['x-cache']).toBe('HIT')
     expect(cachedPublicMetadata.headers()['cache-control']).not.toBe('no-store')
 
+    const sessionMetadataSlug = `session-${Date.now()}-${Math.random()}`
+    const sessionMetadataUrl = `${origin}/cache-metadata-session/${sessionMetadataSlug}`
+    const aliceMetadata = await request.get(sessionMetadataUrl, {
+      headers: { 'X-Session': 'alice' },
+    })
+    expect(aliceMetadata.status()).toBe(200)
+    expect(aliceMetadata.headers()['x-cache']).toBe('MISS')
+    const aliceHtml = await aliceMetadata.text()
+    expect(aliceHtml).toContain('<title>Session alice</title>')
+
+    const bobMetadata = await request.get(sessionMetadataUrl, {
+      headers: { 'X-Session': 'bob' },
+    })
+    expect(bobMetadata.status()).toBe(200)
+    expect(bobMetadata.headers()['x-cache']).toBe('MISS')
+    expect(bobMetadata.headers()['cache-control']).toBe('no-store')
+    const bobHtml = await bobMetadata.text()
+    expect(bobHtml).toContain('<title>Session bob</title>')
+    expect(bobHtml).not.toContain('<title>Session alice</title>')
+
+    const aliceMetadataHit = await request.get(sessionMetadataUrl, {
+      headers: { 'X-Session': 'alice' },
+    })
+    expect(aliceMetadataHit.status()).toBe(200)
+    expect(aliceMetadataHit.headers()['x-cache']).toBe('HIT')
+    expect(await aliceMetadataHit.text()).toContain('<title>Session alice</title>')
+
     hold = true
     const blockingStatic = request.get(`${origin}/cache-availability-metadata/block-static`, {
       timeout: 15_000,

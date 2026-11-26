@@ -209,9 +209,16 @@ pub struct RequestContext {
 
 struct ResponseCacheState {
     access: ResponseCacheAccess,
-    get_data_active: bool,
+    scopes: RequestDataScopes,
+    metadata_uses_request_data: bool,
     unavailable_after: Option<u64>,
     has_dynamic_metadata: bool,
+}
+
+#[derive(Default)]
+struct RequestDataScopes {
+    get_data_active: bool,
+    metadata_active: bool,
 }
 
 #[derive(Clone, Copy)]
@@ -243,7 +250,17 @@ pub(crate) struct GetDataScope {
 
 impl Drop for GetDataScope {
     fn drop(&mut self) {
-        self.request_context.response_cache_state.lock().get_data_active = false;
+        self.request_context.response_cache_state.lock().scopes.get_data_active = false;
+    }
+}
+
+pub(crate) struct MetadataScope {
+    request_context: Arc<RequestContext>,
+}
+
+impl Drop for MetadataScope {
+    fn drop(&mut self) {
+        self.request_context.response_cache_state.lock().scopes.metadata_active = false;
     }
 }
 
@@ -257,7 +274,8 @@ impl RequestContext {
             route_path,
             response_cache_state: Mutex::new(ResponseCacheState {
                 access: ResponseCacheAccess::ReadWrite,
-                get_data_active: false,
+                scopes: RequestDataScopes::default(),
+                metadata_uses_request_data: false,
                 unavailable_after: None,
                 has_dynamic_metadata: true,
             }),
@@ -347,15 +365,27 @@ impl RequestContext {
     }
 
     pub(crate) fn enter_get_data_scope(self: &Arc<Self>) -> GetDataScope {
-        self.response_cache_state.lock().get_data_active = true;
+        self.response_cache_state.lock().scopes.get_data_active = true;
         GetDataScope { request_context: Arc::clone(self) }
+    }
+
+    pub(crate) fn enter_metadata_scope(self: &Arc<Self>) -> MetadataScope {
+        self.response_cache_state.lock().scopes.metadata_active = true;
+        MetadataScope { request_context: Arc::clone(self) }
     }
 
     pub(crate) fn mark_request_data_access(&self) {
         let mut state = self.response_cache_state.lock();
-        if state.get_data_active {
+        if state.scopes.get_data_active {
             state.access = ResponseCacheAccess::Disabled;
         }
+        if state.scopes.metadata_active {
+            state.metadata_uses_request_data = true;
+        }
+    }
+
+    pub(crate) fn metadata_uses_request_data(&self) -> bool {
+        self.response_cache_state.lock().metadata_uses_request_data
     }
 
     pub fn must_send_no_store(&self) -> bool {
@@ -629,6 +659,21 @@ mod tests {
         assert!(!scoped.response_cache_reads_allowed());
         assert!(!scoped.response_cache_allowed());
         assert!(scoped.must_send_no_store());
+    }
+
+    #[test]
+    fn request_data_access_in_metadata_is_tracked_without_disabling_cache() {
+        let scoped = Arc::new(RequestContext::new("/test".to_string()));
+
+        {
+            let _metadata_scope = scoped.enter_metadata_scope();
+            scoped.mark_request_data_access();
+        }
+
+        assert!(scoped.metadata_uses_request_data());
+        assert!(scoped.response_cache_reads_allowed());
+        assert!(scoped.response_cache_allowed());
+        assert!(!scoped.must_send_no_store());
     }
 
     #[test]

@@ -167,9 +167,10 @@ impl JsExecutionRuntime {
         );
 
         let metadata_context = request_context.clone();
-        let metadata_result = if let Some(request_context) = request_context {
+        let metadata_result = if let Some(request_context) = request_context.as_ref() {
+            let _metadata_scope = request_context.enter_metadata_scope();
             self.execute_script_with_request_context(
-                request_context,
+                Arc::clone(request_context),
                 "collect_metadata".to_string(),
                 script,
             )

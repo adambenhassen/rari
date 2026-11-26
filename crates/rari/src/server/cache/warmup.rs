@@ -354,6 +354,11 @@ async fn warm_route(
                     tags: merged_tags,
                     has_page_data,
                     has_dynamic_metadata: request_context.has_dynamic_metadata(),
+                    generated_metadata: context
+                        .metadata
+                        .as_ref()
+                        .and_then(|metadata| serde_json::to_value(metadata).ok()),
+                    metadata_uses_request_data: request_context.metadata_uses_request_data(),
                 },
                 compressed_zstd,
                 compressed_br,
@@ -401,6 +406,11 @@ async fn warm_route(
                         tags: merged_tags,
                         has_page_data,
                         has_dynamic_metadata: request_context.has_dynamic_metadata(),
+                        generated_metadata: context
+                            .metadata
+                            .as_ref()
+                            .and_then(|metadata| serde_json::to_value(metadata).ok()),
+                        metadata_uses_request_data: request_context.metadata_uses_request_data(),
                     },
                     compressed_zstd: None,
                     compressed_br: None,
@@ -637,6 +647,8 @@ mod tests {
                 tags: Vec::new(),
                 has_page_data: true,
                 has_dynamic_metadata: true,
+                generated_metadata: None,
+                metadata_uses_request_data: false,
             },
             compressed_zstd: None,
             compressed_br: None,
