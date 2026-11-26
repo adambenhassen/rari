@@ -67,30 +67,41 @@ fn can_skip_metadata_validation(
     !has_dynamic_metadata && request_data_check == &response::RequestDataCheck::NotRequired
 }
 
-fn metadata_allows_cached_hit(
+#[derive(Clone, Copy)]
+enum CurrentMetadata<'a> {
+    Missing,
+    Present,
+    Serialized(&'a serde_json::Value),
+}
+
+#[derive(Clone, Copy)]
+struct MetadataCacheHitInput<'a> {
     has_dynamic_metadata: bool,
-    request_data_check: &response::RequestDataCheck,
-    metadata_present: bool,
-    current_request_metadata: Option<&serde_json::Value>,
+    request_data_check: &'a response::RequestDataCheck,
+    current_metadata: CurrentMetadata<'a>,
     unavailable: bool,
     page_data_props_present: bool,
-) -> bool {
-    if can_skip_metadata_validation(has_dynamic_metadata, request_data_check) {
+}
+
+fn metadata_allows_cached_hit(input: MetadataCacheHitInput<'_>) -> bool {
+    if can_skip_metadata_validation(input.has_dynamic_metadata, input.request_data_check) {
         return true;
     }
-    if !metadata_present && !unavailable {
+    if matches!(input.current_metadata, CurrentMetadata::Missing) && !input.unavailable {
         return false;
     }
-    match request_data_check {
-        response::RequestDataCheck::NotRequired => {}
-        response::RequestDataCheck::Validated(expected_metadata) => {
-            if current_request_metadata != Some(expected_metadata) {
-                return false;
-            }
+    match (input.request_data_check, input.current_metadata) {
+        (response::RequestDataCheck::NotRequired, _) => {}
+        (
+            response::RequestDataCheck::Validated(expected_metadata),
+            CurrentMetadata::Serialized(current_metadata),
+        ) if current_metadata == expected_metadata => {}
+        (response::RequestDataCheck::Validated(_), _) => {
+            return false;
         }
-        response::RequestDataCheck::Unvalidated => return false,
+        (response::RequestDataCheck::Unvalidated, _) => return false,
     }
-    !unavailable || page_data_props_present
+    !input.unavailable || input.page_data_props_present
 }
 
 async fn metadata_allows_cache_hit(
@@ -113,33 +124,34 @@ async fn metadata_allows_cache_hit(
                 .await;
         *collected = true;
     }
-    let current_request_metadata = match (
-        &cached_metadata.request_data_check,
-        context.metadata.as_ref(),
-    ) {
-        (response::RequestDataCheck::Validated(_), Some(metadata)) => {
-            match serde_json::to_value(metadata) {
-                Ok(metadata) => Some(metadata),
-                Err(error) => {
-                    request_context.disable_cache_writes();
-                    tracing::warn!(
-                        %error,
-                        "Failed to serialize request-specific metadata while validating response cache hit"
-                    );
-                    return false;
-                }
+    let mut current_request_metadata = None;
+    if let (response::RequestDataCheck::Validated(_), Some(metadata)) =
+        (&cached_metadata.request_data_check, context.metadata.as_ref())
+    {
+        match serde_json::to_value(metadata) {
+            Ok(metadata) => current_request_metadata = Some(metadata),
+            Err(error) => {
+                request_context.disable_cache_writes();
+                tracing::warn!(
+                    %error,
+                    "Failed to serialize request-specific metadata while validating response cache hit"
+                );
+                return false;
             }
         }
-        _ => None,
+    }
+    let current_metadata = match (context.metadata.is_some(), current_request_metadata.as_ref()) {
+        (false, _) => CurrentMetadata::Missing,
+        (true, Some(metadata)) => CurrentMetadata::Serialized(metadata),
+        (true, None) => CurrentMetadata::Present,
     };
-    metadata_allows_cached_hit(
-        cached_metadata.has_dynamic_metadata,
-        &cached_metadata.request_data_check,
-        context.metadata.is_some(),
-        current_request_metadata.as_ref(),
-        request_context.response_unavailable_after().is_some(),
-        context.page_data_props.is_some(),
-    )
+    metadata_allows_cached_hit(MetadataCacheHitInput {
+        has_dynamic_metadata: cached_metadata.has_dynamic_metadata,
+        request_data_check: &cached_metadata.request_data_check,
+        current_metadata,
+        unavailable: request_context.response_unavailable_after().is_some(),
+        page_data_props_present: context.page_data_props.is_some(),
+    })
 }
 
 fn fast_cache_response(
@@ -1276,27 +1288,28 @@ pub async fn handle_app_route(
 
 #[cfg(test)]
 mod tests {
-    use super::{can_skip_metadata_validation, metadata_allows_cached_hit};
+    use super::{
+        CurrentMetadata, MetadataCacheHitInput, can_skip_metadata_validation,
+        metadata_allows_cached_hit,
+    };
     use crate::server::cache::response::RequestDataCheck;
 
     #[test]
     fn metadata_cache_gate_checks_outage_and_request_data_states() {
-        assert!(!metadata_allows_cached_hit(
-            true,
-            &RequestDataCheck::NotRequired,
-            false,
-            None,
-            false,
-            false,
-        ));
-        assert!(metadata_allows_cached_hit(
-            true,
-            &RequestDataCheck::NotRequired,
-            false,
-            None,
-            true,
-            true,
-        ));
+        let not_required = RequestDataCheck::NotRequired;
+        let metadata_missing = MetadataCacheHitInput {
+            has_dynamic_metadata: true,
+            request_data_check: &not_required,
+            current_metadata: CurrentMetadata::Missing,
+            unavailable: false,
+            page_data_props_present: false,
+        };
+        assert!(!metadata_allows_cached_hit(metadata_missing));
+        assert!(metadata_allows_cached_hit(MetadataCacheHitInput {
+            unavailable: true,
+            page_data_props_present: true,
+            ..metadata_missing
+        }));
 
         let expected = serde_json::json!({"title": "Alice"});
         let current = serde_json::json!({"title": "Bob"});
@@ -1304,22 +1317,21 @@ mod tests {
             false,
             &RequestDataCheck::Validated(expected.clone()),
         ));
-        assert!(!metadata_allows_cached_hit(
-            false,
-            &RequestDataCheck::Validated(expected),
-            true,
-            Some(&current),
-            false,
-            false,
-        ));
-        assert!(!metadata_allows_cached_hit(
-            false,
-            &RequestDataCheck::Unvalidated,
-            false,
-            None,
-            true,
-            true,
-        ));
+        assert!(!metadata_allows_cached_hit(MetadataCacheHitInput {
+            has_dynamic_metadata: false,
+            request_data_check: &RequestDataCheck::Validated(expected),
+            current_metadata: CurrentMetadata::Serialized(&current),
+            unavailable: false,
+            page_data_props_present: false,
+        }));
+        let unvalidated = RequestDataCheck::Unvalidated;
+        assert!(!metadata_allows_cached_hit(MetadataCacheHitInput {
+            has_dynamic_metadata: false,
+            request_data_check: &unvalidated,
+            current_metadata: CurrentMetadata::Missing,
+            unavailable: true,
+            page_data_props_present: true,
+        }));
         assert!(can_skip_metadata_validation(false, &RequestDataCheck::NotRequired));
     }
 }
