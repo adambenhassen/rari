@@ -402,11 +402,11 @@ function dockerPublishValues(command) {
 
   for (let index = 0; index < tokens.length; index += 1) {
     const rawToken = tokens[index].value
-    if (/^--?[$`{]/.test(rawToken)) {
-      values.push(rawToken)
+    const token = rawToken.replace(/['"]/g, '').replace(/\\(.)/g, '$1')
+    if (/^--?[$`{]/.test(token)) {
+      values.push(token)
       continue
     }
-    const token = rawToken.replace(/['"]/g, '').replace(/\\(.)/g, '$1')
     if (token === '--publish' || token === '-p') {
       if (tokens[index + 1]) values.push(tokens[++index].value)
       continue
