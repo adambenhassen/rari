@@ -365,6 +365,8 @@ function hasJobLabelFilter(command, matrixContext) {
 }
 
 function hasFixedDockerPublish(command) {
+  if (dockerPublishValues(command).some(hasFixedHostPortWithVariableContainerPort)) return true
+
   return /(?:^|\s)(?:--publish(?:=|\s+)|-[A-Za-z]*p(?:=|\s+|(?=\d)))["']?(?:(?:(?:\d{1,3}\.){3}\d{1,3}|localhost|\[[\da-f:]+\]):)?\d+(?:-\d+)?:\d+(?:-\d+)?(?:\/(?:tcp|udp))?(?=$|\s|["'])/.test(
     command,
   )
@@ -401,6 +403,12 @@ function dockerPublishValues(command) {
   return values
 }
 
+function hasFixedHostPortWithVariableContainerPort(value) {
+  return /(?:(?:(?:\d{1,3}\.){3}\d{1,3}|localhost|\[[\da-f:]+\]):)?\d+(?:-\d+)?:\$(?:\{[^}]+\}|[A-Za-z_][\w]*)/.test(
+    value,
+  )
+}
+
 function hasFixedPortMapping(value) {
   const shortForm = value
     .split(/\r?\n/)
@@ -409,7 +417,9 @@ function hasFixedPortMapping(value) {
   return (
     /(?:\d{1,3}(?:\.\d{1,3}){3}|localhost|\[[\da-f:]+\]):\d+(?:-\d+)?:\d+(?:-\d+)?|\d+(?:-\d+)?:\d+(?:-\d+)?/.test(
       shortForm,
-    ) || hasVariableShortHostPort(shortForm)
+    ) ||
+    hasFixedHostPortWithVariableContainerPort(shortForm) ||
+    hasVariableShortHostPort(shortForm)
   )
 }
 
@@ -546,6 +556,7 @@ export function findDockerSafetyViolations(source, file = '<input>') {
   const lines = source.split(/\r?\n/)
   const violations = []
   const isWorkflow = /[\\/]workflows[\\/][^\\/]+\.ya?ml$/.test(file)
+  if (isWorkflow) assertNoYamlAnchorsOrAliases(source, file)
   const matrixContext = isWorkflow ? workflowMatrixContext(source) : undefined
 
   for (const command of logicalCommands(lines)) {
@@ -1054,10 +1065,14 @@ function defaultComposePaths(root, workingDirectory) {
   return paths
 }
 
-function assertComposeFileScannable(source, file) {
+function assertNoYamlAnchorsOrAliases(source, file) {
   if (hasYamlAnchorsOrAliases(source)) {
-    throw new Error(`Cannot statically scan Compose anchors or aliases in ${file}`)
+    throw new Error(`Cannot statically scan YAML anchors or aliases in ${file}`)
   }
+}
+
+function assertComposeFileScannable(source, file) {
+  assertNoYamlAnchorsOrAliases(source, file)
 
   let extendsIndent = -1
 
@@ -1101,11 +1116,29 @@ function assertComposeFileScannable(source, file) {
 }
 
 function hasYamlAnchorsOrAliases(source) {
-  return source.split(/\r?\n/).some(line => {
+  let blockScalarIndent
+
+  for (const line of source.split(/\r?\n/)) {
+    const indent = line.match(/^\s*/)[0].length
+    if (blockScalarIndent !== undefined) {
+      if (!line.trim() || indent > blockScalarIndent) continue
+      blockScalarIndent = undefined
+    }
+
     const content = yamlScalar(line)
-    if (!content || content.trimStart().startsWith('#')) return false
-    return /(?:^|[:,\[{]\s*|-\s*)[&*][^\s,\]}]+/.test(content)
-  })
+    if (!content || content.trimStart().startsWith('#')) continue
+
+    const mapping = yamlMappingEntry(line)
+    const blockIndicator = mapping?.value ?? content.trim().replace(/^-\s*/, '')
+    if (/^[|>][+-]?\d?[+-]?(?:\s+#.*)?$/.test(blockIndicator)) {
+      blockScalarIndent = mapping?.indent ?? indent
+      continue
+    }
+
+    if (/(?:^|[:,\[{]\s*|-\s*)[&*][^\s,\]}]+/.test(content)) return true
+  }
+
+  return false
 }
 
 function dotenvValue(value, file) {

@@ -81,6 +81,20 @@ test('rejects fixed Docker host ports and fixed compose ports', () => {
   )
 })
 
+test('rejects literal host ports when the container port is variable', () => {
+  const name = '--name "rari-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT-$GITHUB_JOB"'
+  const docker = `docker run ${name} -p 5432:$PG_PORT postgres`
+  const composeScalar = 'services:\n  db:\n    ports:\n      - "5432:${PG_PORT}"'
+  const composeFlow = 'services:\n  db:\n    ports: ["5432:${PG_PORT}"]'
+
+  for (const source of [docker, composeScalar, composeFlow]) {
+    assert.deepEqual(
+      findDockerSafetyViolations(source).map(({ message }) => message),
+      ['fixed host-port publishing'],
+    )
+  }
+})
+
 test('rejects variable host ports in Docker publish flags unless statically empty', () => {
   const name = '--name "rari-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT-$GITHUB_JOB"'
   const commands = [
@@ -1249,8 +1263,39 @@ test('fails closed on Compose anchors and aliases that can hide port mappings', 
 
     await assert.rejects(
       collectComposeFiles(root, [{ path: workflowPath, source: workflow }], {}),
-      /Cannot statically scan Compose anchors or aliases/,
+      /Cannot statically scan YAML anchors or aliases/,
     )
+  } finally {
+    await rm(root, { recursive: true, force: true })
+  }
+})
+
+test('CLI fails closed on anchors and aliases in an in-scope workflow', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'docker-safety-workflow-aliases-'))
+  const workflowDirectory = join(root, '.github', 'workflows')
+
+  try {
+    await mkdir(workflowDirectory, { recursive: true })
+    await writeFile(
+      join(workflowDirectory, 'check.yml'),
+      [
+        'jobs:',
+        '  check:',
+        '    runs-on: inference-x64',
+        '    strategy:',
+        '      matrix:',
+        '        dbports: &dbports ["5432:5432"]',
+        '    services:',
+        '      postgres:',
+        '        image: postgres',
+        '        ports: *dbports',
+      ].join('\n'),
+    )
+
+    const result = spawnSync(process.execPath, [scriptPath], { cwd: root, encoding: 'utf8' })
+
+    assert.equal(result.status, 1, `${result.stdout}\n${result.stderr}`)
+    assert.match(result.stderr, /Cannot statically scan YAML anchors or aliases in .*check\.yml/)
   } finally {
     await rm(root, { recursive: true, force: true })
   }
