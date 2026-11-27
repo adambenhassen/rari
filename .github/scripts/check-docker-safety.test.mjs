@@ -385,6 +385,7 @@ test('scans Docker commands inside quoted shell scripts', () => {
     `sh -c 'docker run --name ${name} -p 5432:5432 image'`,
     `bash -c $'docker run --name ${name} -p 5432:5432 image'`,
     `bash -c $'\\x64ocker run --name ${name} -p 5432:5432 image'`,
+    `bash -c $'do'cker\\ run\\ --name\\ ${name}\\ -p\\ 5432:5432\\ image`,
   ]
 
   for (const command of publishCommands) {

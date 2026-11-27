@@ -98,13 +98,13 @@ function logicalCommands(lines) {
 }
 
 function shellTokens(source) {
-  return [...source.matchAll(/\$'(?:\\.|[^'\\])*'|"(?:\\.|[^"\\])*"|'[^']*'|[^\s]+/g)].map(
-    match => ({
-      value: match[0],
-      start: match.index,
-      end: match.index + match[0].length,
-    }),
-  )
+  return [
+    ...source.matchAll(/\$'(?:\\.|[^'\\])*'|"(?:\\.|[^"\\])*"|'[^']*'|(?:\\.|[^\s\\])+/g),
+  ].map(match => ({
+    value: match[0],
+    start: match.index,
+    end: match.index + match[0].length,
+  }))
 }
 
 function decodeAnsiCQuotedWord(token, sourcePosition = index => index) {
@@ -326,29 +326,22 @@ function shellCommandWords(source, offset = 0, sourcePositions) {
   const words = []
   const quotedRanges = []
   const sourcePosition = index => sourcePositions?.[index] ?? offset + index
+  const context = { source }
 
   for (const word of shellWords(source)) {
-    if (word.value.startsWith("$'") && word.value.endsWith("'")) {
-      const decoded = decodeAnsiCQuotedWord(word.value, index => sourcePosition(word.start + index))
-      if (/\s/.test(decoded.value)) {
-        quotedRanges.push({ start: word.start, end: word.end })
-        words.push(...shellCommandWords(decoded.value, 0, decoded.positions))
-        continue
-      }
-    }
-
-    const unquoted = unquoteShellToken(word.value)
-    if (unquoted !== word.value && /\s/.test(unquoted)) {
+    const decoded = decodeShellWord(word.value, index => sourcePosition(word.start + index))
+    if (/\s/.test(decoded.value)) {
       quotedRanges.push({ start: word.start, end: word.end })
-      const contentPositions = Array.from({ length: unquoted.length + 1 }, (_, index) =>
-        sourcePosition(word.start + index + 1),
-      )
-      words.push(...shellCommandWords(unquoted, 0, contentPositions))
+      words.push(...shellCommandWords(decoded.value, 0, decoded.positions))
     } else {
       words.push({
         ...word,
+        value: decoded.value,
         start: sourcePosition(word.start),
         end: sourcePosition(word.end),
+        context,
+        contextStart: word.start,
+        contextEnd: word.end,
       })
     }
   }
@@ -364,6 +357,57 @@ function shellCommandWords(source, offset = 0, sourcePositions) {
   }
 
   return words
+}
+
+function decodeShellWord(word, sourcePosition = index => index) {
+  let value = ''
+  const positions = [sourcePosition(0)]
+  const append = (decoded, endPositions) => {
+    value += decoded
+    for (const position of endPositions) positions.push(position)
+  }
+
+  for (let index = 0; index < word.length;) {
+    if (word.startsWith("$'", index)) {
+      const quoted = word.slice(index).match(/^\$'(?:\\.|[^'\\])*'/)?.[0]
+      if (quoted) {
+        const decoded = decodeAnsiCQuotedWord(quoted, position => sourcePosition(index + position))
+        append(decoded.value, decoded.positions.slice(1))
+        index += quoted.length
+        continue
+      }
+    }
+
+    const character = word[index]
+    if (character === "'" || character === '"') {
+      const quote = character
+      index += 1
+      while (index < word.length && word[index] !== quote) {
+        if (word[index] === '\\' && index + 1 < word.length) {
+          append(word[index + 1], [sourcePosition(index + 2)])
+          index += 2
+        } else {
+          append(word[index], [sourcePosition(index + 1)])
+          index += 1
+        }
+      }
+      if (word[index] === quote) index += 1
+      if (positions.length === 1) positions[0] = sourcePosition(index)
+      continue
+    }
+
+    if (character === '\\' && index + 1 < word.length) {
+      append(word[index + 1], [sourcePosition(index + 2)])
+      index += 2
+      continue
+    }
+
+    append(character, [sourcePosition(index + 1)])
+    index += 1
+  }
+
+  if (positions.length === 1) positions[0] = sourcePosition(word.length)
+  return { value, positions }
 }
 
 function unquoteShellToken(token) {
@@ -415,7 +459,8 @@ const dockerContainerSubcommandAliases = new Map([
 ])
 
 function dockerInvocations(source) {
-  const matches = shellCommandWords(source)
+  const matchesByContext = new Map()
+  for (const token of shellCommandWords(source)
     .filter(token => !token.value.includes('$(') && !token.value.includes('`'))
     .map(token => ({
       ...token,
@@ -425,91 +470,98 @@ function dockerInvocations(source) {
       ['docker', 'docker-compose'].some(
         executable => token.command === executable || token.command.endsWith(`/${executable}`),
       ),
-    )
-    .sort((left, right) => left.start - right.start)
+    )) {
+    const matches = matchesByContext.get(token.context) ?? []
+    matches.push(token)
+    matchesByContext.set(token.context, matches)
+  }
+
   const invocations = []
 
-  for (let matchIndex = 0; matchIndex < matches.length; matchIndex += 1) {
-    const match = matches[matchIndex]
-    const end = matches[matchIndex + 1]?.start ?? source.length
-    const afterDocker = match.end
+  for (const [context, matches] of matchesByContext) {
+    matches.sort((left, right) => left.contextStart - right.contextStart)
+    for (let matchIndex = 0; matchIndex < matches.length; matchIndex += 1) {
+      const match = matches[matchIndex]
+      const end = matches[matchIndex + 1]?.contextStart ?? context.source.length
+      const afterDocker = match.contextEnd
 
-    if (match.command.endsWith('/docker-compose') || match.command === 'docker-compose') {
-      invocations.push({
-        start: match.start,
-        subcommand: 'compose',
-        arguments: source.slice(afterDocker, end),
-        command: source.slice(match.start, end),
-      })
-      continue
-    }
-
-    const tokens = shellWords(source.slice(afterDocker, end))
-
-    for (let index = 0; index < tokens.length; index += 1) {
-      const token = commandWord(tokens[index].value)
-
-      if (token === '-compose') {
+      if (match.command.endsWith('/docker-compose') || match.command === 'docker-compose') {
         invocations.push({
           start: match.start,
           subcommand: 'compose',
-          arguments: source.slice(afterDocker + tokens[index].end, end),
-          command: source.slice(match.start, end),
+          arguments: context.source.slice(afterDocker, end),
+          command: context.source.slice(match.contextStart, end),
+        })
+        continue
+      }
+
+      const tokens = shellWords(context.source.slice(afterDocker, end))
+
+      for (let index = 0; index < tokens.length; index += 1) {
+        const token = commandWord(tokens[index].value)
+
+        if (token === '-compose') {
+          invocations.push({
+            start: match.start,
+            subcommand: 'compose',
+            arguments: context.source.slice(afterDocker + tokens[index].end, end),
+            command: context.source.slice(match.contextStart, end),
+          })
+          break
+        }
+
+        // Root options are case-sensitive (`-H` is not `-h`), so match them on the raw token.
+        const option = rawCommandToken(tokens[index].value)
+
+        if (dockerRootOptionsWithValue.has(option)) {
+          if (!tokens[index + 1]) break
+          index += 1
+          continue
+        }
+
+        const attachedValueOption = [...dockerRootOptionsWithValue].some(
+          rootOption =>
+            option.startsWith(`${rootOption}=`) ||
+            (rootOption.length === 2 &&
+              rootOption.startsWith('-') &&
+              option.startsWith(rootOption) &&
+              option.length > 2),
+        )
+        if (
+          attachedValueOption ||
+          dockerRootOptionsWithoutValue.has(option) ||
+          option.startsWith('-')
+        ) {
+          continue
+        }
+
+        let subcommandIndex = index
+        let group
+        const managementGroup = dockerManagementGroupAliases.get(token) ?? token
+        if (dockerManagementGroups.has(managementGroup)) {
+          subcommandIndex = managementSubcommandIndex(tokens, index)
+          if (subcommandIndex === -1) break
+          group = managementGroup
+        }
+
+        const parsedSubcommand = commandWord(tokens[subcommandIndex].value)
+        const subcommand =
+          group === 'container'
+            ? (dockerContainerSubcommandAliases.get(parsedSubcommand) ?? parsedSubcommand)
+            : parsedSubcommand
+        invocations.push({
+          start: match.start,
+          group,
+          subcommand,
+          arguments: context.source.slice(afterDocker + tokens[subcommandIndex].end, end),
+          command: context.source.slice(match.contextStart, end),
         })
         break
       }
-
-      // Root options are case-sensitive (`-H` is not `-h`), so match them on the raw token.
-      const option = rawCommandToken(tokens[index].value)
-
-      if (dockerRootOptionsWithValue.has(option)) {
-        if (!tokens[index + 1]) break
-        index += 1
-        continue
-      }
-
-      const attachedValueOption = [...dockerRootOptionsWithValue].some(
-        rootOption =>
-          option.startsWith(`${rootOption}=`) ||
-          (rootOption.length === 2 &&
-            rootOption.startsWith('-') &&
-            option.startsWith(rootOption) &&
-            option.length > 2),
-      )
-      if (
-        attachedValueOption ||
-        dockerRootOptionsWithoutValue.has(option) ||
-        option.startsWith('-')
-      ) {
-        continue
-      }
-
-      let subcommandIndex = index
-      let group
-      const managementGroup = dockerManagementGroupAliases.get(token) ?? token
-      if (dockerManagementGroups.has(managementGroup)) {
-        subcommandIndex = managementSubcommandIndex(tokens, index)
-        if (subcommandIndex === -1) break
-        group = managementGroup
-      }
-
-      const parsedSubcommand = commandWord(tokens[subcommandIndex].value)
-      const subcommand =
-        group === 'container'
-          ? (dockerContainerSubcommandAliases.get(parsedSubcommand) ?? parsedSubcommand)
-          : parsedSubcommand
-      invocations.push({
-        start: match.start,
-        group,
-        subcommand,
-        arguments: source.slice(afterDocker + tokens[subcommandIndex].end, end),
-        command: source.slice(match.start, end),
-      })
-      break
     }
   }
 
-  return invocations
+  return invocations.sort((left, right) => left.start - right.start)
 }
 
 // Container commands: top-level (`docker rm`) or under the `container` group (`docker container rm`).
