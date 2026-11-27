@@ -403,6 +403,19 @@ test('scans Docker commands inside quoted shell scripts', () => {
   )
 })
 
+test('scans Docker commands inside process substitutions', () => {
+  const name = 'rari-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT-$GITHUB_JOB'
+  for (const command of [
+    `cat <(docker run --name ${name} -p 5432:5432 image)`,
+    `tee >(docker run --name ${name} -p 5432:5432 image)`,
+  ]) {
+    assert.deepEqual(
+      findDockerSafetyViolations(command).map(({ message }) => message),
+      ['fixed host-port publishing'],
+    )
+  }
+})
+
 test('requires Docker container names to include the run, attempt, and job identity', () => {
   assert.deepEqual(
     findDockerSafetyViolations('docker create --name rari-smoke-image alpine').map(

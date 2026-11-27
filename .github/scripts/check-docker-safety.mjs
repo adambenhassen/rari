@@ -308,6 +308,12 @@ function shellSubstitutionRanges(source) {
         ranges.push({ start: index + 2, end })
         index = end
       }
+    } else if (!quote && (source.startsWith('<(', index) || source.startsWith('>(', index))) {
+      const end = commandSubstitutionEnd(source, index)
+      if (end !== -1) {
+        ranges.push({ start: index + 2, end })
+        index = end
+      }
     } else if (character === '`') {
       const end = backtickSubstitutionEnd(source, index)
       if (end !== -1) {
