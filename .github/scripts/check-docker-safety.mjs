@@ -5,9 +5,13 @@ import { fileURLToPath } from 'node:url'
 const textExtensions = new Set(['.js', '.json', '.md', '.mjs', '.sh', '.ts', '.yml', '.yaml'])
 const composeFileNames = [
   'compose.yaml',
+  'compose.override.yaml',
   'compose.yml',
+  'compose.override.yml',
   'docker-compose.yaml',
+  'docker-compose.override.yaml',
   'docker-compose.yml',
+  'docker-compose.override.yml',
 ]
 const composeSubcommands = new Set([
   'alpha',
@@ -367,9 +371,27 @@ function hasFixedDockerPublish(command) {
 }
 
 function hasFixedPortMapping(value) {
+  const shortForm = value
+    .split(/\r?\n/)
+    .filter(line => !/^\s*(?:-\s*)?[\w-]+\s*:(?:\s|$)/.test(line))
+    .join('\n')
   return /(?:\d{1,3}(?:\.\d{1,3}){3}|localhost|\[[\da-f:]+\]):\d+(?:-\d+)?:\d+(?:-\d+)?|\d+(?:-\d+)?:\d+(?:-\d+)?/.test(
-    value,
+    shortForm,
   )
+}
+
+function hasFixedPublishedPort(value) {
+  for (const line of value.split(/\r?\n/)) {
+    const mapping = line.match(/^\s*(?:-\s*)?published\s*:\s*(.*?)\s*$/)
+    if (mapping && /^\d+(?:-\d+)?$/.test(yamlScalar(mapping[1]))) return true
+
+    const inlineMapping = line.match(
+      /[,{]\s*published\s*:\s*(?:"([^"]*)"|'([^']*)'|([\d-]+))(?=\s*[,}]|$)/,
+    )
+    const inlineValue = inlineMapping?.[1] ?? inlineMapping?.[2] ?? inlineMapping?.[3]
+    if (inlineValue && /^\d+(?:-\d+)?$/.test(inlineValue)) return true
+  }
+  return false
 }
 
 function workflowMatrixContext(source) {
@@ -505,12 +527,16 @@ export function findDockerSafetyViolations(source, file = '<input>') {
         violations.push({ file, line: command.line, message: 'fixed host-port publishing' })
       }
 
-      if (
-        dockerManagementGroups.has(invocation.group) &&
-        invocation.subcommand === 'prune' &&
-        !hasJobLabelFilter(invocation.arguments, matrixContext)
-      ) {
-        violations.push({ file, line: command.line, message: 'unfiltered Docker prune' })
+      if (dockerManagementGroups.has(invocation.group) && invocation.subcommand === 'prune') {
+        if (invocation.group === 'system') {
+          violations.push({
+            file,
+            line: command.line,
+            message: 'Docker system prune is not allowed',
+          })
+        } else if (!hasJobLabelFilter(invocation.arguments, matrixContext)) {
+          violations.push({ file, line: command.line, message: 'unfiltered Docker prune' })
+        }
       }
     }
   }
@@ -537,7 +563,7 @@ export function findDockerSafetyViolations(source, file = '<input>') {
       block += `\n${lines[next]}`
     }
 
-    if (hasFixedPortMapping(block) || /^\s*published:\s*["']?\d+/m.test(block)) {
+    if (hasFixedPortMapping(block) || hasFixedPublishedPort(block)) {
       violations.push({ file, line: index + 1, message: 'fixed host-port publishing' })
     }
   }
@@ -652,52 +678,55 @@ function shellCommandSegments(source) {
   return segments
 }
 
-function composeFileReferences(source) {
-  const references = []
-
+function composeCommandInvocations(source) {
+  const invocations = []
   for (const segment of shellCommandSegments(source)) {
     for (const command of dockerInvocations(segment)) {
-      if (command.subcommand !== 'compose') continue
+      if (command.subcommand === 'compose') invocations.push({ command, segment })
+    }
+  }
+  return invocations
+}
 
-      const tokens = shellTokens(command.arguments)
-      for (let index = 0; index < tokens.length; index += 1) {
-        const token = unquoteShellToken(tokens[index].value)
-        const word = commandWord(tokens[index].value)
-        if (composeSubcommands.has(word)) break
+function composeFileReferences(commandArguments, source) {
+  const references = []
+  const tokens = shellTokens(commandArguments)
+  for (let index = 0; index < tokens.length; index += 1) {
+    const token = unquoteShellToken(tokens[index].value)
+    const word = commandWord(tokens[index].value)
+    if (composeSubcommands.has(word)) break
 
-        let reference
+    let reference
 
-        if (token === '-f' || token === '--file') {
-          if (!tokens[index + 1]) {
-            throw new Error(`Cannot statically resolve explicit Compose file option in ${segment}`)
-          }
-          reference = unquoteShellToken(tokens[++index].value)
-        } else if (token.startsWith('--file=')) {
-          reference = token.slice('--file='.length)
-        } else if (token.startsWith('--file')) {
-          throw new Error(
-            `Cannot statically resolve explicit Compose file option "${token}" in ${segment}`,
-          )
-        } else if (token.startsWith('-f') && token.length > 2) {
-          reference = token.slice(2).replace(/^=/, '')
-        } else if (composeGlobalOptionsWithValue.has(token)) {
-          if (!tokens[index + 1]) {
-            throw new Error(`Cannot statically resolve Compose option "${token}" in ${segment}`)
-          }
-          index += 1
-        } else if (token.startsWith('-')) {
-          continue
-        } else {
-          continue
-        }
-
-        if (reference !== undefined) {
-          if (!reference) {
-            throw new Error(`Cannot statically resolve explicit Compose file option in ${segment}`)
-          }
-          references.push(reference)
-        }
+    if (token === '-f' || token === '--file') {
+      if (!tokens[index + 1]) {
+        throw new Error(`Cannot statically resolve explicit Compose file option in ${source}`)
       }
+      reference = unquoteShellToken(tokens[++index].value)
+    } else if (token.startsWith('--file=')) {
+      reference = token.slice('--file='.length)
+    } else if (token.startsWith('--file')) {
+      throw new Error(
+        `Cannot statically resolve explicit Compose file option "${token}" in ${source}`,
+      )
+    } else if (token.startsWith('-f') && token.length > 2) {
+      reference = token.slice(2).replace(/^=/, '')
+    } else if (composeGlobalOptionsWithValue.has(token)) {
+      if (!tokens[index + 1]) {
+        throw new Error(`Cannot statically resolve Compose option "${token}" in ${source}`)
+      }
+      index += 1
+    } else if (token.startsWith('-')) {
+      continue
+    } else {
+      continue
+    }
+
+    if (reference !== undefined) {
+      if (!reference) {
+        throw new Error(`Cannot statically resolve explicit Compose file option in ${source}`)
+      }
+      references.push(reference)
     }
   }
   return references
@@ -953,6 +982,35 @@ function defaultComposePaths(root, workingDirectory) {
   return paths
 }
 
+function assertComposeReferencesScannable(source, file) {
+  let extendsIndent = -1
+
+  for (const line of source.split(/\r?\n/)) {
+    const content = yamlScalar(line)
+    if (!content) continue
+
+    const indent = line.match(/^\s*/)[0].length
+    if (extendsIndent >= 0 && indent <= extendsIndent) extendsIndent = -1
+
+    if (indent === 0 && /^include\s*:/i.test(content)) {
+      throw new Error(`Cannot statically scan Compose include or extends.file in ${file}`)
+    }
+
+    const extendsMatch = content.match(/^extends\s*:\s*(.*)$/i)
+    if (!extendsMatch) {
+      if (extendsIndent >= 0 && indent > extendsIndent && /^file\s*:/i.test(content)) {
+        throw new Error(`Cannot statically scan Compose include or extends.file in ${file}`)
+      }
+      continue
+    }
+
+    extendsIndent = indent
+    if (/\bfile\s*:/i.test(extendsMatch[1])) {
+      throw new Error(`Cannot statically scan Compose include or extends.file in ${file}`)
+    }
+  }
+}
+
 function dotenvValue(value, file) {
   const trimmed = value.trim()
   if (trimmed.startsWith("'") || trimmed.startsWith('"')) {
@@ -1047,14 +1105,21 @@ export async function collectComposeFiles(root, sources, environment = process.e
         )
       }
       const workingDirectory = resolve(root, command.workingDirectory || '.')
-      const fileReferences = composeFileReferences(command.shellSource || command.source)
-      if (command.writesComposeFileToGithubEnv && fileReferences.length === 0) {
+      const invocationSelections = composeCommandInvocations(
+        command.shellSource || command.source,
+      ).map(({ command: invocation, segment }) => ({
+        references: composeFileReferences(invocation.arguments, segment),
+      }))
+      if (
+        command.writesComposeFileToGithubEnv &&
+        invocationSelections.some(selection => selection.references.length === 0)
+      ) {
         throw new Error(
           `Cannot statically resolve COMPOSE_FILE written to GITHUB_ENV before Compose step in ${path}`,
         )
       }
-      if (fileReferences.length > 0) {
-        for (const reference of fileReferences) {
+      for (const selection of invocationSelections) {
+        for (const reference of selection.references) {
           if (!isLiteralComposeFileReference(reference)) {
             throw new Error(
               `Cannot statically resolve explicit Compose file reference "${reference}" in ${path}`,
@@ -1062,7 +1127,8 @@ export async function collectComposeFiles(root, sources, environment = process.e
           }
           references.set(resolve(workingDirectory, reference), { required: true, source: path })
         }
-      } else {
+      }
+      if (invocationSelections.some(selection => selection.references.length === 0)) {
         const commandEnvironment = command.environment || {}
         const shellComposeFile = shellComposeFileAssignments(command.shellSource || '')
         if (shellComposeFile.unresolved) {
@@ -1136,7 +1202,9 @@ export async function collectComposeFiles(root, sources, environment = process.e
   const found = []
   for (const [path, reference] of references) {
     try {
-      found.push({ path, source: await readFile(path, 'utf8') })
+      const source = await readFile(path, 'utf8')
+      assertComposeReferencesScannable(source, path)
+      found.push({ path, source })
     } catch (error) {
       if (error.code === 'ENOENT' && !reference.required) continue
       if (error.code === 'ENOENT') {

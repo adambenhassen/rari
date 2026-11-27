@@ -41,6 +41,26 @@ test('rejects fixed Docker host ports and fixed compose ports', () => {
     findDockerSafetyViolations(compose).map(({ message }) => message),
     ['fixed host-port publishing'],
   )
+  assert.deepEqual(
+    findDockerSafetyViolations('services:\n  db:\n    ports:\n      - 5432:5432').map(
+      ({ message }) => message,
+    ),
+    ['fixed host-port publishing'],
+  )
+  assert.deepEqual(
+    findDockerSafetyViolations(
+      ['services:', '  db:', '    ports:', '      - published: 5432', '        target: 5432'].join(
+        '\n',
+      ),
+    ).map(({ message }) => message),
+    ['fixed host-port publishing'],
+  )
+  assert.deepEqual(
+    findDockerSafetyViolations('services:\n  db:\n    ports:\n      - target: 5432').map(
+      ({ message }) => message,
+    ),
+    [],
+  )
 })
 
 test('rejects global Docker cleanup and filters that are not unique to a job', () => {
@@ -48,7 +68,7 @@ test('rejects global Docker cleanup and filters that are not unique to a job', (
     findDockerSafetyViolations(['docker', 'system', 'prune', '-af'].join(' ')).map(
       ({ message }) => message,
     ),
-    ['unfiltered Docker prune'],
+    ['Docker system prune is not allowed'],
   )
   assert.deepEqual(
     findDockerSafetyViolations('docker buildx prune -af').map(({ message }) => message),
@@ -64,7 +84,7 @@ test('rejects global Docker cleanup and filters that are not unique to a job', (
     findDockerSafetyViolations('docker --context remote system prune -af').map(
       ({ message }) => message,
     ),
-    ['unfiltered Docker prune'],
+    ['Docker system prune is not allowed'],
   )
   assert.deepEqual(
     findDockerSafetyViolations(
@@ -83,6 +103,12 @@ test('rejects global Docker cleanup and filters that are not unique to a job', (
       ].join(' '),
     ),
     [],
+  )
+  assert.deepEqual(
+    findDockerSafetyViolations('docker system prune --filter "label=ci.task=$TASK_ID"').map(
+      ({ message }) => message,
+    ),
+    ['Docker system prune is not allowed'],
   )
   assert.deepEqual(
     findDockerSafetyViolations(
@@ -308,6 +334,41 @@ test('resolves explicit Compose files from commented steps in the step working d
     assert.deepEqual(
       composeFiles.map(({ path }) => path),
       [resolve(root, 'services/api/custom-compose.yml')],
+    )
+    assert.deepEqual(
+      composeFiles.flatMap(({ path, source }) =>
+        findDockerSafetyViolations(source, path).map(({ message }) => message),
+      ),
+      ['fixed host-port publishing'],
+    )
+  } finally {
+    await rm(root, { recursive: true, force: true })
+  }
+})
+
+test('resolves Compose files separately for each invocation in a workflow step', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'docker-safety-compose-per-invocation-'))
+  const workflowPath = join(root, '.github', 'workflows', 'check.yml')
+  const workflow = [
+    'jobs:',
+    '  check:',
+    '    steps:',
+    '      - run: |',
+    '          docker compose -f custom.yml up',
+    '          docker compose up',
+  ].join('\n')
+  const fixedCompose = 'services:\n  db:\n    ports:\n      - "127.0.0.1:5432:5432"'
+
+  try {
+    await mkdir(join(root, '.github', 'workflows'), { recursive: true })
+    await writeFile(join(root, 'custom.yml'), 'services: {}\n')
+    await writeFile(join(root, 'compose.yaml'), fixedCompose)
+
+    const composeFiles = await collectComposeFiles(root, [{ path: workflowPath, source: workflow }])
+
+    assert.deepEqual(
+      composeFiles.map(({ path }) => path),
+      [resolve(root, 'custom.yml'), resolve(root, 'compose.yaml')],
     )
     assert.deepEqual(
       composeFiles.flatMap(({ path, source }) =>
@@ -1039,6 +1100,62 @@ test('skips missing files only for default Compose name probes', async () => {
       await collectComposeFiles(root, [{ path: workflowPath, source: workflow }]),
       [],
     )
+  } finally {
+    await rm(root, { recursive: true, force: true })
+  }
+})
+
+test('scans the default Compose override file', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'docker-safety-compose-override-'))
+  const workflowPath = join(root, '.github', 'workflows', 'check.yml')
+  const workflow = 'jobs:\n  check:\n    steps:\n      - run: docker compose up'
+
+  try {
+    await mkdir(join(root, '.github', 'workflows'), { recursive: true })
+    await writeFile(join(root, 'compose.yaml'), 'services: {}\n')
+    await writeFile(
+      join(root, 'compose.override.yaml'),
+      'services:\n  db:\n    ports:\n      - "127.0.0.1:5432:5432"',
+    )
+
+    const composeFiles = await collectComposeFiles(root, [{ path: workflowPath, source: workflow }])
+
+    assert.deepEqual(
+      composeFiles.map(({ path }) => path),
+      [resolve(root, 'compose.yaml'), resolve(root, 'compose.override.yaml')],
+    )
+    assert.deepEqual(
+      composeFiles.flatMap(({ path, source }) =>
+        findDockerSafetyViolations(source, path).map(({ message }) => message),
+      ),
+      ['fixed host-port publishing'],
+    )
+  } finally {
+    await rm(root, { recursive: true, force: true })
+  }
+})
+
+test('fails closed on Compose include and extends file references', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'docker-safety-compose-references-'))
+  const workflowPath = join(root, '.github', 'workflows', 'check.yml')
+  const workflow = 'jobs:\n  check:\n    steps:\n      - run: docker compose up'
+  const fixedCompose = 'services:\n  db:\n    ports:\n      - "127.0.0.1:5432:5432"'
+  const configs = [
+    'include:\n  - path: referenced.yml\nservices: {}\n',
+    'services:\n  web:\n    extends:\n      file: referenced.yml\n      service: base\n',
+  ]
+
+  try {
+    await mkdir(join(root, '.github', 'workflows'), { recursive: true })
+    await writeFile(join(root, 'referenced.yml'), fixedCompose)
+
+    for (const config of configs) {
+      await writeFile(join(root, 'compose.yaml'), config)
+      await assert.rejects(
+        collectComposeFiles(root, [{ path: workflowPath, source: workflow }], {}),
+        /Cannot statically scan Compose include or extends.file/,
+      )
+    }
   } finally {
     await rm(root, { recursive: true, force: true })
   }
