@@ -1408,7 +1408,7 @@ test('smoke cleanup exits nonzero when removing the container fails', async () =
       env: {
         ...process.env,
         PATH: `${bin}:${process.env.PATH}`,
-        smoke_container: 'rari-smoke-test',
+        smoke_container_x64: 'rari-smoke-test',
       },
     })
 
