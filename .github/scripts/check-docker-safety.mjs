@@ -403,8 +403,9 @@ function dockerPublishValues(command) {
   for (let index = 0; index < tokens.length; index += 1) {
     const rawToken = tokens[index].value
     const token = rawToken.replace(/['"]/g, '').replace(/\\(.)/g, '$1')
-    if (/^--?[$`{]/.test(token)) {
-      values.push(token)
+    const optionName = token.split('=', 1)[0]
+    if (optionName.startsWith('-') && /[$`{}]/.test(optionName)) {
+      values.push(optionName)
       continue
     }
     if (token === '--publish' || token === '-p') {
