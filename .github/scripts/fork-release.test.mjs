@@ -19,56 +19,62 @@ const skipOperationLock = operation => operation()
 
 test('builds each release architecture on its assigned runner and publishes combined assets', async () => {
   const workflow = await readFile(new URL('../workflows/fork-build.yml', import.meta.url), 'utf8')
-  const build = workflow.slice(
-    workflow.indexOf('  build:'),
-    workflow.indexOf('  check-snapshot-profile-diagnostic:'),
-  )
-  assert.match(build, /runs-on: \$\{\{ matrix\.runner \}\}/)
-  assert.match(build, /- arch: x64\s+runner: ubuntu-24\.04/)
-  assert.match(build, /- arch: arm64\s+runner: arm64/)
+  const buildStart = workflow.indexOf('  build:')
+  const arm64BuildStart = workflow.indexOf('  build-arm64:')
+  const diagnosticStart = workflow.indexOf('  check-snapshot-profile-diagnostic:')
+  const build = workflow.slice(buildStart, arm64BuildStart)
+  const arm64Build = workflow.slice(arm64BuildStart, diagnosticStart)
+  assert.match(build, /runs-on: rari/)
+  assert.match(build, /- arch: x64/)
+  assert.match(arm64Build, /runs-on: arm64/)
+  assert.match(arm64Build, /needs: build/)
+  assert.match(arm64Build, /- arch: arm64/)
   assert.match(build, /timeout-minutes: 175/)
+  assert.match(arm64Build, /timeout-minutes: 175/)
   assert.match(build, /name: fork-release-assets-\$\{\{ matrix\.arch \}\}/)
+  assert.match(arm64Build, /name: fork-release-assets-\$\{\{ matrix\.arch \}\}/)
   assert.match(build, /name: Generate x64 V8 snapshot\s+if: matrix\.arch == 'x64'/)
-  assert.match(build, /name: Generate ARM64 V8 snapshot\s+if: matrix\.arch == 'arm64'/)
-  assert.match(build, /name: Build Linux ARM64 binary\s+if: matrix\.arch == 'arm64'/)
+  assert.match(arm64Build, /name: Generate ARM64 V8 snapshot\s+if: matrix\.arch == 'arm64'/)
+  assert.match(arm64Build, /name: Build Linux ARM64 binary\s+if: matrix\.arch == 'arm64'/)
   assert.doesNotMatch(
-    build,
+    arm64Build,
     /qemu-aarch64-static|aarch64-linux-gnu|aarch64-unknown-linux-gnu|PKG_CONFIG_ALLOW_CROSS|CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER/,
   )
 
-  const buildStep = name => {
+  const buildStep = (job, name) => {
     const marker = `      - name: ${name}\n`
-    const start = build.indexOf(marker)
+    const start = job.indexOf(marker)
     assert.notEqual(start, -1, `missing build step "${name}"`)
-    const end = build.indexOf('\n      - name: ', start + marker.length)
-    return build.slice(start, end === -1 ? undefined : end)
+    const end = job.indexOf('\n      - name: ', start + marker.length)
+    return job.slice(start, end === -1 ? undefined : end)
   }
 
-  const x64BinaryBuild = buildStep('Build Linux x64 binary')
+  const x64BinaryBuild = buildStep(build, 'Build Linux x64 binary')
   assert.match(x64BinaryBuild, /if: matrix\.arch == 'x64'/)
   assert.match(x64BinaryBuild, /cargo build --release --target x86_64-unknown-linux-gnu --bin rari/)
 
-  const arm64RunnerCheck = buildStep('Verify ARM64 runner architecture')
+  const arm64RunnerCheck = buildStep(arm64Build, 'Verify ARM64 runner architecture')
   assert.match(arm64RunnerCheck, /if: matrix\.arch == 'arm64'/)
   assert.match(arm64RunnerCheck, /uname -m/)
   assert.match(arm64RunnerCheck, /aarch64/)
 
-  const arm64Snapshot = buildStep('Generate ARM64 V8 snapshot')
+  const arm64Snapshot = buildStep(arm64Build, 'Generate ARM64 V8 snapshot')
   assert.match(arm64Snapshot, /if: matrix\.arch == 'arm64'/)
   assert.match(
     arm64Snapshot,
     /cargo run --release --manifest-path tools\/snapshot\/Cargo\.toml -- crates\/rari\/snapshots/,
   )
 
-  const arm64BinaryBuild = buildStep('Build Linux ARM64 binary')
+  const arm64BinaryBuild = buildStep(arm64Build, 'Build Linux ARM64 binary')
   assert.match(arm64BinaryBuild, /if: matrix\.arch == 'arm64'/)
   assert.match(arm64BinaryBuild, /cargo build --release --bin rari --features ext-full,jemalloc/)
   assert.doesNotMatch(arm64BinaryBuild, /--target/)
 
-  const packageAssets = buildStep('Prepare and package Linux release assets')
+  const packageAssets = buildStep(arm64Build, 'Prepare and package Linux release assets')
   assert.match(packageAssets, /arm64\)\s+binary=target\/release\/rari\s+objcopy=objcopy/)
 
   const x64SmokeTest = buildStep(
+    build,
     'Smoke-test packaged Linux x64 binary on the production base image',
   )
   assert.match(x64SmokeTest, /if: matrix\.arch == 'x64'/)
@@ -77,7 +83,7 @@ test('builds each release architecture on its assigned runner and publishes comb
   assert.match(x64SmokeTest, /\/tmp\/rari-package\/bin\/rari --mode production/)
   assert.match(x64SmokeTest, /grep -Fq "Test App Home"/)
 
-  const arm64SmokeTest = buildStep('Smoke-test native Linux ARM64 binary')
+  const arm64SmokeTest = buildStep(arm64Build, 'Smoke-test native Linux ARM64 binary')
   assert.match(arm64SmokeTest, /if: matrix\.arch == 'arm64'/)
   assert.match(arm64SmokeTest, /target\/release\/rari/)
   assert.match(arm64SmokeTest, /"\$binary" --version/)
@@ -91,8 +97,8 @@ test('builds each release architecture on its assigned runner and publishes comb
   )
   assert.match(
     publisher,
-    /\n    needs: \[build, validate-release-request\]\n/,
-    'publisher must wait for every matrix build and release validation',
+    /\n    needs: \[build, build-arm64, validate-release-request\]\n/,
+    'publisher must wait for both architecture builds and release validation',
   )
   const x64Assets = publisher.indexOf('name: fork-release-assets-x64')
   const arm64Assets = publisher.indexOf('name: fork-release-assets-arm64')
