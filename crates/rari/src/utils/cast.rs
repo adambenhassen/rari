@@ -69,3 +69,11 @@ pub const fn f32_to_usize(value: f32) -> usize {
 pub const fn f64_to_f32(value: f64) -> f32 {
     value as f32
 }
+
+#[cfg(test)]
+mod ci_clippy_probe {
+    #[test]
+    fn intentional_unused_binding_should_fail_clippy() {
+        let intentional_clippy_warning = 1;
+    }
+}

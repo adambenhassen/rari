@@ -4,6 +4,12 @@ on:
   pull_request:
     branches:
       - '*/main'
+  workflow_dispatch:
+    inputs:
+      issue:
+        description: Issue key for CI result routing
+        required: true
+        type: string
 
 permissions: {}
 
