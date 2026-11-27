@@ -6,7 +6,7 @@ use serde_json::Value;
 use tokio::{sync::mpsc::Sender, time};
 
 use super::super::interface::{AsyncBatchResult, JsRuntimeInterface};
-use crate::server::middleware::request_context::RequestContext;
+use crate::server::middleware::request_context::{RequestContext, RequestDataAccessScope};
 
 macro_rules! forward_async_to_runtime_with_timeout {
     ($(
@@ -79,6 +79,7 @@ impl PooledRuntime {
         script_code: String,
         chunk_sender: Sender<Result<Vec<u8>, RariError>>,
         request_context: Option<Arc<RequestContext>>,
+        access_scope: RequestDataAccessScope,
     ) -> Result<Pin<Box<dyn Future<Output = Result<(), RariError>> + Send>>, RariError> {
         self.runtime
             .queue_script_for_streaming(
@@ -87,6 +88,7 @@ impl PooledRuntime {
                 script_code,
                 chunk_sender,
                 request_context,
+                access_scope,
             )
             .await
     }
@@ -99,9 +101,9 @@ impl PooledRuntime {
         pub async fn load_es_module(&self, specifier: &str) -> Result<ModuleId, RariError>;
         pub async fn evaluate_module(&self, module_id: ModuleId) -> Result<Value, RariError>;
         pub async fn get_module_namespace(&self, module_id: ModuleId) -> Result<Value, RariError>;
-        pub async fn set_request_context(&self, request_context: Arc<RequestContext>) -> Result<(), RariError>;
+        pub async fn set_request_context(&self, request_context: Arc<RequestContext>, access_scope: RequestDataAccessScope) -> Result<(), RariError>;
         pub async fn clear_request_context_if_matches(&self, expected_context: Arc<RequestContext>) -> Result<(), RariError>;
-        pub async fn register_request_context(&self, request_context: Arc<RequestContext>) -> Result<(), RariError>;
+        pub async fn register_request_context(&self, request_context: Arc<RequestContext>, access_scope: RequestDataAccessScope) -> Result<(), RariError>;
         pub async fn unregister_request_context(&self, request_id: &str) -> Result<(), RariError>;
     }
 }

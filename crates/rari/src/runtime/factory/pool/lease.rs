@@ -8,7 +8,7 @@ use tokio::{
 };
 
 use super::{super::interface::JsRuntimeInterface, JsRuntimePool};
-use crate::server::middleware::request_context::RequestContext;
+use crate::server::middleware::request_context::{RequestContext, RequestDataAccessScope};
 
 /// Holds a pool slot lease with request context installed for multi-step work.
 ///
@@ -107,7 +107,7 @@ impl JsRuntimePool {
 
         match time::timeout(
             Duration::from_millis(self.timeout_ms),
-            runtime.set_request_context(Arc::clone(&ctx)),
+            runtime.set_request_context(Arc::clone(&ctx), RequestDataAccessScope::Unscoped),
         )
         .await
         {

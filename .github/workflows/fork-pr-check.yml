@@ -44,7 +44,7 @@ jobs:
       - name: Test fork build dispatch guards
         run: node --test .github/scripts/fork-build-workflow.test.mjs
 
-      - name: Test fork PR check workflow resource limits
+      - name: Test fork PR check workflow guards
         run: node --test .github/scripts/fork-pr-check-workflow.test.mjs
 
       - name: Install JavaScript dependencies
@@ -76,6 +76,14 @@ jobs:
         with:
           toolchain: nightly-2026-11-22
           components: clippy, rustfmt
+
+      - name: Configure APT index fetches
+        run: |
+          set -euo pipefail
+          printf '%s\n' \
+            'Acquire::By-Hash "force";' \
+            'Acquire::Retries "3";' \
+            | sudo tee /etc/apt/apt.conf.d/99-ci-apt >/dev/null
 
       - name: Install Rust build dependencies
         run: |
@@ -117,6 +125,8 @@ jobs:
 
       - name: Test Rust
         run: cargo test -p rari --all-features
+        env:
+          RUSTFLAGS: -C link-arg=-fuse-ld=mold
 
       - name: Detect jemalloc feature
         id: jemalloc

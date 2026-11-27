@@ -36,7 +36,7 @@ use crate::{
             response::RouteCachePolicy,
         },
         config::{CacheLayerConfig, Config},
-        middleware::request_context::RequestContext,
+        middleware::request_context::{RequestContext, RequestDataAccessScope},
         routing::app_router::AppRouteMatch,
     },
     utils::path::path_to_file_url,
@@ -330,9 +330,10 @@ async fn queue_streaming_script(
     };
 
     let request_id = request_context.as_ref().map(|ctx| ctx.request_id().to_string());
-
     if let Some(context) = request_context.as_ref()
-        && let Err(e) = handle.register_request_context(Arc::clone(context)).await
+        && let Err(e) = handle
+            .register_request_context(Arc::clone(context), RequestDataAccessScope::Render)
+            .await
     {
         let _ = err_sender.send(Err(e.clone())).await;
         return Err(e);
@@ -346,6 +347,7 @@ async fn queue_streaming_script(
             wrapped,
             chunk_sender,
             request_context.clone(),
+            RequestDataAccessScope::Render,
         )
         .await
     {
@@ -397,9 +399,10 @@ async fn compose_then_queue_streaming_script(
     };
 
     let request_id = request_context.as_ref().map(|ctx| ctx.request_id().to_string());
-
     if let Some(context) = request_context.as_ref()
-        && let Err(e) = handle.register_request_context(Arc::clone(context)).await
+        && let Err(e) = handle
+            .register_request_context(Arc::clone(context), RequestDataAccessScope::Render)
+            .await
     {
         let _ = err_sender.send(Err(e.clone())).await;
         return Err(e);
@@ -444,6 +447,7 @@ async fn compose_then_queue_streaming_script(
             wrapped,
             chunk_sender,
             request_context.clone(),
+            RequestDataAccessScope::Render,
         )
         .await
     {
@@ -628,8 +632,9 @@ impl LayoutRenderer {
         &self,
         route_match: &AppRouteMatch,
         context: &LayoutRenderContext,
+        request_context: Arc<RequestContext>,
     ) -> Result<PageData, RariError> {
-        self.get_page_data_on(route_match, context, None).await
+        self.get_page_data_on_with_context(route_match, context, None, Some(request_context)).await
     }
 
     /// Prefer this method with a sticky runtime when the caller already holds a pool slot lease.
@@ -638,6 +643,16 @@ impl LayoutRenderer {
         route_match: &AppRouteMatch,
         context: &LayoutRenderContext,
         sticky_runtime: Option<&Arc<dyn JsRuntimeInterface>>,
+    ) -> Result<PageData, RariError> {
+        self.get_page_data_on_with_context(route_match, context, sticky_runtime, None).await
+    }
+
+    async fn get_page_data_on_with_context(
+        &self,
+        route_match: &AppRouteMatch,
+        context: &LayoutRenderContext,
+        sticky_runtime: Option<&Arc<dyn JsRuntimeInterface>>,
+        request_context: Option<Arc<RequestContext>>,
     ) -> Result<PageData, RariError> {
         let page_props = utils::create_page_props(route_match, context)?;
         let page_props_json = serde_json::to_string(&page_props)?;
@@ -702,13 +717,25 @@ impl LayoutRenderer {
             "
         );
 
+        let script_name = "get_page_data".to_string();
         let result = if let Some(runtime) = sticky_runtime {
-            runtime.execute_script("get_page_data".to_string(), check_script).await?
+            runtime.execute_script(script_name, check_script).await?
         } else {
             let renderer = self.renderer.lock().await;
             let runtime = Arc::clone(&renderer.runtime);
             drop(renderer);
-            runtime.execute_script("get_page_data".to_string(), check_script).await?
+            if let Some(request_context) = request_context {
+                runtime
+                    .execute_script_with_request_context(
+                        request_context,
+                        RequestDataAccessScope::GetData,
+                        script_name,
+                        check_script,
+                    )
+                    .await?
+            } else {
+                runtime.execute_script(script_name, check_script).await?
+            }
         };
 
         Ok(parse_page_data_result(&result))
@@ -752,10 +779,18 @@ impl LayoutRenderer {
 
         if let Some(ctx) = request_context {
             runtime
-                .with_request_context(ctx, move |rt| async move {
-                    Self::execute_composition_and_serialize_on(None, Some(rt), composition_script)
+                .with_request_context_scoped(
+                    ctx,
+                    RequestDataAccessScope::Render,
+                    move |rt| async move {
+                        Self::execute_composition_and_serialize_on(
+                            None,
+                            Some(rt),
+                            composition_script,
+                        )
                         .await
-                })
+                    },
+                )
                 .await
         } else {
             run_with_renderer_result(renderer, move |renderer| async move {
@@ -1013,22 +1048,27 @@ impl LayoutRenderer {
 
                 if let Some(ctx) = request_context {
                     runtime
-                        .with_request_context(ctx, move |rt| async move {
-                            let result = Self::run_composition_on(
-                                None,
-                                Some(Arc::clone(&rt)),
-                                composition_script,
-                            )
-                            .await?;
+                        .with_request_context_scoped(
+                            ctx,
+                            RequestDataAccessScope::Render,
+                            move |rt| async move {
+                                let result = Self::run_composition_on(
+                                    None,
+                                    Some(Arc::clone(&rt)),
+                                    composition_script,
+                                )
+                                .await?;
 
-                            if let Some(bytes) = Self::capture_last_rsc_binary_on(Some(rt)).await?
-                                && !bytes.is_empty()
-                            {
-                                return Ok(RscNavPayload::Binary(bytes));
-                            }
+                                if let Some(bytes) =
+                                    Self::capture_last_rsc_binary_on(Some(rt)).await?
+                                    && !bytes.is_empty()
+                                {
+                                    return Ok(RscNavPayload::Binary(bytes));
+                                }
 
-                            Ok(RscNavPayload::Text(Self::extract_flight_text(&result)?))
-                        })
+                                Ok(RscNavPayload::Text(Self::extract_flight_text(&result)?))
+                            },
+                        )
                         .await?
                 } else {
                     let handle = runtime.pick_runtime().await?;
@@ -1394,7 +1434,13 @@ impl LayoutRenderer {
                 };
 
                 if let Some(ctx) = request_context.as_ref() {
-                    runtime.with_request_context(Arc::clone(ctx), render_static).await?
+                    runtime
+                        .with_request_context_scoped(
+                            Arc::clone(ctx),
+                            RequestDataAccessScope::Render,
+                            render_static,
+                        )
+                        .await?
                 } else {
                     let handle = runtime.pick_runtime().await?;
                     render_static(Arc::clone(handle.runtime())).await?

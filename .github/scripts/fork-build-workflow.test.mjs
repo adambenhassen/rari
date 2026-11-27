@@ -29,6 +29,7 @@ function stepBlock(jobName, stepName) {
 const artifactUploadStep = stepBlock('build', 'Upload Linux assets for the trusted publisher')
 const cleanupValidationJob = jobBlock('validate-cleanup-ref')
 const deleteJob = jobBlock('delete-test-release')
+const buildJob = jobBlock('build')
 const cleanupValidationCondition = cleanupValidationJob.match(/if: \$\{\{ ([\s\S]*?) \}\}/)?.[1]
 const deleteCondition = deleteJob.match(/if: \$\{\{ ([\s\S]*?) \}\}/)?.[1]
 assert.ok(cleanupValidationCondition, 'Missing cleanup validation job condition')
@@ -82,4 +83,17 @@ test('combined cleanup and diagnostic inputs fail validation and skip deletion',
   assert.equal(result.status, 1)
   assert.match(result.stderr, /Cannot combine delete_test_release with diagnose_snapshot_profiles/)
   assert.match(deleteJob, /needs: validate-cleanup-ref/)
+})
+
+test('pins only the x64 release build to Ubuntu 24.04 with the glibc ceiling', () => {
+  assert.match(buildJob, /runs-on: \$\{\{ matrix\.runner \}\}/)
+  assert.match(buildJob, /- arch: x64\s+runner: ubuntu-24\.04/)
+  assert.match(buildJob, /- arch: arm64\s+runner: arm64/)
+
+  const glibcCheck = buildJob.match(
+    /      - name: Require glibc no newer than 2\.39\n([\s\S]*?)(?=      - name:|$)/,
+  )
+  assert.ok(glibcCheck, 'Missing x64 glibc ceiling check')
+  assert.match(glibcCheck[1], /if: matrix\.arch == 'x64'/)
+  assert.match(glibcCheck[1], /getconf GNU_LIBC_VERSION/)
 })

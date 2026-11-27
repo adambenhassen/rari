@@ -207,10 +207,44 @@ pub struct RequestContext {
     pub csp_nonce: Option<String>,
 }
 
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+#[non_exhaustive]
+pub enum RequestDataAccessScope {
+    #[default]
+    Unscoped,
+    GetData,
+    Metadata,
+    Render,
+}
+
 struct ResponseCacheState {
-    writes_enabled: bool,
+    access: ResponseCacheAccess,
+    metadata_uses_request_data: bool,
     unavailable_after: Option<u64>,
     has_dynamic_metadata: bool,
+}
+
+#[derive(Clone, Copy)]
+enum ResponseCacheAccess {
+    ReadWrite,
+    ReadOnly,
+    Disabled,
+}
+
+impl ResponseCacheAccess {
+    fn disable_writes(&mut self) {
+        if matches!(*self, Self::ReadWrite) {
+            *self = Self::ReadOnly;
+        }
+    }
+
+    fn reads_enabled(self) -> bool {
+        !matches!(self, Self::Disabled)
+    }
+
+    fn writes_enabled(self) -> bool {
+        matches!(self, Self::ReadWrite)
+    }
 }
 
 impl RequestContext {
@@ -222,7 +256,8 @@ impl RequestContext {
             start_time: Instant::now(),
             route_path,
             response_cache_state: Mutex::new(ResponseCacheState {
-                writes_enabled: true,
+                access: ResponseCacheAccess::ReadWrite,
+                metadata_uses_request_data: false,
                 unavailable_after: None,
                 has_dynamic_metadata: true,
             }),
@@ -299,18 +334,44 @@ impl RequestContext {
         self.response_cache_state.lock().unavailable_after
     }
 
+    pub(crate) fn clear_response_unavailable(&self) {
+        self.response_cache_state.lock().unavailable_after = None;
+    }
+
     pub fn disable_cache_writes(&self) {
-        self.response_cache_state.lock().writes_enabled = false;
+        self.response_cache_state.lock().access.disable_writes();
+    }
+
+    pub fn disable_cache_reads_and_writes(&self) {
+        self.response_cache_state.lock().access = ResponseCacheAccess::Disabled;
+    }
+
+    pub(crate) fn mark_request_data_access(&self, scope: RequestDataAccessScope) {
+        let mut state = self.response_cache_state.lock();
+        match scope {
+            RequestDataAccessScope::Metadata => state.metadata_uses_request_data = true,
+            RequestDataAccessScope::Unscoped
+            | RequestDataAccessScope::GetData
+            | RequestDataAccessScope::Render => state.access = ResponseCacheAccess::Disabled,
+        }
+    }
+
+    pub(crate) fn metadata_uses_request_data(&self) -> bool {
+        self.response_cache_state.lock().metadata_uses_request_data
     }
 
     pub fn must_send_no_store(&self) -> bool {
         let state = self.response_cache_state.lock();
-        !state.writes_enabled || state.unavailable_after.is_some()
+        !state.access.writes_enabled() || state.unavailable_after.is_some()
     }
 
     pub fn response_cache_allowed(&self) -> bool {
         let state = self.response_cache_state.lock();
-        state.writes_enabled && state.unavailable_after.is_none()
+        state.access.writes_enabled() && state.unavailable_after.is_none()
+    }
+
+    pub fn response_cache_reads_allowed(&self) -> bool {
+        self.response_cache_state.lock().access.reads_enabled()
     }
 
     pub(crate) fn set_has_dynamic_metadata(&self, has_dynamic_metadata: bool) {
@@ -554,6 +615,59 @@ mod tests {
         assert!(ctx.must_send_no_store());
         assert!(!ctx.response_cache_allowed());
         assert_eq!(ctx.response_unavailable_after(), None);
+    }
+
+    #[test]
+    fn unscoped_request_data_access_disables_shared_cache() {
+        let unscoped = RequestContext::new("/test".to_string());
+        unscoped.mark_request_data_access(RequestDataAccessScope::Unscoped);
+        assert!(!unscoped.response_cache_reads_allowed());
+        assert!(!unscoped.response_cache_allowed());
+        assert!(unscoped.must_send_no_store());
+    }
+
+    #[test]
+    fn request_data_access_inside_get_data_disables_cache() {
+        let scoped = RequestContext::new("/test".to_string());
+        scoped.mark_request_data_access(RequestDataAccessScope::GetData);
+        assert!(!scoped.response_cache_reads_allowed());
+        assert!(!scoped.response_cache_allowed());
+        assert!(scoped.must_send_no_store());
+    }
+
+    #[test]
+    fn request_data_access_in_metadata_is_tracked_without_disabling_cache() {
+        let scoped = RequestContext::new("/test".to_string());
+        scoped.mark_request_data_access(RequestDataAccessScope::Metadata);
+
+        assert!(scoped.metadata_uses_request_data());
+        assert!(scoped.response_cache_reads_allowed());
+        assert!(scoped.response_cache_allowed());
+        assert!(!scoped.must_send_no_store());
+    }
+
+    #[test]
+    fn request_data_access_during_render_disables_shared_cache() {
+        let scoped = RequestContext::new("/test".to_string());
+        scoped.mark_request_data_access(RequestDataAccessScope::Render);
+
+        assert!(!scoped.metadata_uses_request_data());
+        assert!(!scoped.response_cache_reads_allowed());
+        assert!(!scoped.response_cache_allowed());
+        assert!(scoped.must_send_no_store());
+    }
+
+    #[test]
+    fn clearing_unavailability_keeps_not_found_uncacheable() {
+        let ctx = RequestContext::new("/not-found".to_string());
+
+        ctx.mark_response_unavailable(17);
+        ctx.disable_cache_writes();
+        ctx.clear_response_unavailable();
+
+        assert_eq!(ctx.response_unavailable_after(), None);
+        assert!(ctx.must_send_no_store());
+        assert!(!ctx.response_cache_allowed());
     }
 
     #[test]

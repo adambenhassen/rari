@@ -20,6 +20,26 @@ pub(super) fn apply_request_no_store(
     response
 }
 
+pub(super) fn apply_request_cache_policy(
+    mut response: Response,
+    request_context: &RequestContext,
+) -> Response {
+    if request_context.must_send_no_store() {
+        response.headers_mut().insert(CACHE_CONTROL, HeaderValue::from_static("no-store"));
+    } else if request_context.metadata_uses_request_data() && !has_no_store_directive(&response) {
+        response.headers_mut().insert(CACHE_CONTROL, HeaderValue::from_static("private, no-cache"));
+    }
+    response
+}
+
+fn has_no_store_directive(response: &Response) -> bool {
+    response.headers().get_all(CACHE_CONTROL).iter().any(|value| {
+        value.to_str().is_ok_and(|value| {
+            value.split(',').any(|directive| directive.trim().eq_ignore_ascii_case("no-store"))
+        })
+    })
+}
+
 pub(super) fn response_unavailable(
     body: Body,
     content_type: &str,
@@ -41,3 +61,41 @@ pub use render::{
     render_synchronous, render_with_fallback,
 };
 pub use route::handle_app_route;
+
+#[cfg(test)]
+mod tests {
+    use axum::{
+        body::Body,
+        http::{HeaderValue, header::CACHE_CONTROL},
+        response::Response,
+    };
+
+    use super::apply_request_cache_policy;
+    use crate::server::middleware::request_context::{RequestContext, RequestDataAccessScope};
+
+    #[test]
+    fn request_data_metadata_responses_use_private_revalidating_cache_policy() {
+        let request_context = RequestContext::new("/session".to_string());
+        request_context.mark_request_data_access(RequestDataAccessScope::Metadata);
+        let mut response = Response::new(Body::empty());
+        response
+            .headers_mut()
+            .insert(CACHE_CONTROL, HeaderValue::from_static("public, max-age=600"));
+
+        let response = apply_request_cache_policy(response, &request_context);
+
+        assert_eq!(response.headers()[CACHE_CONTROL], "private, no-cache");
+    }
+
+    #[test]
+    fn request_metadata_does_not_override_route_no_store_policy() {
+        let request_context = RequestContext::new("/session".to_string());
+        request_context.mark_request_data_access(RequestDataAccessScope::Metadata);
+        let mut response = Response::new(Body::empty());
+        response.headers_mut().insert(CACHE_CONTROL, HeaderValue::from_static("public, no-store"));
+
+        let response = apply_request_cache_policy(response, &request_context);
+
+        assert_eq!(response.headers()[CACHE_CONTROL], "public, no-store");
+    }
+}

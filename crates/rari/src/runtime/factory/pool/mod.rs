@@ -38,7 +38,7 @@ pub use lease::LeasedRequestRuntime;
 pub use strategy::{PickStrategy, RoundRobinStrategy};
 
 use super::interface::JsRuntimeInterface;
-use crate::server::middleware::request_context::RequestContext;
+use crate::server::middleware::request_context::{RequestContext, RequestDataAccessScope};
 
 /// Default wall-clock timeout for pool-wrapped JS ops (`execute_script`,
 /// `broadcast_script`, request-context helpers, etc.).
@@ -752,6 +752,20 @@ impl JsRuntimePool {
         F: FnOnce(Arc<dyn JsRuntimeInterface>) -> Fut + Send + 'static,
         Fut: Future<Output = Result<T, RariError>> + Send + 'static,
     {
+        self.with_request_context_scoped(ctx, RequestDataAccessScope::Unscoped, op).await
+    }
+
+    pub async fn with_request_context_scoped<F, Fut, T>(
+        self: &Arc<Self>,
+        ctx: Arc<RequestContext>,
+        access_scope: RequestDataAccessScope,
+        op: F,
+    ) -> Result<T, RariError>
+    where
+        T: Send + 'static,
+        F: FnOnce(Arc<dyn JsRuntimeInterface>) -> Fut + Send + 'static,
+        Fut: Future<Output = Result<T, RariError>> + Send + 'static,
+    {
         let handle = self.pick_runtime().await?;
         let idx = handle.idx();
         let runtime = Arc::clone(handle.runtime());
@@ -763,7 +777,7 @@ impl JsRuntimePool {
 
             match time::timeout(
                 Duration::from_millis(timeout_ms),
-                runtime.set_request_context(Arc::clone(&ctx)),
+                runtime.set_request_context(Arc::clone(&ctx), access_scope),
             )
             .await
             {

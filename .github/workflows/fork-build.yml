@@ -34,7 +34,7 @@ jobs:
       matrix:
         include:
           - arch: x64
-            runner: inference-x64
+            runner: ubuntu-24.04
           - arch: arm64
             runner: arm64
     permissions:
@@ -66,6 +66,16 @@ jobs:
           fi
           if [[ ! "$VERSION" =~ ^0\.17\.9-fork\.[0-9]+(-test\.[0-9]+)?$ ]]; then
             echo "Version must match 0.17.9-fork.<n> or 0.17.9-fork.<n>-test.<n>" >&2
+            exit 1
+          fi
+
+      - name: Require glibc no newer than 2.39
+        if: matrix.arch == 'x64'
+        run: |
+          set -euo pipefail
+          glibc="$(getconf GNU_LIBC_VERSION | awk '{print $2}')"
+          if [[ "$(printf '%s\n' "$glibc" 2.39 | sort -V | tail -n1)" != "2.39" ]]; then
+            echo "Fork release binaries require glibc no newer than 2.39 (runner has $glibc)" >&2
             exit 1
           fi
 
