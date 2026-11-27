@@ -378,6 +378,28 @@ test('recognizes Docker commands immediately after shell control operators', () 
   }
 })
 
+test('scans Docker commands inside quoted shell scripts', () => {
+  const name = 'rari-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT-$GITHUB_JOB'
+  const publishCommands = [
+    `bash -c "docker run --name ${name} -p 5432:5432 image"`,
+    `sh -c 'docker run --name ${name} -p 5432:5432 image'`,
+  ]
+
+  for (const command of publishCommands) {
+    assert.deepEqual(
+      findDockerSafetyViolations(command).map(({ message }) => message),
+      ['fixed host-port publishing'],
+    )
+  }
+
+  assert.deepEqual(
+    findDockerSafetyViolations("sh -c 'docker rm -f $(docker ps -aq)'").map(
+      ({ message }) => message,
+    ),
+    ['removing every Docker container'],
+  )
+})
+
 test('requires Docker container names to include the run, attempt, and job identity', () => {
   assert.deepEqual(
     findDockerSafetyViolations('docker create --name rari-smoke-image alpine').map(

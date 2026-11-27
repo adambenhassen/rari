@@ -257,13 +257,27 @@ function shellSubstitutionRanges(source) {
 }
 
 function shellCommandWords(source, offset = 0) {
-  const words = shellWords(source).map(word => ({
-    ...word,
-    start: word.start + offset,
-    end: word.end + offset,
-  }))
+  const words = []
+  const quotedRanges = []
+
+  for (const word of shellWords(source)) {
+    const unquoted = unquoteShellToken(word.value)
+    if (unquoted !== word.value && /\s/.test(unquoted)) {
+      quotedRanges.push({ start: word.start, end: word.end })
+      words.push(...shellCommandWords(unquoted, offset + word.start + 1))
+    } else {
+      words.push({
+        ...word,
+        start: word.start + offset,
+        end: word.end + offset,
+      })
+    }
+  }
 
   for (const range of shellSubstitutionRanges(source)) {
+    if (quotedRanges.some(quoted => range.start >= quoted.start && range.start < quoted.end)) {
+      continue
+    }
     words.push(...shellCommandWords(source.slice(range.start, range.end), offset + range.start))
   }
 
