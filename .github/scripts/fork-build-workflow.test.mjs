@@ -191,16 +191,16 @@ test('runs release builds on rari and serializes native ARM64 after x64', () => 
 
 test('routes operational fork-build jobs through rari without adding a concurrency group', () => {
   for (const name of [
+    'build',
     'check-snapshot-profile-diagnostic',
     'publish-release',
     'validate-cleanup-ref',
+    'validate-release-request',
     'delete-test-release',
   ]) {
     assert.match(jobBlock(name), /runs-on: rari/, `${name} must use the rari runner`)
   }
 
-  const releaseValidationJob = jobBlock('validate-release-request')
-  assert.match(releaseValidationJob, /runs-on: inference-x64/)
-  assert.doesNotMatch(workflow.replace(releaseValidationJob, ''), /inference-x64/)
+  assert.doesNotMatch(workflow, /inference-x64/)
   assert.doesNotMatch(workflow, /^\s*concurrency:/m)
 })

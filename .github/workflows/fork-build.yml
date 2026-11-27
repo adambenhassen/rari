@@ -28,7 +28,7 @@ jobs:
   validate-release-request:
     if: ${{ inputs.delete_test_release != true && inputs.delete_test_release != 'true' && inputs.diagnose_snapshot_profiles != true && inputs.diagnose_snapshot_profiles != 'true' }}
     name: Validate release request
-    runs-on: inference-x64
+    runs-on: rari
     timeout-minutes: 5
     permissions:
       contents: read
