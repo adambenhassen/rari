@@ -364,18 +364,27 @@ function hasJobLabelFilter(command, matrixContext) {
   return false
 }
 
-function hasFixedDockerPublish(command) {
-  if (dockerPublishValues(command).some(hasFixedHostPortWithVariableContainerPort)) return true
+function hasUnsafeDockerPublish(invocation) {
+  const isContainerPublish = isContainerCommand(invocation, ['run', 'create'])
+  const isServiceCreate =
+    invocation.group === undefined &&
+    invocation.subcommand === 'service' &&
+    /^\s*create(?:\s|$)/.test(invocation.arguments)
+  if (!isContainerPublish && !isServiceCreate) return false
 
-  return /(?:^|\s)(?:--publish(?:=|\s+)|-[A-Za-z]*p(?:=|\s+|(?=\d)))["']?(?:(?:(?:\d{1,3}\.){3}\d{1,3}|localhost|\[[\da-f:]+\]):)?\d+(?:-\d+)?:\d+(?:-\d+)?(?:\/(?:tcp|udp))?(?=$|\s|["'])/.test(
-    command,
-  )
+  const argumentsText = isServiceCreate
+    ? invocation.arguments.replace(/^\s*create\b/, '')
+    : invocation.arguments
+  return dockerPublishValues(argumentsText).some(value => !isSafeDockerPublishValue(value))
 }
 
-function hasVariableDockerPublish(command) {
-  return dockerPublishValues(command).some(value =>
-    hasVariableShortHostPort(unquoteShellToken(value)),
-  )
+function isSafeDockerPublishValue(value) {
+  const forbiddenCharacters = ["'", '"', '$', '`', '{', '}', '\\']
+  if (forbiddenCharacters.some(character => value.includes(character))) return false
+
+  const port = String.raw`\d+(?:-\d+)?`
+  const address = String.raw`(?:(?:\d{1,3}\.){3}\d{1,3}|\[[\da-f:]+\])`
+  return new RegExp(`^(?:${port}|${address}::${port})(?:/(?:tcp|udp))?$`).test(value)
 }
 
 function dockerPublishValues(command) {
@@ -707,10 +716,7 @@ export function findDockerSafetyViolations(source, file = '<input>') {
         }
       }
 
-      if (
-        hasFixedDockerPublish(invocation.command) ||
-        hasVariableDockerPublish(invocation.command)
-      ) {
+      if (hasUnsafeDockerPublish(invocation)) {
         violations.push({ file, line: command.line, message: 'fixed host-port publishing' })
       }
 

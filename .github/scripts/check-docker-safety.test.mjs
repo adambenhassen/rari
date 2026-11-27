@@ -96,7 +96,7 @@ test('rejects literal host ports when the container port is variable', () => {
   }
 })
 
-test('rejects variable host ports in Docker publish flags unless statically empty', () => {
+test('rejects variable host ports in Docker publish flags', () => {
   const name = '--name "rari-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT-$GITHUB_JOB"'
   const commands = [
     `docker run ${name} -p "$HOST_PORT:5432" postgres`,
@@ -113,9 +113,28 @@ test('rejects variable host ports in Docker publish flags unless statically empt
   }
 
   assert.deepEqual(
-    findDockerSafetyViolations(`docker run ${name} -p "\${HOST_PORT:+}:5432" postgres`),
-    [],
+    findDockerSafetyViolations(`docker run ${name} -p "\${HOST_PORT:+}:5432" postgres`).map(
+      ({ message }) => message,
+    ),
+    ['fixed host-port publishing'],
   )
+})
+
+test('rejects Docker publish words that shell quoting or xargs can rewrite', () => {
+  const name = '--name "rari-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT-$GITHUB_JOB"'
+  const commands = [
+    `docker run ${name} -p $'5432':5432 postgres`,
+    `docker run ${name} -p "54"32:5432 postgres`,
+    `docker run ${name} -p 5432':5432' postgres`,
+    `xargs -I{} docker run ${name} -p {}:5432 postgres`,
+  ]
+
+  for (const command of commands) {
+    assert.deepEqual(
+      findDockerSafetyViolations(command).map(({ message }) => message),
+      ['fixed host-port publishing'],
+    )
+  }
 })
 
 test('rejects shell substitutions in fixed Docker host-port mappings', () => {
@@ -1609,10 +1628,18 @@ test('recognizes true assignments on short Docker boolean flags when removing co
 })
 
 test('ignores dynamic ports and ports opened inside a container', () => {
-  const workflow =
-    'docker run --name "rari-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT-$GITHUB_JOB" -p 5432 postgres\nserver --port 43819'
+  const name = '--name "rari-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT-$GITHUB_JOB"'
+  const workflow = `docker run ${name} -p 5432 postgres\nserver --port 43819`
+  const hostlessPublishes = [
+    `docker run ${name} -p 5432-5434/udp postgres`,
+    `docker run ${name} -p 127.0.0.1::5432 postgres`,
+    `docker run ${name} -p [::1]::5432 postgres`,
+  ]
   const compose = 'services:\n  db:\n    ports:\n      - "5432"'
 
   assert.deepEqual(findDockerSafetyViolations(workflow), [])
+  for (const command of hostlessPublishes) {
+    assert.deepEqual(findDockerSafetyViolations(command), [])
+  }
   assert.deepEqual(findDockerSafetyViolations(compose), [])
 })
