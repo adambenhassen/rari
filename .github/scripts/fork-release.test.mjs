@@ -89,7 +89,11 @@ test('builds each release architecture on its assigned runner and publishes comb
     workflow.indexOf('  publish-release:'),
     workflow.indexOf('  validate-cleanup-ref:'),
   )
-  assert.match(publisher, /\n    needs: build\n/, 'publisher must wait for every matrix build')
+  assert.match(
+    publisher,
+    /\n    needs: \[build, validate-release-request\]\n/,
+    'publisher must wait for every matrix build and release validation',
+  )
   const x64Assets = publisher.indexOf('name: fork-release-assets-x64')
   const arm64Assets = publisher.indexOf('name: fork-release-assets-arm64')
   const provenance = publisher.indexOf('name: fork-build-provenance-${{ inputs.version }}')
