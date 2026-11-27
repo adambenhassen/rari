@@ -294,26 +294,26 @@ jobs:
           : "${GITHUB_RUN_ID:?Gitea must provide GITHUB_RUN_ID for smoke container names}"
           : "${GITHUB_RUN_ATTEMPT:?Gitea must provide GITHUB_RUN_ATTEMPT for smoke container names}"
           : "${GITHUB_JOB:?Gitea must provide GITHUB_JOB for smoke container names}"
-          smoke_container_x64="rari-smoke-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}-${GITHUB_JOB}-${{ matrix.arch }}"
-          docker create --name "$smoke_container_x64" --platform linux/amd64 \
+          smoke_container="rari-smoke-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}-${GITHUB_JOB}-${{ matrix.arch }}"
+          docker create --name "$smoke_container" --platform linux/amd64 \
             node:24-trixie-slim node -e 'setInterval(() => {}, 60000)'
           cleanup() {
             local status=$?
-            if ! docker rm --force "$smoke_container_x64" >/dev/null; then
-              echo "Failed to remove smoke container $smoke_container_x64" >&2
+            if ! docker rm --force "$smoke_container" >/dev/null; then
+              echo "Failed to remove smoke container $smoke_container" >&2
               status=1
             fi
             exit "$status"
           }
           trap cleanup EXIT
-          docker start "$smoke_container_x64" >/dev/null
-          docker exec "$smoke_container_x64" mkdir -p /workspace/dist-tarballs /workspace/test/fixtures
+          docker start "$smoke_container" >/dev/null
+          docker exec "$smoke_container" mkdir -p /workspace/dist-tarballs /workspace/test/fixtures
           docker cp \
             "$GITHUB_WORKSPACE/dist-tarballs/rari-linux-x64-${VERSION}.tgz" \
-            "$smoke_container_x64:/workspace/dist-tarballs/"
+            "$smoke_container:/workspace/dist-tarballs/"
           tar -C "$GITHUB_WORKSPACE/test/fixtures" -chf - app \
-            | docker cp - "$smoke_container_x64:/workspace/test/fixtures/"
-          docker exec --env VERSION="$VERSION" "$smoke_container_x64" sh -euc '
+            | docker cp - "$smoke_container:/workspace/test/fixtures/"
+          docker exec --env VERSION="$VERSION" "$smoke_container" sh -euc '
               apt-get update -qq
               apt-get install -y -qq ca-certificates curl libfontconfig1
               mkdir -p /tmp/rari-package
@@ -591,26 +591,26 @@ jobs:
           : "${GITHUB_RUN_ID:?Gitea must provide GITHUB_RUN_ID for smoke container names}"
           : "${GITHUB_RUN_ATTEMPT:?Gitea must provide GITHUB_RUN_ATTEMPT for smoke container names}"
           : "${GITHUB_JOB:?Gitea must provide GITHUB_JOB for smoke container names}"
-          smoke_container="rari-smoke-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}-${GITHUB_JOB}-${{ matrix.arch }}"
-          docker create --name "$smoke_container" --platform linux/amd64 \
+          smoke_container_arm64="rari-smoke-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}-${GITHUB_JOB}-${{ matrix.arch }}"
+          docker create --name "$smoke_container_arm64" --platform linux/amd64 \
             node:24-trixie-slim node -e 'setInterval(() => {}, 60000)'
           cleanup() {
             local status=$?
-            if ! docker rm --force "$smoke_container" >/dev/null; then
-              echo "Failed to remove smoke container $smoke_container" >&2
+            if ! docker rm --force "$smoke_container_arm64" >/dev/null; then
+              echo "Failed to remove smoke container $smoke_container_arm64" >&2
               status=1
             fi
             exit "$status"
           }
           trap cleanup EXIT
-          docker start "$smoke_container" >/dev/null
-          docker exec "$smoke_container" mkdir -p /workspace/dist-tarballs /workspace/test/fixtures
+          docker start "$smoke_container_arm64" >/dev/null
+          docker exec "$smoke_container_arm64" mkdir -p /workspace/dist-tarballs /workspace/test/fixtures
           docker cp \
             "$GITHUB_WORKSPACE/dist-tarballs/rari-linux-x64-${VERSION}.tgz" \
-            "$smoke_container:/workspace/dist-tarballs/"
+            "$smoke_container_arm64:/workspace/dist-tarballs/"
           tar -C "$GITHUB_WORKSPACE/test/fixtures" -chf - app \
-            | docker cp - "$smoke_container:/workspace/test/fixtures/"
-          docker exec --env VERSION="$VERSION" "$smoke_container" sh -euc '
+            | docker cp - "$smoke_container_arm64:/workspace/test/fixtures/"
+          docker exec --env VERSION="$VERSION" "$smoke_container_arm64" sh -euc '
               apt-get update -qq
               apt-get install -y -qq ca-certificates curl libfontconfig1
               mkdir -p /tmp/rari-package
