@@ -81,6 +81,32 @@ test('rejects fixed Docker host ports and fixed compose ports', () => {
   )
 })
 
+test('rejects variable values in Compose host-port positions', () => {
+  const sources = [
+    'services:\n  db:\n    ports:\n      - "$HOST_PORT:5432"',
+    'services:\n  db:\n    ports:\n      - "${DB_PORT}:5432"',
+    'services:\n  db:\n    ports:\n      - target: 5432\n        published: ${DB_PORT}',
+  ]
+
+  for (const source of sources) {
+    assert.deepEqual(
+      findDockerSafetyViolations(source).map(({ message }) => message),
+      ['fixed host-port publishing'],
+    )
+  }
+
+  assert.deepEqual(
+    findDockerSafetyViolations('services:\n  db:\n    ports:\n      - "${HOST_PORT:+}:5432"'),
+    [],
+  )
+  assert.deepEqual(
+    findDockerSafetyViolations(
+      'services:\n  db:\n    ports:\n      - target: 5432\n        published: ${HOST_PORT:+}',
+    ),
+    [],
+  )
+})
+
 test('rejects global Docker cleanup and filters that are not unique to a job', () => {
   assert.deepEqual(
     findDockerSafetyViolations(['docker', 'system', 'prune', '-af'].join(' ')).map(
@@ -1178,6 +1204,31 @@ test('fails closed on Compose include and extends file references', async () => 
         /Cannot statically scan Compose include or extends.file/,
       )
     }
+  } finally {
+    await rm(root, { recursive: true, force: true })
+  }
+})
+
+test('fails closed on Compose anchors and aliases that can hide port mappings', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'docker-safety-compose-aliases-'))
+  const workflowPath = join(root, '.github', 'workflows', 'check.yml')
+  const workflow = 'jobs:\n  check:\n    steps:\n      - run: docker compose up'
+  const compose = [
+    'x-dbports: &dbports',
+    '  - "5432:5432"',
+    'services:',
+    '  db:',
+    '    ports: *dbports',
+  ].join('\n')
+
+  try {
+    await mkdir(join(root, '.github', 'workflows'), { recursive: true })
+    await writeFile(join(root, 'compose.yaml'), compose)
+
+    await assert.rejects(
+      collectComposeFiles(root, [{ path: workflowPath, source: workflow }], {}),
+      /Cannot statically scan Compose anchors or aliases/,
+    )
   } finally {
     await rm(root, { recursive: true, force: true })
   }

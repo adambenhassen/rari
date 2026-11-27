@@ -375,22 +375,40 @@ function hasFixedPortMapping(value) {
     .split(/\r?\n/)
     .filter(line => !yamlMappingEntry(line))
     .join('\n')
-  return /(?:\d{1,3}(?:\.\d{1,3}){3}|localhost|\[[\da-f:]+\]):\d+(?:-\d+)?:\d+(?:-\d+)?|\d+(?:-\d+)?:\d+(?:-\d+)?/.test(
-    shortForm,
+  return (
+    /(?:\d{1,3}(?:\.\d{1,3}){3}|localhost|\[[\da-f:]+\]):\d+(?:-\d+)?:\d+(?:-\d+)?|\d+(?:-\d+)?:\d+(?:-\d+)?/.test(
+      shortForm,
+    ) || hasVariableShortHostPort(shortForm)
   )
+}
+
+function hasVariableShortHostPort(value) {
+  const variableHostPort = /(\$\{[^}]+\}|\$[A-Za-z_][\w]*):/g
+  for (const match of value.matchAll(variableHostPort)) {
+    if (!isAlwaysEmptyComposeExpansion(match[1])) return true
+  }
+  return false
+}
+
+function isAlwaysEmptyComposeExpansion(value) {
+  return /^\$\{[A-Za-z_][\w]*(?::\+|\+)\}$/.test(value)
+}
+
+function isFixedPublishedPort(value) {
+  const scalar = yamlScalar(value).trim()
+  if (/^\d+(?:-\d+)?$/.test(scalar)) return true
+  return /\$\{[^}]+\}|\$[A-Za-z_][\w]*/.test(scalar) && !isAlwaysEmptyComposeExpansion(scalar)
 }
 
 function hasFixedPublishedPort(value) {
   for (const line of value.split(/\r?\n/)) {
     const mapping = yamlMappingEntry(line)
     const inlineMappingValue = yamlInlineMappingValue(line, 'published')
-    if (mapping?.key === 'published' && /^\d+(?:-\d+)?$/.test(yamlScalar(mapping.value))) {
-      return true
-    }
+    if (mapping?.key === 'published' && isFixedPublishedPort(mapping.value)) return true
 
     const inlineMapping = inlineMappingValue?.match(/^(?:"([^"]*)"|'([^']*)'|([^,}\]]+))/)
     const inlineValue = inlineMapping?.[1] ?? inlineMapping?.[2] ?? inlineMapping?.[3]
-    if (inlineValue && /^\d+(?:-\d+)?$/.test(yamlScalar(inlineValue))) return true
+    if (inlineValue && isFixedPublishedPort(inlineValue)) return true
   }
   return false
 }
@@ -1002,7 +1020,11 @@ function defaultComposePaths(root, workingDirectory) {
   return paths
 }
 
-function assertComposeReferencesScannable(source, file) {
+function assertComposeFileScannable(source, file) {
+  if (hasYamlAnchorsOrAliases(source)) {
+    throw new Error(`Cannot statically scan Compose anchors or aliases in ${file}`)
+  }
+
   let extendsIndent = -1
 
   for (const line of source.split(/\r?\n/)) {
@@ -1042,6 +1064,14 @@ function assertComposeReferencesScannable(source, file) {
       throw new Error(`Cannot statically scan Compose include or extends.file in ${file}`)
     }
   }
+}
+
+function hasYamlAnchorsOrAliases(source) {
+  return source.split(/\r?\n/).some(line => {
+    const content = yamlScalar(line)
+    if (!content || content.trimStart().startsWith('#')) return false
+    return /(?:^|[:,\[{]\s*|-\s*)[&*][^\s,\]}]+/.test(content)
+  })
 }
 
 function dotenvValue(value, file) {
@@ -1236,7 +1266,7 @@ export async function collectComposeFiles(root, sources, environment = process.e
   for (const [path, reference] of references) {
     try {
       const source = await readFile(path, 'utf8')
-      assertComposeReferencesScannable(source, path)
+      assertComposeFileScannable(source, path)
       found.push({ path, source })
     } catch (error) {
       if (error.code === 'ENOENT' && !reference.required) continue
