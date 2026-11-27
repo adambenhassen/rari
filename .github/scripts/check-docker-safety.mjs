@@ -98,11 +98,77 @@ function logicalCommands(lines) {
 }
 
 function shellTokens(source) {
-  return [...source.matchAll(/"(?:\\.|[^"\\])*"|'[^']*'|[^\s]+/g)].map(match => ({
-    value: match[0],
-    start: match.index,
-    end: match.index + match[0].length,
-  }))
+  return [...source.matchAll(/\$'(?:\\.|[^'\\])*'|"(?:\\.|[^"\\])*"|'[^']*'|[^\s]+/g)].map(
+    match => ({
+      value: match[0],
+      start: match.index,
+      end: match.index + match[0].length,
+    }),
+  )
+}
+
+function decodeAnsiCQuotedWord(token, sourcePosition = index => index) {
+  const content = token.slice(2, -1)
+  let value = ''
+  const positions = [sourcePosition(2)]
+  const simpleEscapes = {
+    'a': '\x07',
+    'b': '\b',
+    'e': '\x1b',
+    'E': '\x1b',
+    'f': '\f',
+    'n': '\n',
+    'r': '\r',
+    't': '\t',
+    'v': '\v',
+    '\\': '\\',
+    "'": "'",
+    '"': '"',
+    '?': '?',
+  }
+
+  for (let index = 0; index < content.length;) {
+    let decoded = content[index]
+    let consumed = 1
+    if (content[index] === '\\' && index + 1 < content.length) {
+      const escape = content[index + 1]
+      const numericEscape = content.slice(index + 2).match(/^[0-9a-f]{1,2}/i)
+      const octalEscape = content.slice(index + 1).match(/^[0-7]{1,3}/)
+      const unicodeEscape = content.slice(index + 2).match(/^(u[0-9a-f]{4}|U[0-9a-f]{8})/i)
+
+      if (escape === 'x' && numericEscape) {
+        decoded = String.fromCharCode(Number.parseInt(numericEscape[0], 16))
+        consumed = numericEscape[0].length + 2
+      } else if (unicodeEscape) {
+        const digits = unicodeEscape[0].slice(1)
+        const codePoint = Number.parseInt(digits, 16)
+        decoded =
+          digits.length === 4 || codePoint <= 0x10ffff
+            ? String.fromCodePoint(codePoint)
+            : unicodeEscape[0]
+        consumed = unicodeEscape[0].length + 1
+      } else if (octalEscape) {
+        decoded = String.fromCharCode(Number.parseInt(octalEscape[0], 8))
+        consumed = octalEscape[0].length + 1
+      } else if (escape === 'c' && index + 2 < content.length) {
+        const control = content[index + 2]
+        decoded = String.fromCharCode(
+          control === '?' ? 0x7f : control.toUpperCase().charCodeAt(0) & 0x1f,
+        )
+        consumed = 3
+      } else {
+        decoded = simpleEscapes[escape] ?? escape
+        consumed = 2
+      }
+    }
+
+    value += decoded
+    const endPosition = sourcePosition(index + consumed + 2)
+    for (let count = 0; count < decoded.length; count += 1) positions.push(endPosition)
+    index += consumed
+  }
+
+  return { value, positions }
 }
 
 function splitShellControlOperators(token) {
@@ -256,20 +322,33 @@ function shellSubstitutionRanges(source) {
   return ranges
 }
 
-function shellCommandWords(source, offset = 0) {
+function shellCommandWords(source, offset = 0, sourcePositions) {
   const words = []
   const quotedRanges = []
+  const sourcePosition = index => sourcePositions?.[index] ?? offset + index
 
   for (const word of shellWords(source)) {
+    if (word.value.startsWith("$'") && word.value.endsWith("'")) {
+      const decoded = decodeAnsiCQuotedWord(word.value, index => sourcePosition(word.start + index))
+      if (/\s/.test(decoded.value)) {
+        quotedRanges.push({ start: word.start, end: word.end })
+        words.push(...shellCommandWords(decoded.value, 0, decoded.positions))
+        continue
+      }
+    }
+
     const unquoted = unquoteShellToken(word.value)
     if (unquoted !== word.value && /\s/.test(unquoted)) {
       quotedRanges.push({ start: word.start, end: word.end })
-      words.push(...shellCommandWords(unquoted, offset + word.start + 1))
+      const contentPositions = Array.from({ length: unquoted.length + 1 }, (_, index) =>
+        sourcePosition(word.start + index + 1),
+      )
+      words.push(...shellCommandWords(unquoted, 0, contentPositions))
     } else {
       words.push({
         ...word,
-        start: word.start + offset,
-        end: word.end + offset,
+        start: sourcePosition(word.start),
+        end: sourcePosition(word.end),
       })
     }
   }
@@ -278,13 +357,19 @@ function shellCommandWords(source, offset = 0) {
     if (quotedRanges.some(quoted => range.start >= quoted.start && range.start < quoted.end)) {
       continue
     }
-    words.push(...shellCommandWords(source.slice(range.start, range.end), offset + range.start))
+    const contentPositions = Array.from({ length: range.end - range.start + 1 }, (_, index) =>
+      sourcePosition(range.start + index),
+    )
+    words.push(...shellCommandWords(source.slice(range.start, range.end), 0, contentPositions))
   }
 
   return words
 }
 
 function unquoteShellToken(token) {
+  if (token.startsWith("$'") && token.endsWith("'")) {
+    return decodeAnsiCQuotedWord(token).value
+  }
   return (token.startsWith('"') && token.endsWith('"')) ||
     (token.startsWith("'") && token.endsWith("'"))
     ? token.slice(1, -1)
