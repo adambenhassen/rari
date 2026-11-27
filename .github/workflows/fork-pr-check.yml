@@ -117,6 +117,11 @@ jobs:
           CARGO_PROFILE_RELEASE_STRIP: none
           RUSTFLAGS: -C link-arg=-fuse-ld=mold -Cforce-frame-pointers=yes
 
+      - name: Free snapshot build artifacts
+        run: |
+          cargo clean --release
+          sudo apt-get clean
+
       - name: Check Rust formatting
         run: cargo fmt --all -- --check
 

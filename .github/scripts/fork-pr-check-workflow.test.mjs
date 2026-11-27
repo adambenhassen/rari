@@ -42,3 +42,24 @@ test('Rust tests link with mold', () => {
   assert.match(testStep[1], /run: cargo test -p rari --all-features/)
   assert.match(testStep[1], /env:\n          RUSTFLAGS: -C link-arg=-fuse-ld=mold\n/)
 })
+
+test('snapshot build artifacts are cleaned before Clippy', () => {
+  const snapshotCommand =
+    'cargo run --release --manifest-path tools/snapshot/Cargo.toml -- crates/rari/snapshots'
+  const snapshotPosition = workflow.indexOf(snapshotCommand)
+  const cleanupStep = workflow.match(
+    /      - name: Free snapshot build artifacts\n([\s\S]*?)(?=      - name:|\s*$)/,
+  )
+  const clippyPosition = workflow.indexOf(
+    'cargo clippy -p rari --all-targets --all-features -- -D warnings',
+  )
+
+  assert.ok(snapshotPosition !== -1, 'Missing snapshot generation command')
+  assert.ok(cleanupStep, 'Missing snapshot artifact cleanup step')
+  assert.match(cleanupStep[1], /cargo clean --release/)
+  assert.match(cleanupStep[1], /sudo apt-get clean/)
+
+  const cleanupPosition = workflow.indexOf(cleanupStep[0])
+  assert.ok(cleanupPosition > snapshotPosition, 'Cleanup must follow snapshot generation')
+  assert.ok(cleanupPosition < clippyPosition, 'Cleanup must precede Clippy')
+})
