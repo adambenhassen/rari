@@ -1421,10 +1421,11 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn deferred_fast_cache_survives_regular_entry_eviction_during_metadata_outage() {
+    async fn deferred_fast_cache_survives_regular_entry_eviction_during_metadata_outage()
+    -> Result<(), &'static str> {
         use std::{sync::Arc, time::Instant};
 
-        use axum::http::HeaderMap;
+        use axum::http::{HeaderMap, StatusCode};
         use bytes::Bytes;
 
         use super::fast_cache_response;
@@ -1475,7 +1476,7 @@ mod tests {
 
         regular_cache.invalidate(key).await;
         assert!(regular_cache.candidate(key).await.is_none());
-        let fast_entry = fast_cache.get(key).expect("fast entry remains cached");
+        let fast_entry = fast_cache.get(key).ok_or("fast entry should remain cached")?;
         assert_eq!(
             metadata_cache_hit_decision(MetadataCacheHitInput {
                 cached_metadata: CachedMetadataState::from(fast_entry.as_ref()),
@@ -1487,8 +1488,9 @@ mod tests {
         );
         assert_eq!(fast_entry.identity, Bytes::from_static(b"html"));
         let fast_response = fast_cache_response(&fast_entry, &HeaderMap::new(), None);
-        assert_eq!(fast_response.status(), axum::http::StatusCode::OK);
+        assert_eq!(fast_response.status(), StatusCode::OK);
         assert_eq!(fast_response.headers()["x-cache"], "HIT");
+        Ok(())
     }
 
     #[test]
