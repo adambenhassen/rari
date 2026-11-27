@@ -373,7 +373,7 @@ function hasFixedDockerPublish(command) {
 function hasFixedPortMapping(value) {
   const shortForm = value
     .split(/\r?\n/)
-    .filter(line => !/^\s*(?:-\s*)?[\w-]+\s*:(?:\s|$)/.test(line))
+    .filter(line => !yamlMappingEntry(line))
     .join('\n')
   return /(?:\d{1,3}(?:\.\d{1,3}){3}|localhost|\[[\da-f:]+\]):\d+(?:-\d+)?:\d+(?:-\d+)?|\d+(?:-\d+)?:\d+(?:-\d+)?/.test(
     shortForm,
@@ -382,14 +382,15 @@ function hasFixedPortMapping(value) {
 
 function hasFixedPublishedPort(value) {
   for (const line of value.split(/\r?\n/)) {
-    const mapping = line.match(/^\s*(?:-\s*)?published\s*:\s*(.*?)\s*$/)
-    if (mapping && /^\d+(?:-\d+)?$/.test(yamlScalar(mapping[1]))) return true
+    const mapping = yamlMappingEntry(line)
+    const inlineMappingValue = yamlInlineMappingValue(line, 'published')
+    if (mapping?.key === 'published' && /^\d+(?:-\d+)?$/.test(yamlScalar(mapping.value))) {
+      return true
+    }
 
-    const inlineMapping = line.match(
-      /[,{]\s*published\s*:\s*(?:"([^"]*)"|'([^']*)'|([\d-]+))(?=\s*[,}]|$)/,
-    )
+    const inlineMapping = inlineMappingValue?.match(/^(?:"([^"]*)"|'([^']*)'|([^,}\]]+))/)
     const inlineValue = inlineMapping?.[1] ?? inlineMapping?.[2] ?? inlineMapping?.[3]
-    if (inlineValue && /^\d+(?:-\d+)?$/.test(inlineValue)) return true
+    if (inlineValue && /^\d+(?:-\d+)?$/.test(yamlScalar(inlineValue))) return true
   }
   return false
 }
@@ -551,11 +552,12 @@ export function findDockerSafetyViolations(source, file = '<input>') {
   }
 
   for (let index = 0; index < lines.length; index += 1) {
-    const match = lines[index].match(/^(\s*)ports:\s*(.*)$/)
-    if (!match) continue
+    const mapping = yamlMappingEntry(lines[index])
+    const inlinePorts = yamlInlineMappingValue(lines[index], 'ports')
+    if (mapping?.key !== 'ports' && inlinePorts === undefined) continue
 
-    const indent = match[1].length
-    let block = match[2]
+    const indent = mapping?.key === 'ports' ? mapping.indent : lines[index].match(/^\s*/)[0].length
+    let block = mapping?.key === 'ports' ? mapping.value : inlinePorts
     for (let next = index + 1; next < lines.length; next += 1) {
       if (!lines[next].trim()) continue
       const nextIndent = lines[next].match(/^\s*/)[0].length
@@ -753,6 +755,24 @@ function yamlScalar(value) {
     }
   }
   return trimmed.replace(/\s+#.*$/, '')
+}
+
+function yamlMappingEntry(line) {
+  const match = line.match(
+    /^(\s*)(?:-\s*)?(?:"([^"]+)"|'([^']+)'|([A-Za-z_][\w-]*))\s*:(?=\s|$|[\[{])\s*(.*)$/,
+  )
+  if (!match) return undefined
+  return {
+    indent: match[1].length,
+    key: match[2] ?? match[3] ?? match[4],
+    value: match[5],
+  }
+}
+
+function yamlInlineMappingValue(line, key) {
+  const keyPattern = `(?:"${key}"|'${key}'|${key})`
+  const match = line.match(new RegExp(`(?:^|[{,])\\s*${keyPattern}\\s*:\\s*(.*)$`))
+  return match?.[1]
 }
 
 function yamlEnvironment(lines, start, end, environmentIndent) {
@@ -992,20 +1012,33 @@ function assertComposeReferencesScannable(source, file) {
     const indent = line.match(/^\s*/)[0].length
     if (extendsIndent >= 0 && indent <= extendsIndent) extendsIndent = -1
 
-    if (indent === 0 && /^include\s*:/i.test(content)) {
+    const mapping = yamlMappingEntry(line)
+    if (mapping?.key === 'include' || yamlInlineMappingValue(line, 'include') !== undefined) {
       throw new Error(`Cannot statically scan Compose include or extends.file in ${file}`)
     }
 
-    const extendsMatch = content.match(/^extends\s*:\s*(.*)$/i)
-    if (!extendsMatch) {
-      if (extendsIndent >= 0 && indent > extendsIndent && /^file\s*:/i.test(content)) {
+    const inlineExtends = yamlInlineMappingValue(line, 'extends')
+    if (inlineExtends !== undefined && mapping?.key !== 'extends') {
+      throw new Error(`Cannot statically scan Compose include or extends.file in ${file}`)
+    }
+
+    if (mapping?.key !== 'extends') {
+      if (
+        extendsIndent >= 0 &&
+        indent > extendsIndent &&
+        (mapping?.key === 'file' || /(?:^|\s)[*&][\w-]+/.test(content))
+      ) {
         throw new Error(`Cannot statically scan Compose include or extends.file in ${file}`)
       }
       continue
     }
 
-    extendsIndent = indent
-    if (/\bfile\s*:/i.test(extendsMatch[1])) {
+    extendsIndent = mapping.indent
+    if (
+      /^(?:\{|\[)/.test(mapping.value) ||
+      /(?:^|[{,])\s*(?:"file"|'file'|file)\s*:/i.test(mapping.value) ||
+      /(?:^|\s)[*&][\w-]+/.test(mapping.value)
+    ) {
       throw new Error(`Cannot statically scan Compose include or extends.file in ${file}`)
     }
   }

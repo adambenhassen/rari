@@ -61,6 +61,24 @@ test('rejects fixed Docker host ports and fixed compose ports', () => {
     ),
     [],
   )
+  assert.deepEqual(
+    findDockerSafetyViolations(
+      [
+        'services:',
+        '  db:',
+        "    'ports':",
+        "      - 'published': 5432",
+        "        'target': 5432",
+      ].join('\n'),
+    ).map(({ message }) => message),
+    ['fixed host-port publishing'],
+  )
+  assert.deepEqual(
+    findDockerSafetyViolations(
+      "services: {db: {'ports': [{'published': 5432, 'target': 5432}]}}",
+    ).map(({ message }) => message),
+    ['fixed host-port publishing'],
+  )
 })
 
 test('rejects global Docker cleanup and filters that are not unique to a job', () => {
@@ -1142,7 +1160,11 @@ test('fails closed on Compose include and extends file references', async () => 
   const fixedCompose = 'services:\n  db:\n    ports:\n      - "127.0.0.1:5432:5432"'
   const configs = [
     'include:\n  - path: referenced.yml\nservices: {}\n',
+    "'include':\n  - path: referenced.yml\nservices: {}\n",
+    "{'include': [{path: referenced.yml}], services: {}}\n",
     'services:\n  web:\n    extends:\n      file: referenced.yml\n      service: base\n',
+    "services:\n  web:\n    'extends':\n      'file': referenced.yml\n      service: base\n",
+    "services: {web: {'extends': {'file': referenced.yml, service: base}}}\n",
   ]
 
   try {
