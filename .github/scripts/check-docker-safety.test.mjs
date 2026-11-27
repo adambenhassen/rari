@@ -353,6 +353,31 @@ test('normalizes quoted fragments in Docker command, group, and subcommand words
   )
 })
 
+test('matches container names relative to each Docker invocation', () => {
+  const scopedName = '--name "rari-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT-$GITHUB_JOB"'
+  assert.deepEqual(
+    findDockerSafetyViolations(`${scopedName}; docker run --name fixed alpine`).map(
+      ({ message }) => message,
+    ),
+    ['container name is not unique to this job'],
+  )
+})
+
+test('recognizes Docker commands immediately after shell control operators', () => {
+  const name = '--name "rari-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT-$GITHUB_JOB"'
+  const cases = [
+    [`echo ready;docker run ${name} -p 5432:5432 image`, 'fixed host-port publishing'],
+    ['echo ready &&docker system prune -af', 'Docker system prune is not allowed'],
+  ]
+
+  for (const [command, message] of cases) {
+    assert.deepEqual(
+      findDockerSafetyViolations(command).map(({ message }) => message),
+      [message],
+    )
+  }
+})
+
 test('requires Docker container names to include the run, attempt, and job identity', () => {
   assert.deepEqual(
     findDockerSafetyViolations('docker create --name rari-smoke-image alpine').map(

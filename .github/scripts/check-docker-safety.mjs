@@ -105,11 +105,68 @@ function shellTokens(source) {
   }))
 }
 
+function splitShellControlOperators(token) {
+  const fragments = []
+  let fragmentStart = 0
+  let quote
+
+  for (let index = 0; index < token.value.length; index += 1) {
+    const character = token.value[index]
+    if (character === '\\' && quote !== "'") {
+      index += 1
+      continue
+    }
+    if (quote) {
+      if (character === quote) quote = undefined
+      continue
+    }
+    if (character === "'" || character === '"') {
+      quote = character
+      continue
+    }
+    if (character !== ';' && character !== '&' && character !== '|') continue
+
+    if (index > fragmentStart) {
+      fragments.push({
+        value: token.value.slice(fragmentStart, index),
+        start: token.start + fragmentStart,
+        end: token.start + index,
+      })
+    }
+    const operatorEnd = index + (token.value[index + 1] === character ? 2 : 1)
+    fragments.push({
+      value: token.value.slice(index, operatorEnd),
+      start: token.start + index,
+      end: token.start + operatorEnd,
+    })
+    fragmentStart = operatorEnd
+    index = operatorEnd - 1
+  }
+
+  if (fragmentStart < token.value.length) {
+    fragments.push({
+      value: token.value.slice(fragmentStart),
+      start: token.start + fragmentStart,
+      end: token.end,
+    })
+  }
+
+  return fragments
+}
+
+function isShellControlOperator(value) {
+  return [';', '&', '&&', '|', '||'].includes(value)
+}
+
 function shellWords(source) {
   const words = []
-  for (const token of shellTokens(source)) {
+  for (const token of shellTokens(source).flatMap(splitShellControlOperators)) {
     const previous = words.at(-1)
-    if (previous?.end === token.start) {
+    if (
+      previous?.end === token.start &&
+      !isShellControlOperator(previous.value) &&
+      !isShellControlOperator(token.value)
+    ) {
       previous.value += token.value
       previous.end = token.end
     } else {
@@ -347,7 +404,7 @@ function dockerInvocations(source) {
         group,
         subcommand,
         arguments: source.slice(afterDocker + tokens[subcommandIndex].end, end),
-        command: source.slice(match.index, end),
+        command: source.slice(match.start, end),
       })
       break
     }
