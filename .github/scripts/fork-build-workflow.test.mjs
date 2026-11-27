@@ -64,14 +64,22 @@ test('Linux build artifacts retain enough time for the publisher handoff', () =>
 
 test('cleanup-only dispatch skips both architecture builds and publishing', () => {
   assert.ok(releaseValidationCondition, 'Missing non-matrix release validation condition')
-  assert.doesNotMatch(releaseValidationJob, /^    strategy:/m, 'Release validation must not be matrixed')
+  assert.doesNotMatch(
+    releaseValidationJob,
+    /^    strategy:/m,
+    'Release validation must not be matrixed',
+  )
   assert.match(buildJob, /^    needs: validate-release-request$/m)
-  assert.doesNotMatch(buildJob, /^    if:/m, 'Matrix build jobs must inherit a skipped validation dependency')
+  assert.doesNotMatch(
+    buildJob,
+    /^    if:/m,
+    'Matrix build jobs must inherit a skipped validation dependency',
+  )
   assert.match(publishJob, /^    needs: \[build, validate-release-request\]$/m)
   assert.ok(publishCondition, 'Missing publisher condition')
   assert.ok(diagnosticCondition, 'Missing diagnostic job condition')
 
-  const arches = [...buildJob.matchAll(/^          - arch: (x64|arm64)$/gm)].map((match) => match[1])
+  const arches = [...buildJob.matchAll(/^          - arch: (x64|arm64)$/gm)].map(match => match[1])
   assert.deepEqual(arches, ['x64', 'arm64'])
 
   for (const deleteTestRelease of [true, 'true']) {
@@ -107,7 +115,7 @@ test('normal dispatch validates once, builds both architectures, and permits pub
   assert.equal(runInNewContext(diagnosticCondition, context), false)
   assert.equal(runInNewContext(publishCondition, context), true)
   assert.deepEqual(
-    [...buildJob.matchAll(/^          - arch: (x64|arm64)$/gm)].map((match) => match[1]),
+    [...buildJob.matchAll(/^          - arch: (x64|arm64)$/gm)].map(match => match[1]),
     ['x64', 'arm64'],
   )
 })
