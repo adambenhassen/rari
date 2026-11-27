@@ -404,9 +404,19 @@ function dockerPublishValues(command) {
 }
 
 function hasFixedHostPortWithVariableContainerPort(value) {
-  return /(?:(?:(?:\d{1,3}\.){3}\d{1,3}|localhost|\[[\da-f:]+\]):)?\d+(?:-\d+)?:\$(?:\{[^}]+\}|[A-Za-z_][\w]*)/.test(
-    value,
-  )
+  if (
+    /(?:(?:(?:\d{1,3}\.){3}\d{1,3}|localhost|\[[\da-f:]+\]):)?\d+(?:-\d+)?:\$(?:\{[^}]+\}|[A-Za-z_][\w]*)/.test(
+      value,
+    )
+  ) {
+    return true
+  }
+
+  const fixedHostPort = /(?:(?:(?:\d{1,3}\.){3}\d{1,3}|localhost|\[[\da-f:]+\]):)?\d+(?:-\d+)?:/g
+  for (const match of value.matchAll(fixedHostPort)) {
+    if (hasShellExpansionAt(value, match.index + match[0].length)) return true
+  }
+  return false
 }
 
 function hasFixedPortMapping(value) {
@@ -428,7 +438,77 @@ function hasVariableShortHostPort(value) {
   for (const match of value.matchAll(variableHostPort)) {
     if (!isAlwaysEmptyComposeExpansion(match[1])) return true
   }
+  return hasShellExpansionBeforeColon(value)
+}
+
+function hasShellExpansionBeforeColon(value) {
+  for (let index = 0; index < value.length; index += 1) {
+    if (!isShellExpansionStart(value, index)) continue
+    const end = shellExpansionEnd(value, index)
+    if (end < 0 || value[end + 1] === ':') return true
+    index = end
+  }
   return false
+}
+
+function hasShellExpansionAt(value, index) {
+  return isShellExpansionStart(value, index)
+}
+
+function isShellExpansionStart(value, index) {
+  return (
+    value.startsWith('$(', index) ||
+    value.startsWith('<(', index) ||
+    value.startsWith('>(', index) ||
+    value[index] === '`'
+  )
+}
+
+function shellExpansionEnd(value, start) {
+  if (value[start] === '`') {
+    for (let index = start + 1; index < value.length; index += 1) {
+      if (value[index] === '\\') {
+        index += 1
+      } else if (value[index] === '`') {
+        return index
+      }
+    }
+    return -1
+  }
+
+  let depth = 1
+  let quote = null
+  for (let index = start + 2; index < value.length; index += 1) {
+    const character = value[index]
+    if (character === '\\' && quote !== "'") {
+      index += 1
+      continue
+    }
+    if (quote === "'") {
+      if (character === "'") quote = null
+      continue
+    }
+    if (quote === '"' && character === '"') {
+      quote = null
+      continue
+    }
+    if (quote === null && (character === "'" || character === '"')) {
+      quote = character
+      continue
+    }
+    if (quote !== "'" && isShellExpansionStart(value, index)) {
+      const nestedEnd = shellExpansionEnd(value, index)
+      if (nestedEnd < 0) return -1
+      index = nestedEnd
+      continue
+    }
+    if (character === '(') depth += 1
+    if (character === ')') {
+      depth -= 1
+      if (depth === 0) return index
+    }
+  }
+  return -1
 }
 
 function isAlwaysEmptyComposeExpansion(value) {

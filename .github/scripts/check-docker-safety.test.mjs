@@ -117,6 +117,22 @@ test('rejects variable host ports in Docker publish flags unless statically empt
   )
 })
 
+test('rejects shell substitutions in fixed Docker host-port mappings', () => {
+  const name = '--name "rari-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT-$GITHUB_JOB"'
+  const commands = [
+    `docker run ${name} -p "$(printf 5432):5432" postgres`,
+    'docker run --name "rari-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT-$GITHUB_JOB" --publish "`printf 5432`:5432" postgres',
+    `docker run ${name} -p "5432:$(printf 5432)" postgres`,
+  ]
+
+  for (const command of commands) {
+    assert.deepEqual(
+      findDockerSafetyViolations(command).map(({ message }) => message),
+      ['fixed host-port publishing'],
+    )
+  }
+})
+
 test('rejects variable values in Compose host-port positions', () => {
   const sources = [
     'services:\n  db:\n    ports:\n      - "$HOST_PORT:5432"',
