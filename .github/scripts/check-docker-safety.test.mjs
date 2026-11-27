@@ -332,6 +332,26 @@ test('rejects global Docker cleanup and filters that are not unique to a job', (
   )
 })
 
+test('normalizes quoted fragments in Docker command, group, and subcommand words', () => {
+  const name = '--name "rari-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT-$GITHUB_JOB"'
+  const publishCommands = [
+    `"docker" run ${name} -p 5432:5432 image`,
+    `docker "ru"n ${name} -p 5432:5432 image`,
+  ]
+
+  for (const command of publishCommands) {
+    assert.deepEqual(
+      findDockerSafetyViolations(command).map(({ message }) => message),
+      ['fixed host-port publishing'],
+    )
+  }
+
+  assert.deepEqual(
+    findDockerSafetyViolations('docker "sys"tem prune -af').map(({ message }) => message),
+    ['Docker system prune is not allowed'],
+  )
+})
+
 test('requires Docker container names to include the run, attempt, and job identity', () => {
   assert.deepEqual(
     findDockerSafetyViolations('docker create --name rari-smoke-image alpine').map(

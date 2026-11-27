@@ -105,6 +105,20 @@ function shellTokens(source) {
   }))
 }
 
+function shellWords(source) {
+  const words = []
+  for (const token of shellTokens(source)) {
+    const previous = words.at(-1)
+    if (previous?.end === token.start) {
+      previous.value += token.value
+      previous.end = token.end
+    } else {
+      words.push({ ...token })
+    }
+  }
+  return words
+}
+
 function unquoteShellToken(token) {
   return (token.startsWith('"') && token.endsWith('"')) ||
     (token.startsWith("'") && token.endsWith("'"))
@@ -113,7 +127,10 @@ function unquoteShellToken(token) {
 }
 
 function rawCommandToken(token) {
-  return unquoteShellToken(token).replace(/^[($`]+|[);`]+$/g, '')
+  return token
+    .replace(/['"]/g, '')
+    .replace(/\\(.)/g, '$1')
+    .replace(/^[($`]+|[);`]+$/g, '')
 }
 
 function commandWord(token) {
@@ -148,14 +165,14 @@ const dockerContainerSubcommandAliases = new Map([
 ])
 
 function dockerInvocations(source) {
-  const matches = [...source.matchAll(/\bdocker(?=\s|$|-compose\b)/gi)]
+  const matches = [...source.matchAll(/(?:\bdocker|["']docker["'])(?=\s|$|-compose\b)/gi)]
   const invocations = []
 
   for (let matchIndex = 0; matchIndex < matches.length; matchIndex += 1) {
     const match = matches[matchIndex]
     const end = matches[matchIndex + 1]?.index ?? source.length
     const afterDocker = match.index + match[0].length
-    const tokens = shellTokens(source.slice(afterDocker, end))
+    const tokens = shellWords(source.slice(afterDocker, end))
 
     for (let index = 0; index < tokens.length; index += 1) {
       const token = commandWord(tokens[index].value)
@@ -388,16 +405,7 @@ function isSafeDockerPublishValue(value) {
 }
 
 function dockerPublishValues(command) {
-  const tokens = []
-  for (const token of shellTokens(command)) {
-    const previous = tokens.at(-1)
-    if (previous?.end === token.start) {
-      previous.value += token.value
-      previous.end = token.end
-    } else {
-      tokens.push({ ...token })
-    }
-  }
+  const tokens = shellWords(command)
   const values = []
 
   for (let index = 0; index < tokens.length; index += 1) {
