@@ -81,6 +81,28 @@ test('rejects fixed Docker host ports and fixed compose ports', () => {
   )
 })
 
+test('rejects variable host ports in Docker publish flags unless statically empty', () => {
+  const name = '--name "rari-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT-$GITHUB_JOB"'
+  const commands = [
+    `docker run ${name} -p "$HOST_PORT:5432" postgres`,
+    `docker run ${name} --publish "$HOST_PORT:5432" postgres`,
+    `docker run ${name} --publish="$HOST_PORT:5432" postgres`,
+    `docker run ${name} -dp "\${DB_PORT}:5432" postgres`,
+  ]
+
+  for (const command of commands) {
+    assert.deepEqual(
+      findDockerSafetyViolations(command).map(({ message }) => message),
+      ['fixed host-port publishing'],
+    )
+  }
+
+  assert.deepEqual(
+    findDockerSafetyViolations(`docker run ${name} -p "\${HOST_PORT:+}:5432" postgres`),
+    [],
+  )
+})
+
 test('rejects variable values in Compose host-port positions', () => {
   const sources = [
     'services:\n  db:\n    ports:\n      - "$HOST_PORT:5432"',
@@ -1255,6 +1277,34 @@ test('CLI exits nonzero for a violating in-scope workflow', async () => {
 
     assert.equal(result.status, 1, `${result.stdout}\n${result.stderr}`)
     assert.match(result.stderr, /check\.yml:5: fixed host-port publishing/)
+  } finally {
+    await rm(root, { recursive: true, force: true })
+  }
+})
+
+test('CLI exits nonzero for variable Docker host-port publishes', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'docker-safety-cli-variable-publish-'))
+  const workflowDirectory = join(root, '.github', 'workflows')
+
+  try {
+    await mkdir(workflowDirectory, { recursive: true })
+    await writeFile(
+      join(workflowDirectory, 'check.yml'),
+      [
+        'jobs:',
+        '  check:',
+        '    runs-on: inference-x64',
+        '    steps:',
+        '      - run: docker run --name "rari-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT-$GITHUB_JOB" -p "$HOST_PORT:5432" postgres',
+        '      - run: docker run --name "rari-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT-$GITHUB_JOB" --publish "$HOST_PORT:5432" postgres',
+      ].join('\n'),
+    )
+
+    const result = spawnSync(process.execPath, [scriptPath], { cwd: root, encoding: 'utf8' })
+
+    assert.equal(result.status, 1, `${result.stdout}\n${result.stderr}`)
+    assert.match(result.stderr, /check\.yml:5: fixed host-port publishing/)
+    assert.match(result.stderr, /check\.yml:6: fixed host-port publishing/)
   } finally {
     await rm(root, { recursive: true, force: true })
   }

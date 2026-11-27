@@ -370,6 +370,37 @@ function hasFixedDockerPublish(command) {
   )
 }
 
+function hasVariableDockerPublish(command) {
+  return dockerPublishValues(command).some(value =>
+    hasVariableShortHostPort(unquoteShellToken(value)),
+  )
+}
+
+function dockerPublishValues(command) {
+  const tokens = shellTokens(command)
+  const values = []
+
+  for (let index = 0; index < tokens.length; index += 1) {
+    const token = unquoteShellToken(tokens[index].value)
+    if (token === '--publish' || token === '-p') {
+      if (tokens[index + 1]) values.push(tokens[++index].value)
+      continue
+    }
+    if (token.startsWith('--publish=')) {
+      values.push(token.slice('--publish='.length))
+      continue
+    }
+
+    const shortOption = token.match(/^-[A-Za-z]*p(?:=(.*)|(.*))$/)
+    if (!shortOption) continue
+    const attachedValue = shortOption[1] ?? shortOption[2]
+    if (attachedValue) values.push(attachedValue)
+    else if (tokens[index + 1]) values.push(tokens[++index].value)
+  }
+
+  return values
+}
+
 function hasFixedPortMapping(value) {
   const shortForm = value
     .split(/\r?\n/)
@@ -542,7 +573,10 @@ export function findDockerSafetyViolations(source, file = '<input>') {
         }
       }
 
-      if (hasFixedDockerPublish(invocation.command)) {
+      if (
+        hasFixedDockerPublish(invocation.command) ||
+        hasVariableDockerPublish(invocation.command)
+      ) {
         violations.push({ file, line: command.line, message: 'fixed host-port publishing' })
       }
 
