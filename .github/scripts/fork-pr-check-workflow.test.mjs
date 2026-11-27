@@ -13,6 +13,18 @@ test('uses the rari runner while keeping per-PR concurrency unchanged', () => {
   assert.equal([...workflow.matchAll(/^\s*group:/gm)].length, 1)
 })
 
+test('job environment keys are unique', () => {
+  const jobEnvironment = workflow.match(/^    env:\n([\s\S]*?)(?=^    steps:)/m)
+
+  assert.ok(jobEnvironment, 'Missing job environment')
+  const keys = [...jobEnvironment[1].matchAll(/^      ([A-Za-z_][A-Za-z0-9_-]*):/gm)].map(
+    ([, key]) => key,
+  )
+
+  assert.ok(keys.length > 0, 'Missing job environment keys')
+  assert.equal(new Set(keys).size, keys.length, 'Job environment keys must be unique')
+})
+
 test('uses hash-addressed APT indexes with retries before package installation', () => {
   const aptConfigStep = workflow.match(
     /      - name: Configure APT index fetches\n([\s\S]*?)(?=      - name:|$)/,
