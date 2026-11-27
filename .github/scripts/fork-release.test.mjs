@@ -78,7 +78,7 @@ test('builds each release architecture on its assigned runner and publishes comb
     'Smoke-test packaged Linux x64 binary on the production base image',
   )
   assert.match(x64SmokeTest, /if: matrix\.arch == 'x64'/)
-  assert.match(x64SmokeTest, /docker create --platform linux\/amd64/)
+  assert.match(x64SmokeTest, /docker create --name "\$smoke_container" --platform linux\/amd64/)
   assert.match(x64SmokeTest, /rari-linux-x64-\$\{VERSION\}\.tgz/)
   assert.match(x64SmokeTest, /\/tmp\/rari-package\/bin\/rari --mode production/)
   assert.match(x64SmokeTest, /grep -Fq "Test App Home"/)
