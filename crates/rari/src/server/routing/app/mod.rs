@@ -26,10 +26,18 @@ pub(super) fn apply_request_cache_policy(
 ) -> Response {
     if request_context.must_send_no_store() {
         response.headers_mut().insert(CACHE_CONTROL, HeaderValue::from_static("no-store"));
-    } else if request_context.metadata_uses_request_data() {
+    } else if request_context.metadata_uses_request_data() && !has_no_store_directive(&response) {
         response.headers_mut().insert(CACHE_CONTROL, HeaderValue::from_static("private, no-cache"));
     }
     response
+}
+
+fn has_no_store_directive(response: &Response) -> bool {
+    response.headers().get_all(CACHE_CONTROL).iter().any(|value| {
+        value.to_str().ok().is_some_and(|value| {
+            value.split(',').any(|directive| directive.trim().eq_ignore_ascii_case("no-store"))
+        })
+    })
 }
 
 pub(super) fn response_unavailable(
@@ -77,5 +85,17 @@ mod tests {
         let response = apply_request_cache_policy(response, &request_context);
 
         assert_eq!(response.headers()[CACHE_CONTROL], "private, no-cache");
+    }
+
+    #[test]
+    fn request_metadata_does_not_override_route_no_store_policy() {
+        let request_context = RequestContext::new("/session".to_string());
+        request_context.mark_request_data_access(RequestDataAccessScope::Metadata);
+        let mut response = Response::new(Body::empty());
+        response.headers_mut().insert(CACHE_CONTROL, HeaderValue::from_static("public, no-store"));
+
+        let response = apply_request_cache_policy(response, &request_context);
+
+        assert_eq!(response.headers()[CACHE_CONTROL], "public, no-store");
     }
 }

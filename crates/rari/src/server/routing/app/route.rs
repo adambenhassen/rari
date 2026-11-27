@@ -1358,9 +1358,16 @@ pub async fn handle_app_route(
 
 #[cfg(test)]
 mod tests {
+    use std::{
+        env,
+        sync::atomic::{AtomicUsize, Ordering},
+    };
+
+    use rustc_hash::FxHashMap;
+
     use super::{
         CachedMetadataState, CurrentMetadata, MetadataCacheHitDecision, MetadataCacheHitInput,
-        can_skip_metadata_validation, metadata_cache_hit_decision,
+        can_skip_metadata_validation, metadata_cache_hit_decision, response_cache_key,
     };
     use crate::server::cache::response::{self, RequestDataCheck};
 
@@ -1425,17 +1432,52 @@ mod tests {
     -> Result<(), &'static str> {
         use std::{sync::Arc, time::Instant};
 
-        use axum::http::{HeaderMap, StatusCode};
+        use axum::{
+            body::to_bytes,
+            extract::{Query, State},
+            http::{HeaderMap, StatusCode, Uri, header::CACHE_CONTROL},
+        };
         use bytes::Bytes;
+        use tokio::{fs, sync::Mutex};
 
-        use super::fast_cache_response;
+        use crate::{
+            RscHtmlRenderer, RscRenderer,
+            rendering::layout::{LayoutHtmlCache, component_dist_path},
+            runtime::JsExecutionRuntime,
+            server::{
+                ServerState,
+                cache::{CacheHandlerRegistry, handler::MemoryCacheHandler},
+                config::{Config, Mode},
+                host::types::FallbackHtmlCache,
+                routing::app_router::{AppRouteEntry, AppRouteManifest, AppRouter},
+            },
+        };
 
-        let key = "/metadata-outage";
-        let regular_cache = response::ResponseCache::new(response::CacheConfig::default());
+        static NEXT_ROUTE_ID: AtomicUsize = AtomicUsize::new(0);
+
+        let path = "/__deferred_fast_cache_route_test";
+        let project_root = env::current_dir().map_err(|_| "read project root")?;
+        let route_id = NEXT_ROUTE_ID.fetch_add(1, Ordering::Relaxed);
+        let route_file = format!("__deferred_fast_cache_route_{route_id}/page.tsx");
+        let page_module = component_dist_path(&project_root.join("dist/server"), &route_file);
+        let page_module_parent = page_module.parent().ok_or("page module has no parent")?;
+        fs::create_dir_all(page_module_parent).await.map_err(|_| "create page module directory")?;
+        fs::write(
+            &page_module,
+            "export async function getData() { return { props: { cached: true } } }\n\
+             export async function generateMetadata() { markResponseUnavailable(47); return { title: 'Available from cache' } }\n\
+             export default function Page() { return null }\n",
+        )
+        .await
+        .map_err(|_| "write page module")?;
+
+        let response_cache =
+            Arc::new(response::ResponseCache::new(response::CacheConfig::default()));
         let request_data_check = RequestDataCheck::NotRequired;
-        regular_cache
+        let response_key = response_cache_key(path, None, None, None);
+        response_cache
             .set(
-                key.to_string(),
+                response_key.clone(),
                 response::CachedResponse {
                     body: Bytes::from_static(b"html"),
                     headers: HeaderMap::new(),
@@ -1455,9 +1497,10 @@ mod tests {
             )
             .await;
 
-        let fast_cache = response::StaticFastCache::new();
+        let static_fast_cache = Arc::new(response::StaticFastCache::new());
+        let fast_key = response::ResponseCache::generate_static_fast_cache_key(path, None, None);
         let prebuilt = Arc::new(response::PrebuiltResponse {
-            identity: Bytes::from_static(b"html"),
+            identity: Bytes::from_static(b"cached from fast tier"),
             gzip: None,
             br: None,
             zstd: None,
@@ -1472,24 +1515,77 @@ mod tests {
             cached_at: Instant::now(),
             route: None,
         });
-        response::insert_static_fast_cache(&fast_cache, key, Arc::clone(&prebuilt), 10);
-
-        regular_cache.invalidate(key).await;
-        assert!(regular_cache.candidate(key).await.is_none());
-        let fast_entry = fast_cache.get(key).ok_or("fast entry should remain cached")?;
-        assert_eq!(
-            metadata_cache_hit_decision(MetadataCacheHitInput {
-                cached_metadata: CachedMetadataState::from(fast_entry.as_ref()),
-                current_metadata: CurrentMetadata::Missing,
-                unavailable: true,
-                page_data_props_present: true,
-            }),
-            MetadataCacheHitDecision::Allow
+        response::insert_static_fast_cache(
+            &static_fast_cache,
+            &fast_key,
+            Arc::clone(&prebuilt),
+            10,
         );
-        assert_eq!(fast_entry.identity, Bytes::from_static(b"html"));
-        let fast_response = fast_cache_response(&fast_entry, &HeaderMap::new(), None);
-        assert_eq!(fast_response.status(), StatusCode::OK);
-        assert_eq!(fast_response.headers()["x-cache"], "HIT");
+
+        response_cache.invalidate(&response_key).await;
+        assert!(response_cache.candidate(&response_key).await.is_none());
+        assert!(static_fast_cache.get(&fast_key).is_some());
+
+        let runtime = Arc::new(JsExecutionRuntime::new(None));
+        let renderer = Arc::new(Mutex::new(RscRenderer::new(Arc::clone(&runtime))));
+        let app_router = Arc::new(AppRouter::new(AppRouteManifest {
+            routes: vec![AppRouteEntry {
+                path: path.to_string(),
+                file_path: route_file,
+                component_id: None,
+                css: Vec::new(),
+                segments: Vec::new(),
+                params: Vec::new(),
+                is_dynamic: false,
+                static_params: None,
+            }],
+            layouts: Vec::new(),
+            loading: Vec::new(),
+            errors: Vec::new(),
+            not_found: Vec::new(),
+            templates: Vec::new(),
+            generated: "test".to_string(),
+        }));
+        let state = ServerState {
+            renderer,
+            js_runtime: Arc::clone(&runtime),
+            ssr_renderer: Arc::new(RscHtmlRenderer::new(runtime)),
+            config: Arc::new(Config::new(Mode::Production)),
+            app_router: Some(app_router),
+            api_route_handler: None,
+            html_cache: FallbackHtmlCache::default(),
+            layout_html_cache: Arc::new(LayoutHtmlCache::new()),
+            response_cache,
+            static_fast_cache: static_fast_cache.clone(),
+            warmup_generations: Arc::default(),
+            og_generator: None,
+            app_icons: Arc::new(Vec::new()),
+            project_root,
+            image_optimizer: None,
+            cache_registry: Arc::new(CacheHandlerRegistry::default_with_memory()),
+            image_handler: Arc::new(MemoryCacheHandler::default()),
+        };
+
+        let route_response = super::handle_app_route(
+            State(state),
+            Uri::from_static(path),
+            Query(FxHashMap::<String, String>::default()),
+            HeaderMap::new(),
+        )
+        .await
+        .map_err(|_| "handle deferred fast-cache route")?;
+        assert_eq!(route_response.status(), StatusCode::OK);
+        assert_eq!(route_response.headers()["x-cache"], "HIT");
+        assert_eq!(route_response.headers()[CACHE_CONTROL], "no-store");
+        let body = to_bytes(route_response.into_body(), usize::MAX)
+            .await
+            .map_err(|_| "read cached response body")?;
+        assert_eq!(body, Bytes::from_static(b"cached from fast tier"));
+
+        fs::remove_file(&page_module).await.map_err(|_| "remove test page module")?;
+        fs::remove_dir_all(page_module_parent)
+            .await
+            .map_err(|_| "remove test page module directory")?;
         Ok(())
     }
 
