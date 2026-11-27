@@ -336,6 +336,7 @@ test('normalizes quoted fragments in Docker command, group, and subcommand words
   const name = '--name "rari-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT-$GITHUB_JOB"'
   const publishCommands = [
     `"docker" run ${name} -p 5432:5432 image`,
+    `do"cker" run ${name} -p 5432:5432 image`,
     `docker "ru"n ${name} -p 5432:5432 image`,
   ]
 

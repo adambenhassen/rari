@@ -119,6 +119,100 @@ function shellWords(source) {
   return words
 }
 
+function commandSubstitutionEnd(source, start) {
+  let depth = 1
+  let quote
+
+  for (let index = start + 2; index < source.length; index += 1) {
+    const character = source[index]
+    if (character === '\\' && quote !== "'") {
+      index += 1
+      continue
+    }
+    if (quote) {
+      if (character === quote) quote = undefined
+      continue
+    }
+    if (character === "'" || character === '"') {
+      quote = character
+    } else if (character === '`') {
+      const end = source.indexOf('`', index + 1)
+      if (end === -1) return -1
+      index = end
+    } else if (character === '(') {
+      depth += 1
+    } else if (character === ')' && --depth === 0) {
+      return index
+    }
+  }
+
+  return -1
+}
+
+function backtickSubstitutionEnd(source, start) {
+  for (let index = start + 1; index < source.length; index += 1) {
+    if (source[index] === '\\') {
+      index += 1
+    } else if (source[index] === '`') {
+      return index
+    }
+  }
+  return -1
+}
+
+function shellSubstitutionRanges(source) {
+  const ranges = []
+  let quote
+
+  for (let index = 0; index < source.length; index += 1) {
+    const character = source[index]
+    if (character === '\\' && quote !== "'") {
+      index += 1
+      continue
+    }
+    if (quote === "'") {
+      if (character === "'") quote = undefined
+      continue
+    }
+    if (quote === '"' && character === '"') {
+      quote = undefined
+      continue
+    }
+
+    if (source.startsWith('$(', index)) {
+      const end = commandSubstitutionEnd(source, index)
+      if (end !== -1) {
+        ranges.push({ start: index + 2, end })
+        index = end
+      }
+    } else if (character === '`') {
+      const end = backtickSubstitutionEnd(source, index)
+      if (end !== -1) {
+        ranges.push({ start: index + 1, end })
+        index = end
+      }
+    } else if (!quote && (character === "'" || character === '"')) {
+      quote = character
+    }
+  }
+
+  return ranges
+}
+
+function shellCommandWords(source, offset = 0) {
+  const words = shellWords(source).map(word => ({
+    ...word,
+    start: word.start + offset,
+    end: word.end + offset,
+  }))
+
+  for (const range of shellSubstitutionRanges(source)) {
+    words.push(...shellCommandWords(source.slice(range.start, range.end), offset + range.start))
+  }
+
+  return words
+}
+
 function unquoteShellToken(token) {
   return (token.startsWith('"') && token.endsWith('"')) ||
     (token.startsWith("'") && token.endsWith("'"))
@@ -165,13 +259,35 @@ const dockerContainerSubcommandAliases = new Map([
 ])
 
 function dockerInvocations(source) {
-  const matches = [...source.matchAll(/(?:\bdocker|["']docker["'])(?=\s|$|-compose\b)/gi)]
+  const matches = shellCommandWords(source)
+    .filter(token => !token.value.includes('$(') && !token.value.includes('`'))
+    .map(token => ({
+      ...token,
+      command: commandWord(token.value),
+    }))
+    .filter(token =>
+      ['docker', 'docker-compose'].some(
+        executable => token.command === executable || token.command.endsWith(`/${executable}`),
+      ),
+    )
+    .sort((left, right) => left.start - right.start)
   const invocations = []
 
   for (let matchIndex = 0; matchIndex < matches.length; matchIndex += 1) {
     const match = matches[matchIndex]
-    const end = matches[matchIndex + 1]?.index ?? source.length
-    const afterDocker = match.index + match[0].length
+    const end = matches[matchIndex + 1]?.start ?? source.length
+    const afterDocker = match.end
+
+    if (match.command.endsWith('/docker-compose') || match.command === 'docker-compose') {
+      invocations.push({
+        start: match.start,
+        subcommand: 'compose',
+        arguments: source.slice(afterDocker, end),
+        command: source.slice(match.start, end),
+      })
+      continue
+    }
+
     const tokens = shellWords(source.slice(afterDocker, end))
 
     for (let index = 0; index < tokens.length; index += 1) {
@@ -179,10 +295,10 @@ function dockerInvocations(source) {
 
       if (token === '-compose') {
         invocations.push({
-          start: match.index,
+          start: match.start,
           subcommand: 'compose',
           arguments: source.slice(afterDocker + tokens[index].end, end),
-          command: source.slice(match.index, end),
+          command: source.slice(match.start, end),
         })
         break
       }
@@ -227,7 +343,7 @@ function dockerInvocations(source) {
           ? (dockerContainerSubcommandAliases.get(parsedSubcommand) ?? parsedSubcommand)
           : parsedSubcommand
       invocations.push({
-        start: match.index,
+        start: match.start,
         group,
         subcommand,
         arguments: source.slice(afterDocker + tokens[subcommandIndex].end, end),
