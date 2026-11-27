@@ -388,26 +388,37 @@ function isSafeDockerPublishValue(value) {
 }
 
 function dockerPublishValues(command) {
-  const tokens = shellTokens(command)
+  const tokens = []
+  for (const token of shellTokens(command)) {
+    const previous = tokens.at(-1)
+    if (previous?.end === token.start) {
+      previous.value += token.value
+      previous.end = token.end
+    } else {
+      tokens.push({ ...token })
+    }
+  }
   const values = []
 
   for (let index = 0; index < tokens.length; index += 1) {
     const rawToken = tokens[index].value
-    const unquotedToken = unquoteShellToken(rawToken)
-    const token = unquotedToken === rawToken ? unquotedToken.replace(/\\(.)/g, '$1') : unquotedToken
+    const token = rawToken.replace(/['"]/g, '').replace(/\\(.)/g, '$1')
     if (token === '--publish' || token === '-p') {
       if (tokens[index + 1]) values.push(tokens[++index].value)
       continue
     }
     if (token.startsWith('--publish=')) {
-      values.push(token.slice('--publish='.length))
+      const separator = rawToken.indexOf('=')
+      values.push(
+        separator === -1 ? token.slice('--publish='.length) : rawToken.slice(separator + 1),
+      )
       continue
     }
 
     const shortOption = token.match(/^-[A-Za-z]*p(?:=(.*)|(.*))$/)
     if (!shortOption) continue
     const attachedValue = shortOption[1] ?? shortOption[2]
-    if (attachedValue) values.push(attachedValue)
+    if (attachedValue) values.push(rawToken === token ? attachedValue : rawToken)
     else if (tokens[index + 1]) values.push(tokens[++index].value)
   }
 
