@@ -31,7 +31,9 @@ test('Cargo build cache key includes the Rust toolchain and lockfile', () => {
 test('Cargo cache is saved before the E2E disk cleanup', () => {
   const saveStep = stepBlock('Save Cargo build cache')
   const saveIndex = workflow.indexOf('      - name: Save Cargo build cache\n')
-  const cleanupIndex = workflow.indexOf('      - name: Free build space before installing Playwright\n')
+  const cleanupIndex = workflow.indexOf(
+    '      - name: Free build space before installing Playwright\n',
+  )
 
   assert.ok(saveIndex < cleanupIndex, 'Cargo cache must save before cargo clean removes target')
   assert.match(saveStep, /actions\/cache\/save@[0-9a-f]{40} # v5\.1\.0/)
