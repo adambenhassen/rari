@@ -84,10 +84,11 @@ test('rejects fixed Docker host ports and fixed compose ports', () => {
 test('rejects literal host ports when the container port is variable', () => {
   const name = '--name "rari-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT-$GITHUB_JOB"'
   const docker = `docker run ${name} -p 5432:$PG_PORT postgres`
+  const dockerSpecialParameter = `docker run ${name} -p "5432:$?" postgres`
   const composeScalar = 'services:\n  db:\n    ports:\n      - "5432:${PG_PORT}"'
   const composeFlow = 'services:\n  db:\n    ports: ["5432:${PG_PORT}"]'
 
-  for (const source of [docker, composeScalar, composeFlow]) {
+  for (const source of [docker, dockerSpecialParameter, composeScalar, composeFlow]) {
     assert.deepEqual(
       findDockerSafetyViolations(source).map(({ message }) => message),
       ['fixed host-port publishing'],

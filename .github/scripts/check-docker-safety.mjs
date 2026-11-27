@@ -405,7 +405,7 @@ function dockerPublishValues(command) {
 
 function hasFixedHostPortWithVariableContainerPort(value) {
   if (
-    /(?:(?:(?:\d{1,3}\.){3}\d{1,3}|localhost|\[[\da-f:]+\]):)?\d+(?:-\d+)?:\$(?:\{[^}]+\}|[A-Za-z_][\w]*)/.test(
+    /(?:(?:(?:\d{1,3}\.){3}\d{1,3}|localhost|\[[\da-f:]+\]):)?\d+(?:-\d+)?:\$(?:\{[^}]+\}|[A-Za-z_][\w]*|\d|[!#$?*@-])/.test(
       value,
     )
   ) {
@@ -434,7 +434,7 @@ function hasFixedPortMapping(value) {
 }
 
 function hasVariableShortHostPort(value) {
-  const variableHostPort = /(\$\{[^}]+\}|\$[A-Za-z_][\w]*):/g
+  const variableHostPort = /(\$\{[^}]+\}|\$[A-Za-z_][\w]*|\$\d|\$[!#$?*@-]):/g
   for (const match of value.matchAll(variableHostPort)) {
     if (!isAlwaysEmptyComposeExpansion(match[1])) return true
   }
