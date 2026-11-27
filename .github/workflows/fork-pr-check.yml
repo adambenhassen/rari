@@ -14,7 +14,7 @@ concurrency:
 jobs:
   check:
     name: rari checks
-    runs-on: inference-x64
+    runs-on: rari
     timeout-minutes: 90
     permissions:
       contents: read

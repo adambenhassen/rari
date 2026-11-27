@@ -27,10 +27,15 @@ function stepBlock(jobName, stepName) {
 }
 
 const artifactUploadStep = stepBlock('build', 'Upload Linux assets for the trusted publisher')
+const arm64ArtifactUploadStep = stepBlock(
+  'build-arm64',
+  'Upload Linux assets for the trusted publisher',
+)
 const cleanupValidationJob = jobBlock('validate-cleanup-ref')
 const diagnosticJob = jobBlock('check-snapshot-profile-diagnostic')
 const deleteJob = jobBlock('delete-test-release')
 const buildJob = jobBlock('build')
+const arm64BuildJob = jobBlock('build-arm64')
 const publishJob = jobBlock('publish-release')
 const releaseValidationJob = workflow.includes('  validate-release-request:\n')
   ? jobBlock('validate-release-request')
@@ -60,6 +65,13 @@ test('Linux build artifacts retain enough time for the publisher handoff', () =>
     Number(retentionDays[1]) >= 2,
     `Linux build artifacts need at least two retention days, got ${retentionDays[1]}`,
   )
+
+  const arm64RetentionDays = arm64ArtifactUploadStep.match(/^\s+retention-days:\s*(\d+)\s*$/m)
+  assert.ok(arm64RetentionDays, 'ARM64 build artifact upload must set retention-days explicitly')
+  assert.ok(
+    Number(arm64RetentionDays[1]) >= 2,
+    `ARM64 build artifacts need at least two retention days, got ${arm64RetentionDays[1]}`,
+  )
 })
 
 test('cleanup-only dispatch skips both architecture builds and publishing', () => {
@@ -70,16 +82,20 @@ test('cleanup-only dispatch skips both architecture builds and publishing', () =
     'Release validation must not be matrixed',
   )
   assert.match(buildJob, /^    needs: validate-release-request$/m)
+  assert.match(arm64BuildJob, /^    needs: build$/m)
   assert.doesNotMatch(
     buildJob,
     /^    if:/m,
     'Matrix build jobs must inherit a skipped validation dependency',
   )
-  assert.match(publishJob, /^    needs: \[build, validate-release-request\]$/m)
+  assert.match(publishJob, /^    needs: \[build, build-arm64, validate-release-request\]$/m)
   assert.ok(publishCondition, 'Missing publisher condition')
   assert.ok(diagnosticCondition, 'Missing diagnostic job condition')
 
-  const arches = [...buildJob.matchAll(/^          - arch: (x64|arm64)$/gm)].map(match => match[1])
+  const arches = [
+    ...buildJob.matchAll(/^          - arch: (x64|arm64)$/gm),
+    ...arm64BuildJob.matchAll(/^          - arch: (x64|arm64)$/gm),
+  ].map(match => match[1])
   assert.deepEqual(arches, ['x64', 'arm64'])
 
   for (const deleteTestRelease of [true, 'true']) {
@@ -103,6 +119,7 @@ test('cleanup-only dispatch skips both architecture builds and publishing', () =
 test('normal dispatch validates once, builds both architectures, and permits publishing', () => {
   assert.ok(releaseValidationCondition, 'Missing non-matrix release validation condition')
   assert.match(buildJob, /^    needs: validate-release-request$/m)
+  assert.match(arm64BuildJob, /^    needs: build$/m)
   assert.ok(publishCondition, 'Missing publisher condition')
 
   const context = {
@@ -115,7 +132,10 @@ test('normal dispatch validates once, builds both architectures, and permits pub
   assert.equal(runInNewContext(diagnosticCondition, context), false)
   assert.equal(runInNewContext(publishCondition, context), true)
   assert.deepEqual(
-    [...buildJob.matchAll(/^          - arch: (x64|arm64)$/gm)].map(match => match[1]),
+    [
+      ...buildJob.matchAll(/^          - arch: (x64|arm64)$/gm),
+      ...arm64BuildJob.matchAll(/^          - arch: (x64|arm64)$/gm),
+    ].map(match => match[1]),
     ['x64', 'arm64'],
   )
 })
@@ -151,10 +171,15 @@ test('combined cleanup and diagnostic inputs fail validation and skip deletion',
   assert.match(deleteJob, /needs: validate-cleanup-ref/)
 })
 
-test('pins only the x64 release build to Ubuntu 24.04 with the glibc ceiling', () => {
-  assert.match(buildJob, /runs-on: \$\{\{ matrix\.runner \}\}/)
-  assert.match(buildJob, /- arch: x64\s+runner: ubuntu-24\.04/)
-  assert.match(buildJob, /- arch: arm64\s+runner: arm64/)
+test('runs release builds on rari and serializes native ARM64 after x64', () => {
+  assert.match(buildJob, /runs-on: rari/)
+  assert.match(buildJob, /- arch: x64/)
+  assert.doesNotMatch(buildJob, /arch: arm64/)
+  assert.match(arm64BuildJob, /runs-on: arm64/)
+  assert.match(arm64BuildJob, /needs: build/)
+  assert.match(arm64BuildJob, /- arch: arm64/)
+  assert.doesNotMatch(arm64BuildJob, /arch: x64/)
+  assert.match(publishJob, /needs: \[build, build-arm64, validate-release-request\]/)
 
   const glibcCheck = buildJob.match(
     /      - name: Require glibc no newer than 2\.39\n([\s\S]*?)(?=      - name:|$)/,
@@ -162,4 +187,20 @@ test('pins only the x64 release build to Ubuntu 24.04 with the glibc ceiling', (
   assert.ok(glibcCheck, 'Missing x64 glibc ceiling check')
   assert.match(glibcCheck[1], /if: matrix\.arch == 'x64'/)
   assert.match(glibcCheck[1], /getconf GNU_LIBC_VERSION/)
+})
+
+test('routes operational fork-build jobs through rari without adding a concurrency group', () => {
+  for (const name of [
+    'check-snapshot-profile-diagnostic',
+    'publish-release',
+    'validate-cleanup-ref',
+    'delete-test-release',
+  ]) {
+    assert.match(jobBlock(name), /runs-on: rari/, `${name} must use the rari runner`)
+  }
+
+  const releaseValidationJob = jobBlock('validate-release-request')
+  assert.match(releaseValidationJob, /runs-on: inference-x64/)
+  assert.doesNotMatch(workflow.replace(releaseValidationJob, ''), /inference-x64/)
+  assert.doesNotMatch(workflow, /^\s*concurrency:/m)
 })

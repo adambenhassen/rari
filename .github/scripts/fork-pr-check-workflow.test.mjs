@@ -4,6 +4,15 @@ import test from 'node:test'
 
 const workflow = await readFile(new URL('../workflows/fork-pr-check.yml', import.meta.url), 'utf8')
 
+test('uses the rari runner while keeping per-PR concurrency unchanged', () => {
+  assert.match(workflow, /^    runs-on: rari$/m)
+  assert.match(
+    workflow,
+    /concurrency:\n  group: \$\{\{ github\.workflow \}\}-\$\{\{ github\.event\.pull_request\.number \}\}\n  cancel-in-progress: true/,
+  )
+  assert.equal([...workflow.matchAll(/^\s*group:/gm)].length, 1)
+})
+
 test('uses hash-addressed APT indexes with retries before package installation', () => {
   const aptConfigStep = workflow.match(
     /      - name: Configure APT index fetches\n([\s\S]*?)(?=      - name:|$)/,
