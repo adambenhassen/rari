@@ -392,7 +392,9 @@ function dockerPublishValues(command) {
   const values = []
 
   for (let index = 0; index < tokens.length; index += 1) {
-    const token = unquoteShellToken(tokens[index].value)
+    const rawToken = tokens[index].value
+    const unquotedToken = unquoteShellToken(rawToken)
+    const token = unquotedToken === rawToken ? unquotedToken.replace(/\\(.)/g, '$1') : unquotedToken
     if (token === '--publish' || token === '-p') {
       if (tokens[index + 1]) values.push(tokens[++index].value)
       continue
