@@ -582,7 +582,7 @@ jobs:
           : "${GITHUB_RUN_ID:?Gitea must provide GITHUB_RUN_ID for smoke container names}"
           : "${GITHUB_RUN_ATTEMPT:?Gitea must provide GITHUB_RUN_ATTEMPT for smoke container names}"
           : "${GITHUB_JOB:?Gitea must provide GITHUB_JOB for smoke container names}"
-          smoke_container="rari-smoke-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}-${GITHUB_JOB}"
+          smoke_container="rari-smoke-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}-${GITHUB_JOB}-${{ matrix.arch }}-${{ matrix.runner }}"
           docker create --name "$smoke_container" --platform linux/amd64 \
             node:24-trixie-slim node -e 'setInterval(() => {}, 60000)'
           cleanup() {

@@ -394,6 +394,60 @@ test('scans Compose files after Docker root options', async () => {
   }
 })
 
+test('scans Compose files when step items align with the steps key', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'docker-safety-indentless-steps-'))
+  const workflowPath = join(root, '.github', 'workflows', 'check.yml')
+  const workflow = [
+    'jobs:',
+    '  check:',
+    '    steps:',
+    '    - run: docker compose -f custom.yml up',
+  ].join('\n')
+  const fixedCompose = 'services:\n  db:\n    ports:\n      - "127.0.0.1:5432:5432"'
+
+  try {
+    await mkdir(join(root, '.github', 'workflows'), { recursive: true })
+    await writeFile(join(root, 'custom.yml'), fixedCompose)
+
+    const composeFiles = await collectComposeFiles(root, [{ path: workflowPath, source: workflow }])
+
+    assert.deepEqual(
+      composeFiles.map(({ path }) => path),
+      [resolve(root, 'custom.yml')],
+    )
+    assert.deepEqual(
+      composeFiles.flatMap(({ path, source }) =>
+        findDockerSafetyViolations(source, path).map(({ message }) => message),
+      ),
+      ['fixed host-port publishing'],
+    )
+  } finally {
+    await rm(root, { recursive: true, force: true })
+  }
+})
+
+test('fails closed when a Compose command is in an unparsed workflow step', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'docker-safety-unparsed-step-'))
+  const workflowPath = join(root, '.github', 'workflows', 'check.yml')
+  const workflow = [
+    'jobs:',
+    '  check:',
+    '    steps:',
+    '  - run: docker compose -f custom.yml up',
+  ].join('\n')
+
+  try {
+    await mkdir(join(root, '.github', 'workflows'), { recursive: true })
+
+    await assert.rejects(
+      collectComposeFiles(root, [{ path: workflowPath, source: workflow }]),
+      /Cannot parse Docker Compose command in an unparsed workflow step/,
+    )
+  } finally {
+    await rm(root, { recursive: true, force: true })
+  }
+})
+
 test('scans Compose files after shell line continuations', async () => {
   const root = await mkdtemp(join(tmpdir(), 'docker-safety-compose-continuation-'))
   const workflowPath = join(root, '.github', 'workflows', 'check.yml')
@@ -1014,6 +1068,30 @@ test('CLI exits nonzero for a violating in-scope workflow', async () => {
   } finally {
     await rm(root, { recursive: true, force: true })
   }
+})
+
+test('CLI exits nonzero when .github/workflows is missing', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'docker-safety-no-workflows-'))
+
+  try {
+    const result = spawnSync(process.execPath, [scriptPath], { cwd: root, encoding: 'utf8' })
+
+    assert.equal(result.status, 1, `${result.stdout}\n${result.stderr}`)
+    assert.match(result.stderr, /No workflow files found/)
+  } finally {
+    await rm(root, { recursive: true, force: true })
+  }
+})
+
+test('smoke container name includes all fork build matrix dimensions', async () => {
+  const workflow = await readFile(new URL('../workflows/fork-build.yml', import.meta.url), 'utf8')
+
+  assert.deepEqual(
+    findDockerSafetyViolations(workflow, '.github/workflows/fork-build.yml').map(
+      ({ message }) => message,
+    ),
+    [],
+  )
 })
 
 test('smoke cleanup exits nonzero when removing the container fails', async () => {

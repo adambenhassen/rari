@@ -580,6 +580,12 @@ function hasDockerComposeCommand(source) {
   )
 }
 
+function dockerComposeCommandCount(source) {
+  return dockerInvocations(normalizeShellContinuations(source)).filter(
+    invocation => invocation.subcommand === 'compose',
+  ).length
+}
+
 function shellCommandSegments(source) {
   source = normalizeShellContinuations(source)
   const segments = []
@@ -774,7 +780,20 @@ function workflowSteps(source) {
     if (!stepsMatch) continue
 
     const stepsIndent = stepsMatch[1].length
-    const stepIndent = stepsIndent + 2
+    let stepIndent
+    for (let next = index + 1; next < lines.length; next += 1) {
+      const line = lines[next]
+      if (!line.trim() || line.trimStart().startsWith('#')) continue
+
+      const indent = line.match(/^\s*/)[0].length
+      if (indent < stepsIndent || (indent === stepsIndent && !/^\s*-\s*/.test(line))) break
+      if (/^\s*-\s*/.test(line)) {
+        stepIndent = indent
+        break
+      }
+    }
+    if (stepIndent === undefined) continue
+
     const jobIndent = stepsIndent - 2
     let jobStart = -1
     for (let previous = index - 1; previous >= 0; previous -= 1) {
@@ -802,9 +821,13 @@ function workflowSteps(source) {
     let block = []
     for (let next = index + 1; next < lines.length; next += 1) {
       const line = lines[next]
-      if (line.trim() && line.match(/^\s*/)[0].length <= stepsIndent) break
-
       const indent = line.match(/^\s*/)[0].length
+      const itemAtStepsIndent =
+        stepIndent === stepsIndent && indent === stepsIndent && /^\s*-\s*/.test(line)
+      if (line.trim() && (indent < stepsIndent || (indent === stepsIndent && !itemAtStepsIndent))) {
+        break
+      }
+
       if (line.trim() && indent === stepIndent && /^\s*-\s*/.test(line)) {
         if (block.length > 0) {
           steps.push({
@@ -1000,9 +1023,22 @@ export async function collectComposeFiles(root, sources, environment = process.e
     if (!hasDockerComposeCommand(source)) continue
 
     const isWorkflow = /[\\/]workflows[\\/][^\\/]+\.ya?ml$/.test(path)
-    const commands = isWorkflow
-      ? workflowSteps(source).filter(step => hasDockerComposeCommand(step.source))
-      : [{ source, shellSource: source, workingDirectory: undefined }]
+    let commands
+    if (isWorkflow) {
+      const steps = workflowSteps(source)
+      const parsedComposeCommandCount = steps.reduce(
+        (count, step) => count + dockerComposeCommandCount(step.source),
+        0,
+      )
+      if (dockerComposeCommandCount(source) !== parsedComposeCommandCount) {
+        throw new Error(
+          `Cannot parse Docker Compose command in an unparsed workflow step in ${path}`,
+        )
+      }
+      commands = steps.filter(step => hasDockerComposeCommand(step.source))
+    } else {
+      commands = [{ source, shellSource: source, workingDirectory: undefined }]
+    }
 
     for (const command of commands) {
       if (command.workingDirectory && !isLiteralComposeFileReference(command.workingDirectory)) {
@@ -1117,6 +1153,10 @@ export async function collectComposeFiles(root, sources, environment = process.e
 
 async function main() {
   const root = process.cwd()
+  const workflowFiles = await listTextFiles(join(root, '.github', 'workflows'))
+  if (!workflowFiles.some(path => /\.ya?ml$/i.test(path))) {
+    throw new Error(`No workflow files found in ${join(root, '.github', 'workflows')}`)
+  }
   const githubFiles = await listTextFiles(join(root, '.github'))
   const giteaFiles = await listTextFiles(join(root, '.gitea'))
   const configFiles = [...githubFiles, ...giteaFiles].filter(path => !/\.test\.[^.]+$/.test(path))
@@ -1135,6 +1175,7 @@ async function main() {
   const scanned = new Map(
     [...scopedWorkflows, ...helperSources, ...composeFiles].map(item => [item.path, item]),
   )
+  if (scanned.size === 0) throw new Error('No Docker workflow or helper files were scanned')
   const violations = [...scanned.values()].flatMap(({ path, source }) =>
     findDockerSafetyViolations(source, relative(root, path)),
   )
