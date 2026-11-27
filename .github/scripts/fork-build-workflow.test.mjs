@@ -28,10 +28,18 @@ function stepBlock(jobName, stepName) {
 
 const artifactUploadStep = stepBlock('build', 'Upload Linux assets for the trusted publisher')
 const cleanupValidationJob = jobBlock('validate-cleanup-ref')
+const diagnosticJob = jobBlock('check-snapshot-profile-diagnostic')
 const deleteJob = jobBlock('delete-test-release')
 const buildJob = jobBlock('build')
+const publishJob = jobBlock('publish-release')
+const releaseValidationJob = workflow.includes('  validate-release-request:\n')
+  ? jobBlock('validate-release-request')
+  : ''
 const cleanupValidationCondition = cleanupValidationJob.match(/if: \$\{\{ ([\s\S]*?) \}\}/)?.[1]
+const diagnosticCondition = diagnosticJob.match(/if: \$\{\{ ([\s\S]*?) \}\}/)?.[1]
 const deleteCondition = deleteJob.match(/if: \$\{\{ ([\s\S]*?) \}\}/)?.[1]
+const releaseValidationCondition = releaseValidationJob.match(/if: \$\{\{ ([\s\S]*?) \}\}/)?.[1]
+const publishCondition = publishJob.match(/if: \$\{\{ ([\s\S]*?) \}\}/)?.[1]
 assert.ok(cleanupValidationCondition, 'Missing cleanup validation job condition')
 assert.ok(deleteCondition, 'Missing delete job condition')
 const validationStep = cleanupValidationJob.match(
@@ -51,6 +59,56 @@ test('Linux build artifacts retain enough time for the publisher handoff', () =>
   assert.ok(
     Number(retentionDays[1]) >= 2,
     `Linux build artifacts need at least two retention days, got ${retentionDays[1]}`,
+  )
+})
+
+test('cleanup-only dispatch skips both architecture builds and publishing', () => {
+  assert.ok(releaseValidationCondition, 'Missing non-matrix release validation condition')
+  assert.doesNotMatch(releaseValidationJob, /^    strategy:/m, 'Release validation must not be matrixed')
+  assert.match(buildJob, /^    needs: validate-release-request$/m)
+  assert.doesNotMatch(buildJob, /^    if:/m, 'Matrix build jobs must inherit a skipped validation dependency')
+  assert.match(publishJob, /^    needs: \[build, validate-release-request\]$/m)
+  assert.ok(publishCondition, 'Missing publisher condition')
+  assert.ok(diagnosticCondition, 'Missing diagnostic job condition')
+
+  const arches = [...buildJob.matchAll(/^          - arch: (x64|arm64)$/gm)].map((match) => match[1])
+  assert.deepEqual(arches, ['x64', 'arm64'])
+
+  for (const deleteTestRelease of [true, 'true']) {
+    const context = {
+      github: { ref: 'refs/heads/fork/main' },
+      inputs: { delete_test_release: deleteTestRelease, diagnose_snapshot_profiles: false },
+    }
+    assert.equal(runInNewContext(cleanupValidationCondition, context), true)
+    assert.equal(runInNewContext(deleteCondition, context), true)
+    assert.equal(runInNewContext(diagnosticCondition, context), false)
+    const validationRuns = runInNewContext(releaseValidationCondition, context)
+    assert.equal(validationRuns, false)
+
+    const validationResult = validationRuns ? 'success' : 'skipped'
+    const buildStatuses = arches.map(() => (validationResult === 'success' ? 'queued' : 'skipped'))
+    assert.deepEqual(buildStatuses, ['skipped', 'skipped'])
+    assert.equal(runInNewContext(publishCondition, context), false)
+  }
+})
+
+test('normal dispatch validates once, builds both architectures, and permits publishing', () => {
+  assert.ok(releaseValidationCondition, 'Missing non-matrix release validation condition')
+  assert.match(buildJob, /^    needs: validate-release-request$/m)
+  assert.ok(publishCondition, 'Missing publisher condition')
+
+  const context = {
+    github: { ref: 'refs/heads/fork/main' },
+    inputs: { delete_test_release: false, diagnose_snapshot_profiles: false },
+  }
+  assert.equal(runInNewContext(releaseValidationCondition, context), true)
+  assert.equal(runInNewContext(cleanupValidationCondition, context), false)
+  assert.equal(runInNewContext(deleteCondition, context), false)
+  assert.equal(runInNewContext(diagnosticCondition, context), false)
+  assert.equal(runInNewContext(publishCondition, context), true)
+  assert.deepEqual(
+    [...buildJob.matchAll(/^          - arch: (x64|arm64)$/gm)].map((match) => match[1]),
+    ['x64', 'arm64'],
   )
 })
 

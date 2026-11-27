@@ -25,8 +25,31 @@ on:
 permissions: {}
 
 jobs:
-  build:
+  validate-release-request:
     if: ${{ inputs.delete_test_release != true && inputs.delete_test_release != 'true' && inputs.diagnose_snapshot_profiles != true && inputs.diagnose_snapshot_profiles != 'true' }}
+    name: Validate release request
+    runs-on: inference-x64
+    timeout-minutes: 5
+    permissions:
+      contents: read
+    steps:
+      - name: Validate release request
+        env:
+          BUILD_REF: ${{ github.ref }}
+          VERSION: ${{ inputs.version }}
+        run: |
+          set -euo pipefail
+          if [[ "$BUILD_REF" != "refs/heads/fork/main" ]]; then
+            echo "Dispatch this workflow from fork/main (got $BUILD_REF)" >&2
+            exit 1
+          fi
+          if [[ ! "$VERSION" =~ ^0\.17\.9-fork\.[0-9]+(-test\.[0-9]+)?$ ]]; then
+            echo "Version must match 0.17.9-fork.<n> or 0.17.9-fork.<n>-test.<n>" >&2
+            exit 1
+          fi
+
+  build:
+    needs: validate-release-request
     name: Build Linux release (${{ matrix.arch }})
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 175
@@ -53,21 +76,6 @@ jobs:
         with:
           ref: ${{ github.sha }}
           persist-credentials: false
-
-      - name: Validate release request
-        env:
-          BUILD_REF: ${{ github.ref }}
-          VERSION: ${{ inputs.version }}
-        run: |
-          set -euo pipefail
-          if [[ "$BUILD_REF" != "refs/heads/fork/main" ]]; then
-            echo "Dispatch this workflow from fork/main (got $BUILD_REF)" >&2
-            exit 1
-          fi
-          if [[ ! "$VERSION" =~ ^0\.17\.9-fork\.[0-9]+(-test\.[0-9]+)?$ ]]; then
-            echo "Version must match 0.17.9-fork.<n> or 0.17.9-fork.<n>-test.<n>" >&2
-            exit 1
-          fi
 
       - name: Require glibc no newer than 2.39
         if: matrix.arch == 'x64'
@@ -457,7 +465,7 @@ jobs:
   publish-release:
     if: ${{ inputs.delete_test_release != true && inputs.delete_test_release != 'true' && inputs.diagnose_snapshot_profiles != true && inputs.diagnose_snapshot_profiles != 'true' && github.ref == 'refs/heads/fork/main' }}
     name: Publish Linux release
-    needs: build
+    needs: [build, validate-release-request]
     runs-on: inference-x64
     timeout-minutes: 30
     permissions:
