@@ -34,7 +34,7 @@ pub(super) fn apply_request_cache_policy(
 
 fn has_no_store_directive(response: &Response) -> bool {
     response.headers().get_all(CACHE_CONTROL).iter().any(|value| {
-        value.to_str().ok().is_some_and(|value| {
+        value.to_str().is_ok_and(|value| {
             value.split(',').any(|directive| directive.trim().eq_ignore_ascii_case("no-store"))
         })
     })

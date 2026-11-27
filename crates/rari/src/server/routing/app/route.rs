@@ -1556,7 +1556,7 @@ mod tests {
             html_cache: FallbackHtmlCache::default(),
             layout_html_cache: Arc::new(LayoutHtmlCache::new()),
             response_cache,
-            static_fast_cache: static_fast_cache.clone(),
+            static_fast_cache: Arc::clone(&static_fast_cache),
             warmup_generations: Arc::default(),
             og_generator: None,
             app_icons: Arc::new(Vec::new()),
