@@ -457,11 +457,53 @@ function hasShellExpansionAt(value, index) {
 
 function isShellExpansionStart(value, index) {
   return (
+    isBraceExpansionStart(value, index) ||
     value.startsWith('$(', index) ||
     value.startsWith('<(', index) ||
     value.startsWith('>(', index) ||
     value[index] === '`'
   )
+}
+
+function isBraceExpansionStart(value, index) {
+  return (
+    value[index] === '{' &&
+    value[index - 1] !== '$' &&
+    !isShellEscaped(value, index) &&
+    braceExpansionEnd(value, index) >= 0
+  )
+}
+
+function isShellEscaped(value, index) {
+  let backslashes = 0
+  for (let cursor = index - 1; cursor >= 0 && value[cursor] === '\\'; cursor -= 1) {
+    backslashes += 1
+  }
+  return backslashes % 2 === 1
+}
+
+function braceExpansionEnd(value, start) {
+  let depth = 0
+  let expandable = false
+  for (let index = start; index < value.length; index += 1) {
+    if (value[index] === '\\') {
+      index += 1
+      continue
+    }
+    if (value[index] === '{') {
+      depth += 1
+      continue
+    }
+    if (value[index] === '}') {
+      depth -= 1
+      if (depth === 0) return expandable ? index : -1
+      continue
+    }
+    if (depth === 1 && (value[index] === ',' || value.startsWith('..', index))) {
+      expandable = true
+    }
+  }
+  return -1
 }
 
 function shellExpansionEnd(value, start) {
@@ -475,6 +517,7 @@ function shellExpansionEnd(value, start) {
     }
     return -1
   }
+  if (value[start] === '{') return braceExpansionEnd(value, start)
 
   let depth = 1
   let quote = null

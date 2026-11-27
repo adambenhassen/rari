@@ -124,6 +124,8 @@ test('rejects shell substitutions in fixed Docker host-port mappings', () => {
     `docker run ${name} -p "$(printf 5432):5432" postgres`,
     'docker run --name "rari-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT-$GITHUB_JOB" --publish "`printf 5432`:5432" postgres',
     `docker run ${name} -p "5432:$(printf 5432)" postgres`,
+    `docker run ${name} -p {5432..5432}:5432 postgres`,
+    `docker run ${name} -p 5432:{5432..5432} postgres`,
   ]
 
   for (const command of commands) {
