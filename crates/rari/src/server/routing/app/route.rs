@@ -15,7 +15,7 @@ use rustc_hash::FxHashMap;
 use tokio::{fs, sync::oneshot};
 
 use super::{
-    apply_request_no_store,
+    apply_request_cache_policy, apply_request_no_store,
     cache::{
         can_use_static_fast_cache, decompress_bytes, insert_response_cache_vary_header,
         request_cookie_header, response_cache_key, route_query_params_for_cache, rsc_vary_header,
@@ -68,6 +68,30 @@ fn can_skip_metadata_validation(
 }
 
 #[derive(Clone, Copy)]
+struct CachedMetadataState<'a> {
+    has_dynamic_metadata: bool,
+    request_data_check: &'a response::RequestDataCheck,
+}
+
+impl<'a> From<&'a response::CacheMetadata> for CachedMetadataState<'a> {
+    fn from(metadata: &'a response::CacheMetadata) -> Self {
+        Self {
+            has_dynamic_metadata: metadata.has_dynamic_metadata,
+            request_data_check: &metadata.request_data_check,
+        }
+    }
+}
+
+impl<'a> From<&'a response::PrebuiltResponse> for CachedMetadataState<'a> {
+    fn from(prebuilt: &'a response::PrebuiltResponse) -> Self {
+        Self {
+            has_dynamic_metadata: prebuilt.has_dynamic_metadata,
+            request_data_check: &prebuilt.request_data_check,
+        }
+    }
+}
+
+#[derive(Clone, Copy)]
 enum CurrentMetadata<'a> {
     Missing,
     Present,
@@ -76,8 +100,7 @@ enum CurrentMetadata<'a> {
 
 #[derive(Clone, Copy)]
 struct MetadataCacheHitInput<'a> {
-    has_dynamic_metadata: bool,
-    request_data_check: &'a response::RequestDataCheck,
+    cached_metadata: CachedMetadataState<'a>,
     current_metadata: CurrentMetadata<'a>,
     unavailable: bool,
     page_data_props_present: bool,
@@ -91,13 +114,16 @@ enum MetadataCacheHitDecision {
 }
 
 fn metadata_cache_hit_decision(input: MetadataCacheHitInput<'_>) -> MetadataCacheHitDecision {
-    if can_skip_metadata_validation(input.has_dynamic_metadata, input.request_data_check) {
+    if can_skip_metadata_validation(
+        input.cached_metadata.has_dynamic_metadata,
+        input.cached_metadata.request_data_check,
+    ) {
         return MetadataCacheHitDecision::Allow;
     }
     if matches!(input.current_metadata, CurrentMetadata::Missing) && !input.unavailable {
         return MetadataCacheHitDecision::Miss;
     }
-    match (input.request_data_check, input.current_metadata) {
+    match (input.cached_metadata.request_data_check, input.current_metadata) {
         (response::RequestDataCheck::NotRequired, _) => {}
         (
             response::RequestDataCheck::Validated(expected_metadata),
@@ -122,12 +148,12 @@ async fn metadata_allows_cache_hit(
     route_match: &AppRouteMatch,
     context: &mut LayoutRenderContext,
     request_context: &Arc<RequestContext>,
-    cached_metadata: &response::CacheMetadata,
+    cached_metadata: CachedMetadataState<'_>,
     collected: &mut bool,
 ) -> bool {
     if can_skip_metadata_validation(
         cached_metadata.has_dynamic_metadata,
-        &cached_metadata.request_data_check,
+        cached_metadata.request_data_check,
     ) {
         return true;
     }
@@ -139,7 +165,7 @@ async fn metadata_allows_cache_hit(
     }
     let mut current_request_metadata = None;
     if let (response::RequestDataCheck::Validated(_), Some(metadata)) =
-        (&cached_metadata.request_data_check, context.metadata.as_ref())
+        (cached_metadata.request_data_check, context.metadata.as_ref())
     {
         match serde_json::to_value(metadata) {
             Ok(metadata) => current_request_metadata = Some(metadata),
@@ -159,8 +185,7 @@ async fn metadata_allows_cache_hit(
         (true, None) => CurrentMetadata::Present,
     };
     match metadata_cache_hit_decision(MetadataCacheHitInput {
-        has_dynamic_metadata: cached_metadata.has_dynamic_metadata,
-        request_data_check: &cached_metadata.request_data_check,
+        cached_metadata,
         current_metadata,
         unavailable: request_context.response_unavailable_after().is_some(),
         page_data_props_present: context.page_data_props.is_some(),
@@ -211,6 +236,19 @@ fn fast_cache_response(
 
     #[expect(clippy::expect_used, reason = "Response::builder() with valid components never fails")]
     builder.body(Body::from(body)).expect("Valid fast-path response")
+}
+
+fn empty_not_found_response(request_context: &RequestContext) -> Response {
+    if let Some(retry_after) = request_context.response_unavailable_after() {
+        response_unavailable(Body::empty(), "text/html; charset=utf-8", retry_after)
+    } else {
+        #[expect(clippy::expect_used, reason = "valid static response")]
+        Response::builder()
+            .status(StatusCode::NOT_FOUND)
+            .header(CACHE_CONTROL, "no-store")
+            .body(Body::empty())
+            .expect("Valid not-found response")
+    }
 }
 
 #[axum::debug_handler]
@@ -446,12 +484,7 @@ pub async fn handle_app_route(
                     {
                         route_match.not_found = Some(not_found_entry);
                     } else {
-                        #[expect(clippy::expect_used, reason = "valid static response")]
-                        return Ok(Response::builder()
-                            .status(StatusCode::NOT_FOUND)
-                            .header(CACHE_CONTROL, "no-store")
-                            .body(Body::empty())
-                            .expect("Valid not-found response"));
+                        return Ok(empty_not_found_response(&request_context));
                     }
                 }
                 PageData::Found(props) => context.page_data_props = props,
@@ -473,15 +506,26 @@ pub async fn handle_app_route(
         && request_context.response_cache_reads_allowed()
         && let Some(fast_key) = deferred_fast_key.as_deref()
         && let Some(prebuilt) = state.static_fast_cache.get(fast_key)
-        && can_skip_metadata_validation(prebuilt.has_dynamic_metadata, &prebuilt.request_data_check)
-        && request_context.response_cache_reads_allowed()
-        && let Some(current) = state.static_fast_cache.get(fast_key)
-        && Arc::ptr_eq(&prebuilt, &current)
     {
-        return Ok(apply_request_no_store(
-            fast_cache_response(&current, &headers, accept_encoding),
+        let metadata_state = CachedMetadataState::from(prebuilt.as_ref());
+        if metadata_allows_cache_hit(
+            &state,
+            &route_match,
+            &mut context,
             &request_context,
-        ));
+            metadata_state,
+            &mut metadata_collected,
+        )
+        .await
+            && request_context.response_cache_reads_allowed()
+            && let Some(current) = state.static_fast_cache.get(fast_key)
+            && Arc::ptr_eq(&prebuilt, &current)
+        {
+            return Ok(apply_request_cache_policy(
+                fast_cache_response(&current, &headers, accept_encoding),
+                &request_context,
+            ));
+        }
     }
 
     match render_mode {
@@ -507,7 +551,7 @@ pub async fn handle_app_route(
                     Arc::clone(&request_context),
                 )
                 .await?;
-                return Ok(apply_request_no_store(response, &request_context));
+                return Ok(apply_request_cache_policy(response, &request_context));
             }
             let cache_key = response_cache_key(path, query_params_ref, Some("rsc"), cookie_header);
 
@@ -532,7 +576,7 @@ pub async fn handle_app_route(
                             &route_match,
                             &mut context,
                             &request_context,
-                            &entry.response.metadata,
+                            CachedMetadataState::from(&entry.response.metadata),
                             &mut metadata_collected,
                         )
                         .await)
@@ -573,7 +617,7 @@ pub async fn handle_app_route(
                     clippy::expect_used,
                     reason = "Response::builder() with valid components never fails"
                 )]
-                return Ok(apply_request_no_store(
+                return Ok(apply_request_cache_policy(
                     response_builder
                         .body(Body::from(cached.body))
                         .expect("Valid cached RSC response"),
@@ -709,7 +753,7 @@ pub async fn handle_app_route(
                     clippy::expect_used,
                     reason = "Response::builder() with valid components never fails"
                 )]
-                Ok(apply_request_no_store(
+                Ok(apply_request_cache_policy(
                     response_builder
                         .body(Body::from(rsc_flight_protocol))
                         .expect("Valid RSC response"),
@@ -742,7 +786,7 @@ pub async fn handle_app_route(
                             &route_match,
                             &mut context,
                             &request_context,
-                            &entry.response.metadata,
+                            CachedMetadataState::from(&entry.response.metadata),
                             &mut metadata_collected,
                         )
                         .await)
@@ -774,7 +818,7 @@ pub async fn handle_app_route(
                         clippy::expect_used,
                         reason = "Response::builder() with valid components never fails"
                     )]
-                    return Ok(apply_request_no_store(
+                    return Ok(apply_request_cache_policy(
                         Response::builder()
                             .status(StatusCode::NOT_MODIFIED)
                             .header("etag", cached_etag)
@@ -845,7 +889,7 @@ pub async fn handle_app_route(
                     clippy::expect_used,
                     reason = "Response::builder() with valid components never fails"
                 )]
-                return Ok(apply_request_no_store(
+                return Ok(apply_request_cache_policy(
                     response_builder.body(Body::from(body_bytes)).expect("Valid cached response"),
                     &request_context,
                 ));
@@ -1025,18 +1069,24 @@ pub async fn handle_app_route(
                             clippy::expect_used,
                             reason = "Response::builder() with valid components never fails"
                         )]
-                        return Ok(response_builder
-                            .header("etag", etag)
-                            .header("vary", merged_vary)
-                            .header("x-cache", "MISS")
-                            .body(Body::from(body_bytes))
-                            .expect("Valid response"));
+                        return Ok(apply_request_cache_policy(
+                            response_builder
+                                .header("etag", etag)
+                                .header("vary", merged_vary)
+                                .header("x-cache", "MISS")
+                                .body(Body::from(body_bytes))
+                                .expect("Valid response"),
+                            &request_context,
+                        ));
                     }
 
-                    return Ok(Response::from_parts(parts, Body::from(body_bytes)));
+                    return Ok(apply_request_cache_policy(
+                        Response::from_parts(parts, Body::from(body_bytes)),
+                        &request_context,
+                    ));
                 }
 
-                return Ok(response);
+                return Ok(apply_request_cache_policy(response, &request_context));
             }
 
             if !metadata_collected {
@@ -1297,7 +1347,7 @@ pub async fn handle_app_route(
                     clippy::expect_used,
                     reason = "Response::builder() with valid components never fails"
                 )]
-                Ok(apply_request_no_store(
+                Ok(apply_request_cache_policy(
                     response_builder.body(Body::from(body_bytes)).expect("Valid HTML response"),
                     &request_context,
                 ))
@@ -1309,17 +1359,19 @@ pub async fn handle_app_route(
 #[cfg(test)]
 mod tests {
     use super::{
-        CurrentMetadata, MetadataCacheHitDecision, MetadataCacheHitInput,
+        CachedMetadataState, CurrentMetadata, MetadataCacheHitDecision, MetadataCacheHitInput,
         can_skip_metadata_validation, metadata_cache_hit_decision,
     };
-    use crate::server::cache::response::RequestDataCheck;
+    use crate::server::cache::response::{self, RequestDataCheck};
 
     #[test]
     fn metadata_cache_gate_checks_outage_and_request_data_states() {
         let not_required = RequestDataCheck::NotRequired;
         let metadata_missing = MetadataCacheHitInput {
-            has_dynamic_metadata: true,
-            request_data_check: &not_required,
+            cached_metadata: CachedMetadataState {
+                has_dynamic_metadata: true,
+                request_data_check: &not_required,
+            },
             current_metadata: CurrentMetadata::Missing,
             unavailable: false,
             page_data_props_present: false,
@@ -1342,8 +1394,10 @@ mod tests {
         ));
         assert_eq!(
             metadata_cache_hit_decision(MetadataCacheHitInput {
-                has_dynamic_metadata: false,
-                request_data_check: &RequestDataCheck::Validated(expected),
+                cached_metadata: CachedMetadataState {
+                    has_dynamic_metadata: false,
+                    request_data_check: &RequestDataCheck::Validated(expected),
+                },
                 current_metadata: CurrentMetadata::Serialized(&current),
                 unavailable: false,
                 page_data_props_present: false,
@@ -1353,8 +1407,10 @@ mod tests {
         let unvalidated = RequestDataCheck::Unvalidated;
         assert_eq!(
             metadata_cache_hit_decision(MetadataCacheHitInput {
-                has_dynamic_metadata: false,
-                request_data_check: &unvalidated,
+                cached_metadata: CachedMetadataState {
+                    has_dynamic_metadata: false,
+                    request_data_check: &unvalidated,
+                },
                 current_metadata: CurrentMetadata::Missing,
                 unavailable: true,
                 page_data_props_present: true,
@@ -1362,5 +1418,97 @@ mod tests {
             MetadataCacheHitDecision::Miss
         );
         assert!(can_skip_metadata_validation(false, &RequestDataCheck::NotRequired));
+    }
+
+    #[tokio::test]
+    async fn deferred_fast_cache_survives_regular_entry_eviction_during_metadata_outage() {
+        use std::{sync::Arc, time::Instant};
+
+        use axum::http::HeaderMap;
+        use bytes::Bytes;
+
+        use super::fast_cache_response;
+
+        let key = "/metadata-outage";
+        let regular_cache = response::ResponseCache::new(response::CacheConfig::default());
+        let request_data_check = RequestDataCheck::NotRequired;
+        regular_cache
+            .set(
+                key.to_string(),
+                response::CachedResponse {
+                    body: Bytes::from_static(b"html"),
+                    headers: HeaderMap::new(),
+                    metadata: response::CacheMetadata {
+                        cached_at: Instant::now(),
+                        ttl: 60,
+                        etag: None,
+                        tags: Vec::new(),
+                        has_page_data: true,
+                        has_dynamic_metadata: true,
+                        request_data_check: request_data_check.clone(),
+                    },
+                    compressed_zstd: None,
+                    compressed_br: None,
+                    compressed_gzip: None,
+                },
+            )
+            .await;
+
+        let fast_cache = response::StaticFastCache::new();
+        let prebuilt = Arc::new(response::PrebuiltResponse {
+            identity: Bytes::from_static(b"html"),
+            gzip: None,
+            br: None,
+            zstd: None,
+            etag: "etag".to_string(),
+            content_type: "text/html; charset=utf-8".to_string(),
+            cache_control: "public, max-age=60".to_string(),
+            is_not_found: false,
+            has_page_data: true,
+            has_dynamic_metadata: true,
+            request_data_check,
+            tags: Vec::new(),
+            cached_at: Instant::now(),
+            route: None,
+        });
+        response::insert_static_fast_cache(&fast_cache, key, Arc::clone(&prebuilt), 10);
+
+        regular_cache.invalidate(key).await;
+        assert!(regular_cache.candidate(key).await.is_none());
+        let fast_entry = fast_cache.get(key).expect("fast entry remains cached");
+        assert_eq!(
+            metadata_cache_hit_decision(MetadataCacheHitInput {
+                cached_metadata: CachedMetadataState::from(fast_entry.as_ref()),
+                current_metadata: CurrentMetadata::Missing,
+                unavailable: true,
+                page_data_props_present: true,
+            }),
+            MetadataCacheHitDecision::Allow
+        );
+        assert_eq!(fast_entry.identity, Bytes::from_static(b"html"));
+        let fast_response = fast_cache_response(&fast_entry, &HeaderMap::new(), None);
+        assert_eq!(fast_response.status(), axum::http::StatusCode::OK);
+        assert_eq!(fast_response.headers()["x-cache"], "HIT");
+    }
+
+    #[test]
+    fn empty_not_found_fallback_preserves_unavailable_response() {
+        use axum::http::{StatusCode, header::CACHE_CONTROL};
+
+        use super::empty_not_found_response;
+        use crate::server::middleware::request_context::RequestContext;
+
+        let request_context = RequestContext::new("/not-found".to_string());
+        request_context.mark_response_unavailable(23);
+
+        let response = empty_not_found_response(&request_context);
+        assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+        assert_eq!(response.headers()[CACHE_CONTROL], "no-store");
+        assert_eq!(response.headers()["retry-after"], "23");
+
+        let response = empty_not_found_response(&RequestContext::new("/missing".to_string()));
+        assert_eq!(response.status(), StatusCode::NOT_FOUND);
+        assert_eq!(response.headers()[CACHE_CONTROL], "no-store");
+        assert!(!response.headers().contains_key("retry-after"));
     }
 }

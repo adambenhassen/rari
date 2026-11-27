@@ -278,6 +278,7 @@ test('Fast hits without getData do not wait for dynamic metadata', async ({ requ
     })
     expect(aliceMetadata.status()).toBe(200)
     expect(aliceMetadata.headers()['x-cache']).toBe('MISS')
+    expect(aliceMetadata.headers()['cache-control']).toBe('private, no-cache')
     const aliceHtml = await aliceMetadata.text()
     expect(aliceHtml).toMatch(/<title[^>]*>Session alice<\/title>/)
 
@@ -296,6 +297,7 @@ test('Fast hits without getData do not wait for dynamic metadata', async ({ requ
     })
     expect(aliceMetadataHit.status()).toBe(200)
     expect(aliceMetadataHit.headers()['x-cache']).toBe('HIT')
+    expect(aliceMetadataHit.headers()['cache-control']).toBe('private, no-cache')
     expect(await aliceMetadataHit.text()).toMatch(/<title[^>]*>Session alice<\/title>/)
 
     hold = true

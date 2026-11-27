@@ -20,6 +20,40 @@ pub(super) fn apply_request_no_store(
     response
 }
 
+pub(super) fn apply_request_cache_policy(
+    mut response: Response,
+    request_context: &RequestContext,
+) -> Response {
+    if request_context.must_send_no_store() {
+        response.headers_mut().insert(CACHE_CONTROL, HeaderValue::from_static("no-store"));
+    } else if request_context.metadata_uses_request_data() {
+        response.headers_mut().insert(CACHE_CONTROL, HeaderValue::from_static("private, no-cache"));
+    }
+    response
+}
+
+#[cfg(test)]
+mod tests {
+    use axum::{http::header::CACHE_CONTROL, response::Response};
+
+    use super::apply_request_cache_policy;
+    use crate::server::middleware::request_context::{RequestContext, RequestDataAccessScope};
+
+    #[test]
+    fn request_data_metadata_responses_use_private_revalidating_cache_policy() {
+        let request_context = RequestContext::new("/session".to_string());
+        request_context.mark_request_data_access(RequestDataAccessScope::Metadata);
+        let response = Response::builder()
+            .header(CACHE_CONTROL, "public, max-age=600")
+            .body(axum::body::Body::empty())
+            .expect("valid test response");
+
+        let response = apply_request_cache_policy(response, &request_context);
+
+        assert_eq!(response.headers()[CACHE_CONTROL], "private, no-cache");
+    }
+}
+
 pub(super) fn response_unavailable(
     body: Body,
     content_type: &str,
