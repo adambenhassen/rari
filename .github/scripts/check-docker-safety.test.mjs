@@ -129,6 +129,7 @@ test('rejects Docker publish words that shell quoting or xargs can rewrite', () 
     `xargs -I{} docker run ${name} -p {}:5432 postgres`,
     `docker run ${name} -\\p 5432:5432 image`,
     `docker run ${name} -'p' 5432:5432 image`,
+    `docker run ${name} -\${PUBLISH_FLAG} 5432:5432 image`,
   ]
 
   for (const command of commands) {
