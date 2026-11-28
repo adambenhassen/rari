@@ -99,7 +99,7 @@ function logicalCommands(lines) {
 
 function shellTokens(source) {
   return [
-    ...source.matchAll(/\$'(?:\\.|[^'\\])*'|"(?:\\.|[^"\\])*"|'[^']*'|(?:\\.|[^\s\\])+/g),
+    ...source.matchAll(/(?:\$'(?:\\.|[^'\\])*'|"(?:\\.|[^"\\])*"|'[^']*'|\\.|[^\s\\])+/g),
   ].map(match => ({
     value: match[0],
     start: match.index,
@@ -336,9 +336,14 @@ function shellCommandWords(source, offset = 0, sourcePositions) {
 
   for (const word of shellWords(source)) {
     const decoded = decodeShellWord(word.value, index => sourcePosition(word.start + index))
-    if (/\s/.test(decoded.value)) {
+    const assignment = decoded.value.match(/^[A-Za-z_][A-Za-z0-9_]*=/)
+    const nestedValue = assignment ? decoded.value.slice(assignment[0].length) : decoded.value
+    const nestedPositions = assignment
+      ? decoded.positions.slice(assignment[0].length)
+      : decoded.positions
+    if (/\s/.test(nestedValue)) {
       quotedRanges.push({ start: word.start, end: word.end })
-      words.push(...shellCommandWords(decoded.value, 0, decoded.positions))
+      words.push(...shellCommandWords(nestedValue, 0, nestedPositions))
     } else {
       words.push({
         ...word,

@@ -416,6 +416,21 @@ test('scans Docker commands inside process substitutions', () => {
   }
 })
 
+test('scans Docker commands stored in quoted shell assignments', () => {
+  const name = 'rari-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT-$GITHUB_JOB'
+  const commands = [
+    `CMD="docker run --name ${name} -p 5432:5432 image"; $CMD`,
+    `CMD='docker run --name ${name} -p 5432:5432 image'; eval "$CMD"`,
+  ]
+
+  for (const command of commands) {
+    assert.deepEqual(
+      findDockerSafetyViolations(command).map(({ message }) => message),
+      ['fixed host-port publishing'],
+    )
+  }
+})
+
 test('requires Docker container names to include the run, attempt, and job identity', () => {
   assert.deepEqual(
     findDockerSafetyViolations('docker create --name rari-smoke-image alpine').map(
