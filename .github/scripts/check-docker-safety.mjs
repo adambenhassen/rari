@@ -294,7 +294,7 @@ function shellCommentEnd(source, start) {
 
 function shellCommandWordStarts(source) {
   const commandKeywords = new Set(['!', 'do', 'elif', 'else', 'if', 'then', 'until', 'while'])
-  const commandWrappers = new Set(['command', 'env', 'exec'])
+  const commandWrappers = new Set(['command', 'env', 'exec', 'sudo'])
   const starts = new Set()
   let expectingCommand = true
   let commandWrapper
@@ -399,11 +399,61 @@ function shellCommandWordStarts(source) {
             previousEnd = word.end
             continue
           }
+        } else if (commandWrapper === 'sudo') {
+          if (option === '--') {
+            wrapperOptionsEnded = true
+            previousEnd = word.end
+            continue
+          }
+          if (
+            [
+              '-u',
+              '--user',
+              '-g',
+              '--group',
+              '-h',
+              '--host',
+              '-p',
+              '--prompt',
+              '-C',
+              '--close-from',
+              '-D',
+              '--chdir',
+              '-R',
+              '--chroot',
+              '-T',
+              '--command-timeout',
+              '-U',
+              '--other-user',
+              '-r',
+              '--role',
+              '-t',
+              '--type',
+            ].includes(option)
+          ) {
+            skipWrapperArgument = true
+            previousEnd = word.end
+            continue
+          }
+          if (
+            /^--(?:user|group|host|prompt|close-from|chdir|chroot|command-timeout|other-user|role|type)=/.test(
+              option,
+            ) ||
+            /^-(?:u|g|h|p|C|D|R|T|U|r|t).+/.test(option)
+          ) {
+            previousEnd = word.end
+            continue
+          }
+          if (option.startsWith('-')) {
+            previousEnd = word.end
+            continue
+          }
         }
       }
 
       starts.add(word.start)
-      commandWrapper = commandWrappers.has(commandWord(value)) ? commandWord(value) : undefined
+      const command = commandWord(value).split('/').at(-1)
+      commandWrapper = commandWrappers.has(command) ? command : undefined
       skipWrapperArgument = false
       wrapperOptionsEnded = false
       expectingCommand = commandWrapper !== undefined
