@@ -444,6 +444,14 @@ test('resolves literal Docker executable assignments', () => {
   }
 })
 
+test('fails closed on dynamic executable assignments', () => {
+  assert.throws(
+    () => findDockerSafetyViolations('D="$(printf docker)"; "$D" run -p 5432:5432 image'),
+    /Cannot statically resolve shell command variable D/,
+  )
+  assert.doesNotThrow(() => findDockerSafetyViolations('D="$(printf docker)"; echo "$D"'))
+})
+
 test('resolves Docker executable assignments across a workflow run block', () => {
   const name = '"rari-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT-$GITHUB_JOB"'
   const workflow = `jobs:\n  check:\n    steps:\n      - run: |\n          D=docker\n          $D run --name ${name} -p 5432:5432 image`

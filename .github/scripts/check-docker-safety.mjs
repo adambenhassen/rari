@@ -278,6 +278,45 @@ function shellAssignmentEvents(source) {
   return events
 }
 
+function shellCommandWordStarts(source) {
+  const commandKeywords = new Set(['!', 'do', 'elif', 'else', 'if', 'then', 'until', 'while'])
+  const starts = new Set()
+  let expectingCommand = true
+  let previousEnd = 0
+
+  for (const word of shellWords(source)) {
+    for (let index = previousEnd; index < word.start; index += 1) {
+      if (source[index] === '\n' || source[index] === '\r') {
+        if (!isShellEscaped(source, index)) {
+          expectingCommand = true
+          break
+        }
+        if (source[index] === '\r' && source[index + 1] === '\n') index += 1
+      }
+    }
+
+    if (isShellControlOperator(word.value)) {
+      expectingCommand = true
+      previousEnd = word.end
+      continue
+    }
+
+    if (expectingCommand) {
+      const value = decodeShellWord(word.value).value
+      if (/^[A-Za-z_][A-Za-z0-9_]*=/.test(value) || commandKeywords.has(commandWord(value))) {
+        previousEnd = word.end
+        continue
+      }
+      starts.add(word.start)
+      expectingCommand = false
+    }
+
+    previousEnd = word.end
+  }
+
+  return starts
+}
+
 function commandSubstitutionEnd(source, start) {
   let depth = 1
   let quote
@@ -368,7 +407,7 @@ function shellCommandWords(source, offset = 0, sourcePositions) {
   const words = []
   const quotedRanges = []
   const sourcePosition = index => sourcePositions?.[index] ?? offset + index
-  const context = { source }
+  const context = { source, root: sourcePositions === undefined }
 
   for (const word of shellWords(source)) {
     const decoded = decodeShellWord(word.value, index => sourcePosition(word.start + index))
@@ -478,6 +517,22 @@ function commandWord(token) {
   return rawCommandToken(token).toLowerCase()
 }
 
+function isDockerCommandScript(value) {
+  const firstWord = shellWords(value)[0]
+  if (!firstWord || /^[\s]*[$`]/.test(value)) return false
+
+  return ['docker', 'docker-compose'].includes(commandWord(decodeShellWord(firstWord.value).value))
+}
+
+function hasStaticNonDockerExecutableName(value) {
+  if (/\s/.test(value.trim())) return false
+  const basename = value.trim().split(/[\\/]/).at(-1)
+  return (
+    /^[A-Za-z0-9_.+-]+$/.test(basename) &&
+    !['docker', 'docker-compose'].includes(commandWord(basename))
+  )
+}
+
 function managementSubcommandIndex(tokens, groupIndex) {
   for (let index = groupIndex + 1; index < tokens.length; index += 1) {
     const option = rawCommandToken(tokens[index].value)
@@ -520,21 +575,42 @@ function dockerInvocations(source) {
   for (const [context, words] of wordsByContext) {
     words.sort((left, right) => left.contextStart - right.contextStart)
     const assignmentEvents = shellAssignmentEvents(context.source)
+    const commandWordStarts = shellCommandWordStarts(context.source)
     const assignments = new Map()
+    const unresolvedAssignments = new Set()
     let assignmentIndex = 0
     const matches = []
 
     for (const word of words) {
       while (assignmentEvents[assignmentIndex]?.position <= word.contextStart) {
         const { name, value } = assignmentEvents[assignmentIndex]
-        if (/[$`]/.test(value)) assignments.delete(name)
-        else assignments.set(name, value)
+        if (/[$`]/.test(value)) {
+          if (isDockerCommandScript(value) || hasStaticNonDockerExecutableName(value)) {
+            assignments.set(name, value)
+            unresolvedAssignments.delete(name)
+          } else {
+            assignments.delete(name)
+            unresolvedAssignments.add(name)
+          }
+        } else {
+          assignments.set(name, value)
+          unresolvedAssignments.delete(name)
+        }
         assignmentIndex += 1
       }
 
       const variable = word.value.match(
         /^\$(?:\{([A-Za-z_][A-Za-z0-9_]*)\}|([A-Za-z_][A-Za-z0-9_]*))$/,
       )
+      const variableName = variable?.[1] ?? variable?.[2]
+      if (
+        context.root &&
+        variableName &&
+        commandWordStarts.has(word.contextStart) &&
+        unresolvedAssignments.has(variableName)
+      ) {
+        throw new Error(`Cannot statically resolve shell command variable ${variableName}`)
+      }
       const value = variable
         ? (assignments.get(variable[1] ?? variable[2]) ?? word.value)
         : word.value
