@@ -495,6 +495,8 @@ test('fails closed on unresolved command-position shell expansions', () => {
     '$(which docker) run -p 5432:5432 img',
     'for D in docker; do "$D" run -p 5432:5432 img; done',
     'read D <<< docker; $D run -p 5432:5432 img',
+    'bash -c \'"${DOCKER_BIN:-docker}" run -p 5432:5432 img\'',
+    'sh -c \'"${DOCKER_BIN:-docker}" run -p 5432:5432 img\'',
   ]
 
   for (const command of commands) {

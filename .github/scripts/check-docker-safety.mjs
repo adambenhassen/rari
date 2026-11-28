@@ -331,6 +331,40 @@ function shellCommandWordStarts(source) {
   return starts
 }
 
+function shellCommandScriptArgumentStarts(source) {
+  const shellInterpreters = new Set(['bash', 'dash', 'ksh', 'sh', 'zsh'])
+  const words = shellWords(source)
+  const commandWordStartPositions = shellCommandWordStarts(source)
+  const starts = new Set()
+
+  for (let index = 0; index < words.length; index += 1) {
+    if (!commandWordStartPositions.has(words[index].start)) continue
+
+    const executable = commandWord(decodeShellWord(words[index].value).value).split('/').at(-1)
+    if (executable === 'eval') {
+      for (let argument = index + 1; argument < words.length; argument += 1) {
+        if (isShellControlOperator(words[argument].value)) break
+        starts.add(words[argument].start)
+      }
+      continue
+    }
+    if (!shellInterpreters.has(executable)) continue
+
+    for (let argument = index + 1; argument < words.length; argument += 1) {
+      const option = rawCommandToken(words[argument].value)
+      if (isShellControlOperator(option) || option === '--') break
+      if (option === '-c' || option === '--command' || /^-[a-z]*c[a-z]*$/i.test(option)) {
+        const script = words[argument + 1]
+        if (script && !isShellControlOperator(script.value)) starts.add(script.start)
+        break
+      }
+      if (!option.startsWith('-')) break
+    }
+  }
+
+  return starts
+}
+
 function commandSubstitutionEnd(source, start) {
   let depth = 1
   let quote
@@ -539,6 +573,7 @@ function shellAssignmentEventsDeep(source, offset = 0) {
 function shellCommandWords(source, offset = 0, sourcePositions, checkUnresolvedCommands = true) {
   const words = []
   const quotedRanges = []
+  const executedScriptArguments = shellCommandScriptArgumentStarts(source)
   const sourcePosition = index => sourcePositions?.[index] ?? offset + index
   const context = { source, checkUnresolvedCommands }
 
@@ -549,7 +584,7 @@ function shellCommandWords(source, offset = 0, sourcePositions, checkUnresolvedC
     const nestedPositions = assignment
       ? decoded.positions.slice(assignment[0].length)
       : decoded.positions
-    if (/\s/.test(nestedValue)) {
+    if (/\s/.test(nestedValue) || executedScriptArguments.has(word.start)) {
       quotedRanges.push({ start: word.start, end: word.end })
       words.push({
         ...word,
@@ -560,7 +595,14 @@ function shellCommandWords(source, offset = 0, sourcePositions, checkUnresolvedC
         contextStart: word.start,
         contextEnd: word.end,
       })
-      words.push(...shellCommandWords(nestedValue, 0, nestedPositions, false))
+      words.push(
+        ...shellCommandWords(
+          nestedValue,
+          0,
+          nestedPositions,
+          executedScriptArguments.has(word.start) ? checkUnresolvedCommands : false,
+        ),
+      )
     } else {
       words.push({
         ...word,
