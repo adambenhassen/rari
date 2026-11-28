@@ -335,7 +335,7 @@ function shellCommandScriptArgumentStarts(source) {
   const shellInterpreters = new Set(['bash', 'dash', 'ksh', 'sh', 'zsh'])
   const words = shellWords(source)
   const commandWordStartPositions = shellCommandWordStarts(source)
-  const starts = new Set()
+  const starts = new Map()
 
   for (let index = 0; index < words.length; index += 1) {
     if (!commandWordStartPositions.has(words[index].start)) continue
@@ -344,7 +344,7 @@ function shellCommandScriptArgumentStarts(source) {
     if (executable === 'eval') {
       for (let argument = index + 1; argument < words.length; argument += 1) {
         if (isShellControlOperator(words[argument].value)) break
-        starts.add(words[argument].start)
+        starts.set(words[argument].start, 0)
       }
       continue
     }
@@ -366,9 +366,16 @@ function shellCommandScriptArgumentStarts(source) {
         argument += 1
         continue
       }
-      if (option === '-c' || option === '--command' || /^-[a-z]*c[a-z]*$/i.test(option)) {
-        const script = words[argument + 1]
-        if (script && !isShellControlOperator(script.value)) starts.add(script.start)
+      const decodedOption = decodeShellWord(words[argument].value).value
+      const shortCommandOption = decodedOption.match(/^-[a-z]*?c/i)
+      if (option === '--command' || shortCommandOption) {
+        const attachedScriptOffset = shortCommandOption?.[0].length
+        if (attachedScriptOffset !== undefined && decodedOption.length > attachedScriptOffset) {
+          starts.set(words[argument].start, attachedScriptOffset)
+        } else {
+          const script = words[argument + 1]
+          if (script && !isShellControlOperator(script.value)) starts.set(script.start, 0)
+        }
         break
       }
       if (!option.startsWith('-')) break
@@ -592,12 +599,18 @@ function shellCommandWords(source, offset = 0, sourcePositions, checkUnresolvedC
 
   for (const word of shellWords(source)) {
     const decoded = decodeShellWord(word.value, index => sourcePosition(word.start + index))
+    const executedScriptOffset = executedScriptArguments.get(word.start)
+    const isExecutedScript = executedScriptOffset !== undefined
     const assignment = decoded.value.match(/^[A-Za-z_][A-Za-z0-9_]*=/)
     const nestedValue = assignment ? decoded.value.slice(assignment[0].length) : decoded.value
     const nestedPositions = assignment
       ? decoded.positions.slice(assignment[0].length)
       : decoded.positions
-    if (/\s/.test(nestedValue) || executedScriptArguments.has(word.start)) {
+    const recursiveValue = isExecutedScript ? nestedValue.slice(executedScriptOffset) : nestedValue
+    const recursivePositions = isExecutedScript
+      ? nestedPositions.slice(executedScriptOffset)
+      : nestedPositions
+    if (/\s/.test(nestedValue) || isExecutedScript) {
       quotedRanges.push({ start: word.start, end: word.end })
       words.push({
         ...word,
@@ -610,10 +623,10 @@ function shellCommandWords(source, offset = 0, sourcePositions, checkUnresolvedC
       })
       words.push(
         ...shellCommandWords(
-          nestedValue,
+          recursiveValue,
           0,
-          nestedPositions,
-          executedScriptArguments.has(word.start) ? checkUnresolvedCommands : false,
+          recursivePositions,
+          isExecutedScript ? checkUnresolvedCommands : false,
         ),
       )
     } else {
