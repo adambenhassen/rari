@@ -407,6 +407,8 @@ function shellAssignmentEventsDeep(source, offset = 0) {
   const events = shellAssignmentEvents(source).map(event => ({
     ...event,
     position: event.position + offset,
+    scopeStart: offset,
+    scopeEnd: offset + source.length,
   }))
 
   for (const range of shellSubstitutionRanges(source)) {
@@ -591,14 +593,19 @@ function dockerInvocations(source) {
     words.sort((left, right) => left.contextStart - right.contextStart)
     const assignmentEvents = shellAssignmentEventsDeep(context.source)
     const commandWordStarts = shellCommandWordStarts(context.source)
-    const assignments = new Map()
-    const unresolvedAssignments = new Set()
-    let assignmentIndex = 0
     const matches = []
 
     for (const word of words) {
-      while (assignmentEvents[assignmentIndex]?.position <= word.contextStart) {
-        const { name, value } = assignmentEvents[assignmentIndex]
+      const assignments = new Map()
+      const unresolvedAssignments = new Set()
+      for (const { name, value, position, scopeStart, scopeEnd } of assignmentEvents) {
+        if (position > word.contextStart) break
+        if (
+          !(scopeStart === 0 && scopeEnd === context.source.length) &&
+          !(word.contextStart >= scopeStart && word.contextStart < scopeEnd)
+        ) {
+          continue
+        }
         if (/[$`]/.test(value)) {
           if (isDockerCommandScript(value) || hasStaticNonDockerExecutableName(value)) {
             assignments.set(name, value)
@@ -611,7 +618,6 @@ function dockerInvocations(source) {
           assignments.set(name, value)
           unresolvedAssignments.delete(name)
         }
-        assignmentIndex += 1
       }
 
       const variable = word.value.match(
