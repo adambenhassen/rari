@@ -82,21 +82,6 @@ const dockerRootOptionsWithoutValue = new Set([
   '-D',
 ])
 
-function logicalCommands(lines) {
-  const commands = []
-
-  for (let index = 0; index < lines.length; index += 1) {
-    const line = index + 1
-    let command = lines[index]
-    while (command.trimEnd().endsWith('\\') && index + 1 < lines.length) {
-      command = `${command.trimEnd().slice(0, -1)} ${lines[++index]}`
-    }
-    commands.push({ line, text: command })
-  }
-
-  return commands
-}
-
 function shellTokens(source) {
   return [
     ...source.matchAll(/(?:\$'(?:\\.|[^'\\])*'|"(?:\\.|[^"\\])*"|'[^']*'|\\.|[^\s\\])+/g),
@@ -1077,10 +1062,13 @@ export function findDockerSafetyViolations(source, file = '<input>') {
   if (isWorkflow) assertNoYamlAnchorsOrAliases(source, file)
   const matrixContext = isWorkflow ? workflowMatrixContext(source) : undefined
 
-  for (const command of logicalCommands(lines)) {
-    const invocations = dockerInvocations(command.text)
+  for (const script of shellScriptRegions(source, file)) {
+    const invocations = dockerInvocations(script.source)
 
     for (const invocation of invocations) {
+      const line =
+        script.line + (script.source.slice(0, invocation.start).match(/\n/g) ?? []).length
+
       if (isContainerCommand(invocation, ['create', 'run'])) {
         const name = dockerContainerName(invocation.command, source)
         const hasUnscopedAssignment = name?.assignments.some(
@@ -1096,32 +1084,29 @@ export function findDockerSafetyViolations(source, file = '<input>') {
         ) {
           violations.push({
             file,
-            line: command.line,
+            line,
             message: 'container name is not unique to this job',
           })
         }
       }
 
       if (hasUnsafeDockerPublish(invocation)) {
-        violations.push({ file, line: command.line, message: 'fixed host-port publishing' })
+        violations.push({ file, line, message: 'fixed host-port publishing' })
       }
 
       if (dockerManagementGroups.has(invocation.group) && invocation.subcommand === 'prune') {
         if (invocation.group === 'system') {
           violations.push({
             file,
-            line: command.line,
+            line,
             message: 'Docker system prune is not allowed',
           })
         } else if (!hasJobLabelFilter(invocation.arguments, matrixContext)) {
-          violations.push({ file, line: command.line, message: 'unfiltered Docker prune' })
+          violations.push({ file, line, message: 'unfiltered Docker prune' })
         }
       }
     }
-  }
 
-  for (const script of shellScriptRegions(source, file)) {
-    const invocations = dockerInvocations(script.source)
     if (!removesEveryDockerContainer(invocations)) continue
 
     const removal = invocations.find(invocation => isContainerCommand(invocation, ['rm']))

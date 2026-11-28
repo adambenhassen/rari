@@ -441,6 +441,18 @@ test('resolves literal Docker executable assignments', () => {
   )
 })
 
+test('resolves Docker executable assignments across a workflow run block', () => {
+  const name = '"rari-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT-$GITHUB_JOB"'
+  const workflow = `jobs:\n  check:\n    steps:\n      - run: |\n          D=docker\n          $D run --name ${name} -p 5432:5432 image`
+
+  assert.deepEqual(
+    findDockerSafetyViolations(workflow, '.github/workflows/assigned-docker.yml').map(
+      ({ message }) => message,
+    ),
+    ['fixed host-port publishing'],
+  )
+})
+
 test('requires Docker container names to include the run, attempt, and job identity', () => {
   assert.deepEqual(
     findDockerSafetyViolations('docker create --name rari-smoke-image alpine').map(
