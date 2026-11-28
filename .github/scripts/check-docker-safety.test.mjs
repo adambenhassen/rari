@@ -449,6 +449,10 @@ test('fails closed on dynamic executable assignments', () => {
     () => findDockerSafetyViolations('D="$(printf docker)"; "$D" run -p 5432:5432 image'),
     /Cannot statically resolve shell command variable D/,
   )
+  assert.throws(
+    () => findDockerSafetyViolations('result=$(D="$(printf docker)"; "$D" run -p 5432:5432 image)'),
+    /Cannot statically resolve shell command variable D/,
+  )
   assert.doesNotThrow(() => findDockerSafetyViolations('D="$(printf docker)"; echo "$D"'))
 })
 

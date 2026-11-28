@@ -403,11 +403,26 @@ function shellSubstitutionRanges(source) {
   return ranges
 }
 
+function shellAssignmentEventsDeep(source, offset = 0) {
+  const events = shellAssignmentEvents(source).map(event => ({
+    ...event,
+    position: event.position + offset,
+  }))
+
+  for (const range of shellSubstitutionRanges(source)) {
+    events.push(
+      ...shellAssignmentEventsDeep(source.slice(range.start, range.end), offset + range.start),
+    )
+  }
+
+  return events.sort((left, right) => left.position - right.position)
+}
+
 function shellCommandWords(source, offset = 0, sourcePositions) {
   const words = []
   const quotedRanges = []
   const sourcePosition = index => sourcePositions?.[index] ?? offset + index
-  const context = { source, root: sourcePositions === undefined }
+  const context = { source }
 
   for (const word of shellWords(source)) {
     const decoded = decodeShellWord(word.value, index => sourcePosition(word.start + index))
@@ -574,7 +589,7 @@ function dockerInvocations(source) {
 
   for (const [context, words] of wordsByContext) {
     words.sort((left, right) => left.contextStart - right.contextStart)
-    const assignmentEvents = shellAssignmentEvents(context.source)
+    const assignmentEvents = shellAssignmentEventsDeep(context.source)
     const commandWordStarts = shellCommandWordStarts(context.source)
     const assignments = new Map()
     const unresolvedAssignments = new Set()
@@ -604,7 +619,6 @@ function dockerInvocations(source) {
       )
       const variableName = variable?.[1] ?? variable?.[2]
       if (
-        context.root &&
         variableName &&
         commandWordStarts.has(word.contextStart) &&
         unresolvedAssignments.has(variableName)
