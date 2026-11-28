@@ -294,10 +294,12 @@ function shellCommentEnd(source, start) {
 
 function shellCommandWordStarts(source) {
   const commandKeywords = new Set(['!', 'do', 'elif', 'else', 'if', 'then', 'until', 'while'])
+  const commandWrappers = new Set(['command', 'env', 'exec'])
   const starts = new Set()
   let expectingCommand = true
-  let execWrapper = false
-  let skipExecArgument = false
+  let commandWrapper
+  let skipWrapperArgument = false
+  let wrapperOptionsEnded = false
   let previousEnd = 0
 
   for (const word of shellWords(source)) {
@@ -305,8 +307,9 @@ function shellCommandWordStarts(source) {
       if (source[index] === '\n' || source[index] === '\r') {
         if (!isShellEscaped(source, index)) {
           expectingCommand = true
-          execWrapper = false
-          skipExecArgument = false
+          commandWrapper = undefined
+          skipWrapperArgument = false
+          wrapperOptionsEnded = false
           break
         }
         if (source[index] === '\r' && source[index + 1] === '\n') index += 1
@@ -315,8 +318,9 @@ function shellCommandWordStarts(source) {
 
     if (isShellControlOperator(word.value)) {
       expectingCommand = true
-      execWrapper = false
-      skipExecArgument = false
+      commandWrapper = undefined
+      skipWrapperArgument = false
+      wrapperOptionsEnded = false
       previousEnd = word.end
       continue
     }
@@ -328,32 +332,81 @@ function shellCommandWordStarts(source) {
         continue
       }
 
-      if (execWrapper) {
+      if (commandWrapper && !wrapperOptionsEnded) {
         const option = rawCommandToken(word.value)
-        if (skipExecArgument) {
-          skipExecArgument = false
+        if (skipWrapperArgument) {
+          skipWrapperArgument = false
           previousEnd = word.end
           continue
         }
-        if (option === '-a') {
-          skipExecArgument = true
-          previousEnd = word.end
-          continue
-        }
-        if (/^-[cl]+$/.test(option)) {
-          previousEnd = word.end
-          continue
-        }
-        if (option === '--') {
-          execWrapper = false
-          previousEnd = word.end
-          continue
+
+        if (commandWrapper === 'exec') {
+          if (option === '-a') {
+            skipWrapperArgument = true
+            previousEnd = word.end
+            continue
+          }
+          if (/^-[cl]+$/.test(option)) {
+            previousEnd = word.end
+            continue
+          }
+          if (option === '--') {
+            wrapperOptionsEnded = true
+            previousEnd = word.end
+            continue
+          }
+        } else if (commandWrapper === 'command') {
+          if (option === '-p') {
+            previousEnd = word.end
+            continue
+          }
+          if (option === '-v' || option === '-V') {
+            commandWrapper = undefined
+            expectingCommand = false
+            previousEnd = word.end
+            continue
+          }
+          if (option === '--') {
+            wrapperOptionsEnded = true
+            previousEnd = word.end
+            continue
+          }
+        } else if (commandWrapper === 'env') {
+          if (option === '--') {
+            wrapperOptionsEnded = true
+            previousEnd = word.end
+            continue
+          }
+          if (['-i', '--ignore-environment', '-0', '--null', '-v', '--debug'].includes(option)) {
+            previousEnd = word.end
+            continue
+          }
+          if (
+            ['-u', '--unset', '-C', '--chdir', '-S', '--split-string', '--argv0'].includes(option)
+          ) {
+            skipWrapperArgument = true
+            previousEnd = word.end
+            continue
+          }
+          if (
+            /^--(?:unset|chdir|split-string|argv0)=/.test(option) ||
+            /^-(?:u|C|S).+/.test(option)
+          ) {
+            previousEnd = word.end
+            continue
+          }
+          if (option.startsWith('-')) {
+            previousEnd = word.end
+            continue
+          }
         }
       }
 
       starts.add(word.start)
-      execWrapper = commandWord(value) === 'exec'
-      expectingCommand = execWrapper
+      commandWrapper = commandWrappers.has(commandWord(value)) ? commandWord(value) : undefined
+      skipWrapperArgument = false
+      wrapperOptionsEnded = false
+      expectingCommand = commandWrapper !== undefined
     }
 
     previousEnd = word.end
@@ -376,6 +429,37 @@ function shellCommandScriptArgumentStarts(source) {
       for (let argument = index + 1; argument < words.length; argument += 1) {
         if (isShellControlOperator(words[argument].value)) break
         starts.set(words[argument].start, 0)
+      }
+      continue
+    }
+    if (executable === 'env') {
+      for (let argument = index + 1; argument < words.length; argument += 1) {
+        const option = rawCommandToken(words[argument].value)
+        const decodedOption = decodeShellWord(words[argument].value).value
+        if (isShellControlOperator(option) || option === '--') break
+        if (option === '-S' || option === '--split-string') {
+          const script = words[argument + 1]
+          if (script && !isShellControlOperator(script.value)) starts.set(script.start, 0)
+          break
+        }
+        if (decodedOption.startsWith('--split-string=')) {
+          starts.set(words[argument].start, '--split-string='.length)
+          break
+        }
+        if (decodedOption.startsWith('-S') && decodedOption.length > 2) {
+          starts.set(words[argument].start, 2)
+          break
+        }
+        if (
+          ['-u', '--unset', '-C', '--chdir', '--argv0'].includes(option) ||
+          /^--(?:unset|chdir|argv0)=/.test(option) ||
+          /^-(?:u|C).+/.test(option)
+        ) {
+          if (['-u', '--unset', '-C', '--chdir', '--argv0'].includes(option)) argument += 1
+          continue
+        }
+        if (/^[A-Za-z_][A-Za-z0-9_]*=/.test(decodedOption) || option.startsWith('-')) continue
+        break
       }
       continue
     }

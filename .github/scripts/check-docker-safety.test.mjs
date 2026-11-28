@@ -416,6 +416,14 @@ test('scans Docker commands inside process substitutions', () => {
   }
 })
 
+test('scans Docker commands passed to env split-string', () => {
+  assert.ok(
+    findDockerSafetyViolations("env -S 'docker run -p 5432:5432 img'").some(
+      ({ message }) => message === 'fixed host-port publishing',
+    ),
+  )
+})
+
 test('scans Docker commands stored in quoted shell assignments', () => {
   const name = 'rari-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT-$GITHUB_JOB'
   const commands = [
@@ -496,6 +504,8 @@ test('fails closed on unresolved command-position shell expansions', () => {
     'for D in docker; do "$D" run -p 5432:5432 img; done',
     'read D <<< docker; $D run -p 5432:5432 img',
     'exec "${DOCKER_BIN:-docker}" run -p 5432:5432 img',
+    'env "${DOCKER_BIN:-docker}" run -p 5432:5432 img',
+    'command "${DOCKER_BIN:-docker}" run -p 5432:5432 img',
     'bash -c \'"${DOCKER_BIN:-docker}" run -p 5432:5432 img\'',
     'bash -c\'"${DOCKER_BIN:-docker}" run -p 5432:5432 img\'',
     'sh -c \'"${DOCKER_BIN:-docker}" run -p 5432:5432 img\'',
