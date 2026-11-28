@@ -509,6 +509,7 @@ test('fails closed on unresolved command-position shell expansions', () => {
     'command "${DOCKER_BIN:-docker}" run -p 5432:5432 img',
     'sudo "${DOCKER_BIN:-docker}" run -p 5432:5432 img',
     'sudo -u IF "${DOCKER_BIN:-docker}" run -p 5432:5432 img',
+    'sudo -Hu deploy "${DOCKER_BIN:-docker}" run -p 5432:5432 img',
     'bash -c \'"${DOCKER_BIN:-docker}" run -p 5432:5432 img\'',
     'bash -c\'"${DOCKER_BIN:-docker}" run -p 5432:5432 img\'',
     'sh -c \'"${DOCKER_BIN:-docker}" run -p 5432:5432 img\'',

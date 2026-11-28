@@ -295,6 +295,7 @@ function shellCommentEnd(source, start) {
 function shellCommandWordStarts(source) {
   const commandKeywords = new Set(['!', 'do', 'elif', 'else', 'if', 'then', 'until', 'while'])
   const commandWrappers = new Set(['command', 'env', 'exec', 'sudo'])
+  const sudoOptionsWithValue = new Set(['u', 'g', 'h', 'p', 'C', 'D', 'R', 'T', 'U', 'r', 't'])
   const starts = new Set()
   let expectingCommand = true
   let commandWrapper
@@ -441,6 +442,16 @@ function shellCommandWordStarts(source) {
             ) ||
             /^-(?:u|g|h|p|C|D|R|T|U|r|t).+/.test(option)
           ) {
+            previousEnd = word.end
+            continue
+          }
+          if (/^-[^-]{2,}$/.test(option)) {
+            const clusteredOptions = option.slice(1)
+            for (let index = 0; index < clusteredOptions.length; index += 1) {
+              if (!sudoOptionsWithValue.has(clusteredOptions[index])) continue
+              skipWrapperArgument = index === clusteredOptions.length - 1
+              break
+            }
             previousEnd = word.end
             continue
           }
