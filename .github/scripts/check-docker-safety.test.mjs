@@ -488,6 +488,24 @@ test('fails closed on dynamic executable assignments', () => {
   assert.doesNotThrow(() => findDockerSafetyViolations('D="$(printf docker)"; echo "$D"'))
 })
 
+test('fails closed on unresolved command-position shell expansions', () => {
+  const commands = [
+    '"${DOCKER_BIN:-docker}" run -p 5432:5432 img',
+    '"$(which docker)" run -p 5432:5432 img',
+    '$(which docker) run -p 5432:5432 img',
+    'for D in docker; do "$D" run -p 5432:5432 img; done',
+    'read D <<< docker; $D run -p 5432:5432 img',
+  ]
+
+  for (const command of commands) {
+    assert.throws(
+      () => findDockerSafetyViolations(command),
+      /Cannot statically resolve shell command/,
+      command,
+    )
+  }
+})
+
 test('resolves Docker executable assignments across a workflow run block', () => {
   const name = '"rari-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT-$GITHUB_JOB"'
   const workflow = `jobs:\n  check:\n    steps:\n      - run: |\n          D=docker\n          $D run --name ${name} -p 5432:5432 image`
@@ -1581,6 +1599,14 @@ test('CLI exits nonzero when .github/workflows is missing', async () => {
 
 test('smoke container name includes all fork build matrix dimensions', async () => {
   const workflow = await readFile(new URL('../workflows/fork-build.yml', import.meta.url), 'utf8')
+  const arm64Start = workflow.indexOf('  build-arm64:\n')
+  const nextJob = workflow.indexOf('\n  check-snapshot-profile-diagnostic:', arm64Start)
+  assert.notEqual(arm64Start, -1)
+  assert.notEqual(nextJob, -1)
+  assert.doesNotMatch(
+    workflow.slice(arm64Start, nextJob),
+    /Smoke-test packaged Linux x64 binary on the production base image/,
+  )
 
   assert.deepEqual(
     findDockerSafetyViolations(workflow, '.github/workflows/fork-build.yml').map(

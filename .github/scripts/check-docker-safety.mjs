@@ -536,11 +536,11 @@ function shellAssignmentEventsDeep(source, offset = 0) {
   return events.sort((left, right) => left.position - right.position)
 }
 
-function shellCommandWords(source, offset = 0, sourcePositions) {
+function shellCommandWords(source, offset = 0, sourcePositions, checkUnresolvedCommands = true) {
   const words = []
   const quotedRanges = []
   const sourcePosition = index => sourcePositions?.[index] ?? offset + index
-  const context = { source }
+  const context = { source, checkUnresolvedCommands }
 
   for (const word of shellWords(source)) {
     const decoded = decodeShellWord(word.value, index => sourcePosition(word.start + index))
@@ -551,7 +551,16 @@ function shellCommandWords(source, offset = 0, sourcePositions) {
       : decoded.positions
     if (/\s/.test(nestedValue)) {
       quotedRanges.push({ start: word.start, end: word.end })
-      words.push(...shellCommandWords(nestedValue, 0, nestedPositions))
+      words.push({
+        ...word,
+        value: decoded.value,
+        start: sourcePosition(word.start),
+        end: sourcePosition(word.end),
+        context,
+        contextStart: word.start,
+        contextEnd: word.end,
+      })
+      words.push(...shellCommandWords(nestedValue, 0, nestedPositions, false))
     } else {
       words.push({
         ...word,
@@ -572,7 +581,14 @@ function shellCommandWords(source, offset = 0, sourcePositions) {
     const contentPositions = Array.from({ length: range.end - range.start + 1 }, (_, index) =>
       sourcePosition(range.start + index),
     )
-    words.push(...shellCommandWords(source.slice(range.start, range.end), 0, contentPositions))
+    words.push(
+      ...shellCommandWords(
+        source.slice(range.start, range.end),
+        0,
+        contentPositions,
+        checkUnresolvedCommands,
+      ),
+    )
   }
 
   return words
@@ -693,11 +709,62 @@ const dockerContainerSubcommandAliases = new Map([
   ['remove', 'rm'],
 ])
 
-function dockerInvocations(source) {
+const dockerRootSubcommands = new Set([
+  ...composeSubcommands,
+  ...dockerManagementGroups,
+  'buildx',
+  'checkpoint',
+  'commit',
+  'context',
+  'export',
+  'history',
+  'import',
+  'info',
+  'inspect',
+  'login',
+  'logout',
+  'manifest',
+  'plugin',
+  'rename',
+  'rmi',
+  'save',
+  'search',
+  'secret',
+  'service',
+  'stack',
+  'stats',
+  'swarm',
+  'tag',
+  'trust',
+  'update',
+])
+
+function hasDockerSubcommandAfter(source, start) {
+  const tokens = shellWords(source.slice(start))
+  const substitutions = shellSubstitutionRanges(source)
+  for (let index = 0; index < tokens.length; index += 1) {
+    const token = tokens[index]
+    const sourceStart = start + token.start
+    if (substitutions.some(range => sourceStart >= range.start && sourceStart < range.end)) {
+      continue
+    }
+    if (isShellControlOperator(token.value)) return false
+    const option = rawCommandToken(token.value)
+    if (dockerRootOptionsWithValue.has(option)) {
+      index += 1
+      continue
+    }
+    if (option.startsWith('-')) continue
+    if (/^[A-Za-z_][A-Za-z0-9_]*=/.test(decodeShellWord(token.value).value)) continue
+    if (/[$`]/.test(token.value)) return true
+    return dockerRootSubcommands.has(commandWord(token.value))
+  }
+  return false
+}
+
+function dockerInvocations(source, { checkUnresolvedCommands = true } = {}) {
   const wordsByContext = new Map()
-  for (const token of shellCommandWords(source).filter(
-    token => !token.value.includes('$(') && !token.value.includes('`'),
-  )) {
+  for (const token of shellCommandWords(source, 0, undefined, checkUnresolvedCommands)) {
     const words = wordsByContext.get(token.context) ?? []
     words.push(token)
     wordsByContext.set(token.context, words)
@@ -740,12 +807,29 @@ function dockerInvocations(source) {
         /^\$(?:\{([A-Za-z_][A-Za-z0-9_]*)\}|([A-Za-z_][A-Za-z0-9_]*))$/,
       )
       const variableName = variable?.[1] ?? variable?.[2]
+      const commandPosition = commandWordStarts.has(word.contextStart)
+      const resolvesVariable = variableName && assignments.has(variableName)
       if (
-        variableName &&
-        commandWordStarts.has(word.contextStart) &&
-        unresolvedAssignments.has(variableName)
+        context.checkUnresolvedCommands &&
+        commandPosition &&
+        /[$`]/.test(word.value) &&
+        !resolvesVariable &&
+        ((variableName && unresolvedAssignments.has(variableName)) ||
+          hasDockerSubcommandAfter(context.source, word.contextEnd))
       ) {
-        throw new Error(`Cannot statically resolve shell command variable ${variableName}`)
+        const substitutionRunsDocker = shellSubstitutionRanges(context.source).some(
+          range =>
+            range.start >= word.contextStart &&
+            range.start < word.contextEnd &&
+            dockerInvocations(context.source.slice(range.start, range.end), {
+              checkUnresolvedCommands: false,
+            }).length > 0,
+        )
+        if (!substitutionRunsDocker) {
+          throw new Error(
+            `Cannot statically resolve shell command ${variableName ? `variable ${variableName}` : word.value}`,
+          )
+        }
       }
       const value = variable
         ? (assignments.get(variable[1] ?? variable[2]) ?? word.value)
@@ -1273,19 +1357,32 @@ function workflowMatrixContext(source) {
 }
 
 function shellScriptRegions(source, file) {
-  if (!/\.ya?ml$/i.test(file)) return [{ source, line: 1 }]
+  if (!/\.ya?ml$/i.test(file)) {
+    return [{ source, line: 1, checkUnresolvedCommands: file === '<input>' || /\.sh$/i.test(file) }]
+  }
 
   const lines = source.split(/\r?\n/)
   const regions = []
+
+  const shellForStep = runLine => {
+    for (let index = runLine - 1; index >= 0; index -= 1) {
+      if (/^\s*-\s+/.test(lines[index])) break
+      const shell = lines[index].match(/^\s*shell:\s*([^\s#]+)/)
+      if (shell) return shell[1]
+    }
+    return undefined
+  }
 
   for (let index = 0; index < lines.length; index += 1) {
     const match = lines[index].match(/^(\s*)(?:-\s+)?run:\s*(.*)$/)
     if (!match) continue
 
     const line = index + 1
+    const shell = shellForStep(index)
+    const checkUnresolvedCommands = !['pwsh', 'powershell'].includes(shell?.toLowerCase())
     const scalar = match[2].trim()
     if (!/^[|>](?:[+-][1-9]?|[1-9][+-]?)?(?:\s+#.*)?$/.test(scalar)) {
-      regions.push({ source: match[2], line })
+      regions.push({ source: match[2], line, checkUnresolvedCommands })
       continue
     }
 
@@ -1307,11 +1404,11 @@ function shellScriptRegions(source, file) {
       contentIndent ??= indent
       scriptLines.push(scriptLine)
     }
-    regions.push({ source: scriptLines.join('\n'), line: line + 1 })
+    regions.push({ source: scriptLines.join('\n'), line: line + 1, checkUnresolvedCommands })
     index = next - 1
   }
 
-  return regions.length > 0 ? regions : [{ source, line: 1 }]
+  return regions.length > 0 ? regions : [{ source, line: 1, checkUnresolvedCommands: true }]
 }
 
 export function findDockerSafetyViolations(source, file = '<input>') {
@@ -1322,7 +1419,9 @@ export function findDockerSafetyViolations(source, file = '<input>') {
   const matrixContext = isWorkflow ? workflowMatrixContext(source) : undefined
 
   for (const script of shellScriptRegions(source, file)) {
-    const invocations = dockerInvocations(script.source)
+    const invocations = dockerInvocations(script.source, {
+      checkUnresolvedCommands: script.checkUnresolvedCommands,
+    })
 
     for (const invocation of invocations) {
       const line =
@@ -1425,15 +1524,15 @@ function normalizeShellContinuations(source) {
 }
 
 function hasDockerComposeCommand(source) {
-  return dockerInvocations(normalizeShellContinuations(source)).some(
-    invocation => invocation.subcommand === 'compose',
-  )
+  return dockerInvocations(normalizeShellContinuations(source), {
+    checkUnresolvedCommands: false,
+  }).some(invocation => invocation.subcommand === 'compose')
 }
 
 function dockerComposeCommandCount(source) {
-  return dockerInvocations(normalizeShellContinuations(source)).filter(
-    invocation => invocation.subcommand === 'compose',
-  ).length
+  return dockerInvocations(normalizeShellContinuations(source), {
+    checkUnresolvedCommands: false,
+  }).filter(invocation => invocation.subcommand === 'compose').length
 }
 
 function shellCommandSegments(source) {
@@ -1505,7 +1604,7 @@ function shellCommandSegments(source) {
 function composeCommandInvocations(source) {
   const invocations = []
   for (const segment of shellCommandSegments(source)) {
-    for (const command of dockerInvocations(segment)) {
+    for (const command of dockerInvocations(segment, { checkUnresolvedCommands: false })) {
       if (command.subcommand === 'compose') invocations.push({ command, segment })
     }
   }

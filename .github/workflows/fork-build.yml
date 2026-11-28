@@ -89,25 +89,6 @@ jobs:
             exit 1
           fi
 
-      - name: Require glibc no newer than 2.39
-        if: matrix.arch == 'x64'
-        run: |
-          set -euo pipefail
-          glibc="$(getconf GNU_LIBC_VERSION | awk '{print $2}')"
-          if [[ "$(printf '%s\n' "$glibc" 2.39 | sort -V | tail -n1)" != "2.39" ]]; then
-            echo "Fork release binaries require glibc no newer than 2.39 (runner has $glibc)" >&2
-            exit 1
-          fi
-
-      - name: Verify ARM64 runner architecture
-        if: matrix.arch == 'arm64'
-        run: |
-          runner_arch="$(uname -m)"
-          if [[ "$runner_arch" != "aarch64" ]]; then
-            echo "Expected ARM64 runner, found $runner_arch" >&2
-            exit 1
-          fi
-
       - name: Install pnpm
         uses: pnpm/action-setup@ea17c68df8912ef543352723c149a84f56e3d413 # v6.1.0
 
@@ -231,6 +212,7 @@ jobs:
               platform=linux-x64
               cpu=x64
               description='Linux x64 binary'
+              readelf=readelf
               ;;
             arm64)
               binary=target/release/rari
@@ -238,6 +220,7 @@ jobs:
               platform=linux-arm64
               cpu=arm64
               description='Linux ARM64 binary'
+              readelf=aarch64-linux-gnu-readelf
               ;;
             *)
               echo "Unsupported architecture: $ARCH" >&2
@@ -250,7 +233,9 @@ jobs:
           "$objcopy" --strip-debug "$binary" "release-assets/rari-${platform}"
           "$objcopy" --add-gnu-debuglink="release-assets/rari-${platform}.debug" "release-assets/rari-${platform}"
           chmod +x "release-assets/rari-${platform}"
-          file "release-assets/rari-${platform}"
+          release_binary="release-assets/rari-${platform}"
+          file "$release_binary"
+          bash .github/scripts/check-glibc-version.sh "$release_binary" "$readelf"
 
           mkdir -p dist-tarballs
 
@@ -347,6 +332,7 @@ jobs:
                 echo "Packaged x64 binary did not render the smoke-test page" >&2
                 exit 1
               fi
+              cat /tmp/rari-x64-smoke.log
             '
 
       - name: Upload Linux assets for the trusted publisher
@@ -363,7 +349,7 @@ jobs:
     needs: build
     if: ${{ inputs.delete_test_release != true && inputs.delete_test_release != 'true' && inputs.diagnose_snapshot_profiles != true && inputs.diagnose_snapshot_profiles != 'true' }}
     name: Build Linux release (${{ matrix.arch }})
-    runs-on: arm64
+    runs-on: rari
     timeout-minutes: 175
     strategy:
       matrix:
@@ -379,31 +365,18 @@ jobs:
       NODE_OPTIONS: --max-old-space-size=6144
       PNPM_CONFIG_WORKSPACE_CONCURRENCY: 1
       RUSTUP_TOOLCHAIN: nightly-2026-11-22
+      CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER: aarch64-linux-gnu-gcc
+      CC_aarch64_unknown_linux_gnu: aarch64-linux-gnu-gcc
+      CXX_aarch64_unknown_linux_gnu: aarch64-linux-gnu-g++
+      AR_aarch64_unknown_linux_gnu: aarch64-linux-gnu-ar
+      PKG_CONFIG_ALLOW_CROSS: '1'
+      PKG_CONFIG_LIBDIR_aarch64_unknown_linux_gnu: /usr/lib/aarch64-linux-gnu/pkgconfig
     steps:
       - name: Checkout
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           ref: ${{ github.sha }}
           persist-credentials: false
-
-      - name: Require glibc no newer than 2.39
-        if: matrix.arch == 'x64'
-        run: |
-          set -euo pipefail
-          glibc="$(getconf GNU_LIBC_VERSION | awk '{print $2}')"
-          if [[ "$(printf '%s\n' "$glibc" 2.39 | sort -V | tail -n1)" != "2.39" ]]; then
-            echo "Fork release binaries require glibc no newer than 2.39 (runner has $glibc)" >&2
-            exit 1
-          fi
-
-      - name: Verify ARM64 runner architecture
-        if: matrix.arch == 'arm64'
-        run: |
-          runner_arch="$(uname -m)"
-          if [[ "$runner_arch" != "aarch64" ]]; then
-            echo "Expected ARM64 runner, found $runner_arch" >&2
-            exit 1
-          fi
 
       - name: Install pnpm
         uses: pnpm/action-setup@ea17c68df8912ef543352723c149a84f56e3d413 # v6.1.0
@@ -420,7 +393,100 @@ jobs:
         run: |
           set -euo pipefail
           sudo apt-get update
-          sudo apt-get install -y binutils mold pkg-config libfontconfig1-dev libclang-dev
+          sudo apt-get install --no-install-recommends -y \
+            binutils mold pkg-config qemu-user file libclang-dev \
+            binutils-aarch64-linux-gnu \
+            gcc-aarch64-linux-gnu g++-aarch64-linux-gnu
+
+      - name: Prepare ARM64 sysroot
+        if: matrix.arch == 'arm64'
+        run: |
+          set -euo pipefail
+          sysroot="$RUNNER_TEMP/rari-arm64-sysroot"
+          apt_dir="$RUNNER_TEMP/rari-arm64-apt"
+          arm64_sysroot_container_name="rari-arm64-sysroot-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}-${GITHUB_JOB}-${{ matrix.arch }}"
+          arm64_sysroot_container="$(docker create --name "$arm64_sysroot_container_name" --platform linux/arm64 node:24-trixie-slim)"
+          cleanup() {
+            if [[ -n "$arm64_sysroot_container" ]]; then
+              docker rm "$arm64_sysroot_container" >/dev/null 2>&1 || true
+            fi
+          }
+          trap cleanup EXIT
+          mkdir -p "$sysroot" "$apt_dir/lists/partial" "$apt_dir/archives/partial"
+          docker export "$arm64_sysroot_container" | tar -xf - -C "$sysroot"
+          docker rm "$arm64_sysroot_container" >/dev/null
+          arm64_sysroot_container=''
+
+          # Download the ARM64 build and runtime dependency closure into the job sysroot.
+          sed "s|/usr/share/keyrings/|$sysroot/usr/share/keyrings/|g" \
+            "$sysroot/etc/apt/sources.list.d/debian.sources" > "$apt_dir/debian.sources"
+          printf '#clear APT::Update::Post-Invoke;\n#clear DPkg::Post-Invoke;\n' \
+            > "$apt_dir/apt.conf"
+          apt_options=(
+            -c "$apt_dir/apt.conf"
+            -o "Dir::Etc::sourcelist=$apt_dir/debian.sources"
+            -o "Dir::Etc::sourceparts=-"
+            -o "Dir::State::lists=$apt_dir/lists"
+            -o "Dir::State::status=$sysroot/var/lib/dpkg/status"
+            -o "Dir::Cache::archives=$apt_dir/archives"
+            -o APT::Architecture=arm64
+            -o APT::Architectures::=arm64
+          )
+          apt-get "${apt_options[@]}" update
+          apt-get "${apt_options[@]}" --download-only --yes install \
+            libfontconfig1-dev:arm64 libgcc-s1:arm64 libstdc++6:arm64
+          shopt -s nullglob
+          for package in "$apt_dir"/archives/*.deb; do
+            package_name="$(dpkg-deb -f "$package" Package)"
+            if [[ "$package_name" == libc6-dev ]]; then
+              continue
+            fi
+            dpkg-deb --extract "$package" "$sysroot"
+          done
+          for linker_file in libc.so libm.so libc.a libm.a; do
+            linker_path="$sysroot/usr/lib/aarch64-linux-gnu/$linker_file"
+            if [[ -e "$linker_path" || -L "$linker_path" ]]; then
+              echo "$linker_file must resolve from the cross compiler sysroot" >&2
+              exit 1
+            fi
+          done
+          for library in libfontconfig.so.1 libgcc_s.so.1 libstdc++.so.6; do
+            if [[ ! -e "$sysroot/lib/aarch64-linux-gnu/$library" && \
+              ! -e "$sysroot/usr/lib/aarch64-linux-gnu/$library" ]]; then
+              echo "$library missing from ARM64 sysroot" >&2
+              exit 1
+            fi
+          done
+
+          printf 'ARM64_SYSROOT=%s\n' "$sysroot" >> "$GITHUB_ENV"
+          printf 'PKG_CONFIG_SYSROOT_DIR_aarch64_unknown_linux_gnu=%s\n' \
+            "$sysroot" >> "$GITHUB_ENV"
+          printf 'PKG_CONFIG_LIBDIR_aarch64_unknown_linux_gnu=%s/usr/lib/aarch64-linux-gnu/pkgconfig:%s/usr/share/pkgconfig\n' \
+            "$sysroot" "$sysroot" >> "$GITHUB_ENV"
+
+      - name: Check ARM64 fontconfig cross-link
+        if: matrix.arch == 'arm64'
+        run: |
+          set -euo pipefail
+          export PKG_CONFIG_SYSROOT_DIR="$ARM64_SYSROOT"
+          export PKG_CONFIG_LIBDIR="$ARM64_SYSROOT/usr/lib/aarch64-linux-gnu/pkgconfig:$ARM64_SYSROOT/usr/share/pkgconfig"
+
+          fontconfig_source="$RUNNER_TEMP/rari-arm64-fontconfig-link-check.c"
+          cat > "$fontconfig_source" <<'EOF'
+          #include <fontconfig/fontconfig.h>
+
+          int main(void) {
+            return FcInit() ? 0 : 1;
+          }
+          EOF
+
+          read -r -a fontconfig_cflags <<< "$(pkg-config --cflags fontconfig)"
+          read -r -a fontconfig_libs <<< "$(pkg-config --libs fontconfig)"
+          aarch64-linux-gnu-gcc \
+            "${fontconfig_cflags[@]}" "$fontconfig_source" \
+            "${fontconfig_libs[@]}" \
+            "-Wl,-rpath-link,$ARM64_SYSROOT/usr/lib/aarch64-linux-gnu" \
+            -o "$RUNNER_TEMP/rari-arm64-fontconfig-link-check"
 
       - name: Bundle React ESM vendor files
         run: pnpm --filter @rari/bundle-react-esm bundle
@@ -429,6 +495,7 @@ jobs:
         uses: dtolnay/rust-toolchain@02cb101ec7c40f2c49e1d9714d64511d8e1b74de # v1
         with:
           toolchain: nightly-2026-11-22
+          targets: aarch64-unknown-linux-gnu
 
       - name: Build smoke test app
         run: pnpm --filter @test/app... build
@@ -460,60 +527,31 @@ jobs:
           CARGO_PROFILE_RELEASE_LTO: 'false'
           RUSTFLAGS: -C link-arg=-fuse-ld=mold -Cforce-frame-pointers=yes
 
-      - name: Generate ARM64 V8 snapshot
+      - name: Build ARM64 V8 snapshot generator
         if: matrix.arch == 'arm64'
-        run: cargo run --release --manifest-path tools/snapshot/Cargo.toml -- crates/rari/snapshots
+        run: |
+          RUSTFLAGS="-C link-arg=-Wl,-rpath-link,$ARM64_SYSROOT/usr/lib/aarch64-linux-gnu -Cforce-frame-pointers=yes" \
+            cargo build --release --target aarch64-unknown-linux-gnu --manifest-path tools/snapshot/Cargo.toml
         env:
           # The generator is not shipped; avoid fat cross-crate LTO.
           CARGO_BUILD_JOBS: '1'
           CARGO_PROFILE_RELEASE_DEBUG: none
           CARGO_PROFILE_RELEASE_CODEGEN_UNITS: '16'
           CARGO_PROFILE_RELEASE_LTO: 'false'
-          RUSTFLAGS: -Cforce-frame-pointers=yes
+
+      - name: Generate ARM64 V8 snapshot under QEMU
+        if: matrix.arch == 'arm64'
+        run: qemu-aarch64 -L "$ARM64_SYSROOT" target/aarch64-unknown-linux-gnu/release/rari-snapshot crates/rari/snapshots
 
       - name: Build Linux ARM64 binary
         if: matrix.arch == 'arm64'
-        run: cargo build --release --bin rari --features ext-full,jemalloc
+        run: |
+          RUSTFLAGS="-C link-arg=-Wl,-rpath-link,$ARM64_SYSROOT/usr/lib/aarch64-linux-gnu -Cforce-frame-pointers=yes" \
+            cargo build --release --target aarch64-unknown-linux-gnu --bin rari --features ext-full,jemalloc
         env:
           CARGO_BUILD_JOBS: '1'
           CARGO_PROFILE_RELEASE_CODEGEN_UNITS: '16'
           CARGO_PROFILE_RELEASE_LTO: 'false'
-          RUSTFLAGS: -Cforce-frame-pointers=yes
-
-      - name: Smoke-test native Linux ARM64 binary
-        if: matrix.arch == 'arm64'
-        run: |
-          set -euo pipefail
-          binary="$GITHUB_WORKSPACE/target/release/rari"
-          "$binary" --version
-          cd test/fixtures/app
-          "$binary" \
-            --mode production --host 127.0.0.1 --port 43819 \
-            > "$RUNNER_TEMP/rari-arm64-smoke.log" 2>&1 &
-          server_pid=$!
-          cleanup() {
-            kill "$server_pid" 2>/dev/null || true
-            wait "$server_pid" 2>/dev/null || true
-          }
-          trap cleanup EXIT
-          rendered=false
-          for attempt in $(seq 1 60); do
-            if curl --fail --silent --show-error http://127.0.0.1:43819/ \
-              --output "$RUNNER_TEMP/rari-arm64-render.html"; then
-              rendered=true
-              break
-            fi
-            if ! kill -0 "$server_pid" 2>/dev/null; then
-              cat "$RUNNER_TEMP/rari-arm64-smoke.log"
-              exit 1
-            fi
-            sleep 1
-          done
-          if [[ "$rendered" != true ]] || ! grep -Fq 'Test App Home' "$RUNNER_TEMP/rari-arm64-render.html"; then
-            cat "$RUNNER_TEMP/rari-arm64-smoke.log"
-            echo 'ARM64 server did not render the smoke-test page' >&2
-            exit 1
-          fi
 
       - name: Prepare and package Linux release assets
         env:
@@ -528,13 +566,15 @@ jobs:
               platform=linux-x64
               cpu=x64
               description='Linux x64 binary'
+              readelf=readelf
               ;;
             arm64)
-              binary=target/release/rari
-              objcopy=objcopy
+              binary=target/aarch64-unknown-linux-gnu/release/rari
+              objcopy=aarch64-linux-gnu-objcopy
               platform=linux-arm64
               cpu=arm64
               description='Linux ARM64 binary'
+              readelf=aarch64-linux-gnu-readelf
               ;;
             *)
               echo "Unsupported architecture: $ARCH" >&2
@@ -547,7 +587,13 @@ jobs:
           "$objcopy" --strip-debug "$binary" "release-assets/rari-${platform}"
           "$objcopy" --add-gnu-debuglink="release-assets/rari-${platform}.debug" "release-assets/rari-${platform}"
           chmod +x "release-assets/rari-${platform}"
-          file "release-assets/rari-${platform}"
+          release_binary="release-assets/rari-${platform}"
+          file_description="$(file -b "$release_binary")"
+          echo "$file_description"
+          bash .github/scripts/check-glibc-version.sh "$release_binary" "$readelf"
+          if [[ "$ARCH" == arm64 ]]; then
+            bash .github/scripts/check-arm64-elf.sh "$file_description"
+          fi
 
           mkdir -p dist-tarballs
 
@@ -582,69 +628,49 @@ jobs:
           build_platform "$platform" "$cpu" "$description"
           ls -lh dist-tarballs release-assets
 
-      - name: Smoke-test packaged Linux x64 binary on the production base image
-        if: matrix.arch == 'x64'
+      - name: Smoke-test packaged Linux ARM64 binary in production rootfs under QEMU
+        if: matrix.arch == 'arm64'
         env:
           VERSION: ${{ inputs.version }}
         run: |
           set -euo pipefail
-          : "${GITHUB_RUN_ID:?Gitea must provide GITHUB_RUN_ID for smoke container names}"
-          : "${GITHUB_RUN_ATTEMPT:?Gitea must provide GITHUB_RUN_ATTEMPT for smoke container names}"
-          : "${GITHUB_JOB:?Gitea must provide GITHUB_JOB for smoke container names}"
-          smoke_container_arm64="rari-smoke-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}-${GITHUB_JOB}-${{ matrix.arch }}"
-          docker create --name "$smoke_container_arm64" --platform linux/amd64 \
-            node:24-trixie-slim node -e 'setInterval(() => {}, 60000)'
+          tarball="$GITHUB_WORKSPACE/dist-tarballs/rari-linux-arm64-${VERSION}.tgz"
+          rootfs="$ARM64_SYSROOT"
+          smoke_dir="$RUNNER_TEMP/rari-arm64-smoke"
+          mkdir -p "$smoke_dir/package"
+          tar -xzf "$tarball" -C "$smoke_dir/package" --strip-components=1
+          binary="$smoke_dir/package/bin/rari"
+          qemu-aarch64 --version
+          qemu-aarch64 -L "$rootfs" "$binary" --version
+          cd test/fixtures/app
+          qemu-aarch64 -L "$rootfs" "$binary" \
+            --mode production --host 127.0.0.1 --port 43819 \
+            > "$smoke_dir/rari-arm64-smoke.log" 2>&1 &
+          server_pid=$!
           cleanup() {
-            local status=$?
-            if ! docker rm --force "$smoke_container_arm64" >/dev/null; then
-              echo "Failed to remove smoke container $smoke_container_arm64" >&2
-              status=1
-            fi
-            exit "$status"
+            kill "$server_pid" 2>/dev/null || true
+            wait "$server_pid" 2>/dev/null || true
           }
           trap cleanup EXIT
-          docker start "$smoke_container_arm64" >/dev/null
-          docker exec "$smoke_container_arm64" mkdir -p /workspace/dist-tarballs /workspace/test/fixtures
-          docker cp \
-            "$GITHUB_WORKSPACE/dist-tarballs/rari-linux-x64-${VERSION}.tgz" \
-            "$smoke_container_arm64:/workspace/dist-tarballs/"
-          tar -C "$GITHUB_WORKSPACE/test/fixtures" -chf - app \
-            | docker cp - "$smoke_container_arm64:/workspace/test/fixtures/"
-          docker exec --env VERSION="$VERSION" "$smoke_container_arm64" sh -euc '
-              apt-get update -qq
-              apt-get install -y -qq ca-certificates curl libfontconfig1
-              mkdir -p /tmp/rari-package
-              tar -xzf "/workspace/dist-tarballs/rari-linux-x64-${VERSION}.tgz" \
-                -C /tmp/rari-package --strip-components=1
-              cd /workspace/test/fixtures/app
-              /tmp/rari-package/bin/rari --version
-              /tmp/rari-package/bin/rari --mode production --host 127.0.0.1 --port 43820 \
-                > /tmp/rari-x64-smoke.log 2>&1 &
-              server_pid=$!
-              cleanup() {
-                kill "$server_pid" 2>/dev/null || true
-                wait "$server_pid" 2>/dev/null || true
-              }
-              trap cleanup EXIT
-              rendered=false
-              for attempt in $(seq 1 60); do
-                if curl --fail --silent http://127.0.0.1:43820/ \
-                  --output /tmp/rari-x64-render.html; then
-                  rendered=true
-                  break
-                fi
-                if ! kill -0 "$server_pid" 2>/dev/null; then
-                  cat /tmp/rari-x64-smoke.log
-                  exit 1
-                fi
-                sleep 1
-              done
-              if [ "$rendered" != true ] || ! grep -Fq "Test App Home" /tmp/rari-x64-render.html; then
-                cat /tmp/rari-x64-smoke.log
-                echo "Packaged x64 binary did not render the smoke-test page" >&2
-                exit 1
-              fi
-            '
+          rendered=false
+          for attempt in $(seq 1 60); do
+            if curl --fail --silent --show-error http://127.0.0.1:43819/ \
+              --output "$smoke_dir/rari-arm64-render.html"; then
+              rendered=true
+              break
+            fi
+            if ! kill -0 "$server_pid" 2>/dev/null; then
+              cat "$smoke_dir/rari-arm64-smoke.log"
+              exit 1
+            fi
+            sleep 1
+          done
+          if [[ "$rendered" != true ]] || ! grep -Fq "Test App Home" "$smoke_dir/rari-arm64-render.html"; then
+            cat "$smoke_dir/rari-arm64-smoke.log"
+            echo "Packaged ARM64 binary did not render the smoke-test page" >&2
+            exit 1
+          fi
+          cat "$smoke_dir/rari-arm64-smoke.log"
 
       - name: Upload Linux assets for the trusted publisher
         uses: ChristopherHX/gitea-upload-artifact@62ac910c5d3dfa85c7cb2df15afe2e342b2407c2 # Gitea-compatible v4 fork
