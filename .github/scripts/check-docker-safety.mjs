@@ -227,6 +227,57 @@ function shellWords(source) {
   return words
 }
 
+function shellAssignmentEvents(source) {
+  const assignmentBuiltins = new Set(['declare', 'export', 'local', 'readonly', 'typeset'])
+  const events = []
+  const pendingAssignments = []
+  let commandName
+  let previousEnd = 0
+  let persistsAssignments = false
+
+  const finishCommand = position => {
+    if (commandName === undefined || persistsAssignments) {
+      for (const assignment of pendingAssignments) events.push({ ...assignment, position })
+    }
+    pendingAssignments.length = 0
+    commandName = undefined
+    persistsAssignments = false
+  }
+
+  for (const word of shellWords(source)) {
+    let lineBreak = -1
+    for (let index = previousEnd; index < word.start; index += 1) {
+      if (source[index] === '\n' || source[index] === '\r') {
+        if (!isShellEscaped(source, index)) {
+          lineBreak = index
+          break
+        }
+        if (source[index] === '\r' && source[index + 1] === '\n') index += 1
+      }
+    }
+    if (lineBreak !== -1) finishCommand(lineBreak)
+
+    if (isShellControlOperator(word.value)) {
+      finishCommand(word.end)
+      previousEnd = word.end
+      continue
+    }
+
+    const decoded = decodeShellWord(word.value).value
+    const assignment = decoded.match(/^([A-Za-z_][A-Za-z0-9_]*)=(.*)$/)
+    if (assignment && (commandName === undefined || persistsAssignments)) {
+      pendingAssignments.push({ name: assignment[1], value: assignment[2] })
+    } else if (commandName === undefined) {
+      commandName = commandWord(decoded)
+      persistsAssignments = assignmentBuiltins.has(commandName)
+    }
+    previousEnd = word.end
+  }
+
+  finishCommand(source.length)
+  return events
+}
+
 function commandSubstitutionEnd(source, start) {
   let depth = 1
   let quote
@@ -468,21 +519,17 @@ function dockerInvocations(source) {
 
   for (const [context, words] of wordsByContext) {
     words.sort((left, right) => left.contextStart - right.contextStart)
-    const sourceWords = shellWords(context.source)
+    const assignmentEvents = shellAssignmentEvents(context.source)
     const assignments = new Map()
-    let sourceWordIndex = 0
+    let assignmentIndex = 0
     const matches = []
 
     for (const word of words) {
-      while (sourceWords[sourceWordIndex]?.start < word.contextStart) {
-        const assignment = decodeShellWord(sourceWords[sourceWordIndex].value).value.match(
-          /^([A-Za-z_][A-Za-z0-9_]*)=(.*)$/,
-        )
-        if (assignment) {
-          if (/[$`]/.test(assignment[2])) assignments.delete(assignment[1])
-          else assignments.set(assignment[1], assignment[2])
-        }
-        sourceWordIndex += 1
+      while (assignmentEvents[assignmentIndex]?.position <= word.contextStart) {
+        const { name, value } = assignmentEvents[assignmentIndex]
+        if (/[$`]/.test(value)) assignments.delete(name)
+        else assignments.set(name, value)
+        assignmentIndex += 1
       }
 
       const variable = word.value.match(

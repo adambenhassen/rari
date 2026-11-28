@@ -433,12 +433,15 @@ test('scans Docker commands stored in quoted shell assignments', () => {
 
 test('resolves literal Docker executable assignments', () => {
   const name = '"rari-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT-$GITHUB_JOB"'
-  assert.deepEqual(
-    findDockerSafetyViolations(`D=docker; $D run --name ${name} -p 5432:5432 image`).map(
-      ({ message }) => message,
-    ),
-    ['fixed host-port publishing'],
-  )
+  for (const command of [
+    `D=docker; $D run --name ${name} -p 5432:5432 image`,
+    `D=docker; echo D=echo; $D run --name ${name} -p 5432:5432 image`,
+  ]) {
+    assert.deepEqual(
+      findDockerSafetyViolations(command).map(({ message }) => message),
+      ['fixed host-port publishing'],
+    )
+  }
 })
 
 test('resolves Docker executable assignments across a workflow run block', () => {
