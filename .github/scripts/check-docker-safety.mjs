@@ -296,6 +296,8 @@ function shellCommandWordStarts(source) {
   const commandKeywords = new Set(['!', 'do', 'elif', 'else', 'if', 'then', 'until', 'while'])
   const starts = new Set()
   let expectingCommand = true
+  let execWrapper = false
+  let skipExecArgument = false
   let previousEnd = 0
 
   for (const word of shellWords(source)) {
@@ -303,6 +305,8 @@ function shellCommandWordStarts(source) {
       if (source[index] === '\n' || source[index] === '\r') {
         if (!isShellEscaped(source, index)) {
           expectingCommand = true
+          execWrapper = false
+          skipExecArgument = false
           break
         }
         if (source[index] === '\r' && source[index + 1] === '\n') index += 1
@@ -311,6 +315,8 @@ function shellCommandWordStarts(source) {
 
     if (isShellControlOperator(word.value)) {
       expectingCommand = true
+      execWrapper = false
+      skipExecArgument = false
       previousEnd = word.end
       continue
     }
@@ -321,8 +327,33 @@ function shellCommandWordStarts(source) {
         previousEnd = word.end
         continue
       }
+
+      if (execWrapper) {
+        const option = rawCommandToken(word.value)
+        if (skipExecArgument) {
+          skipExecArgument = false
+          previousEnd = word.end
+          continue
+        }
+        if (option === '-a') {
+          skipExecArgument = true
+          previousEnd = word.end
+          continue
+        }
+        if (/^-[cl]+$/.test(option)) {
+          previousEnd = word.end
+          continue
+        }
+        if (option === '--') {
+          execWrapper = false
+          previousEnd = word.end
+          continue
+        }
+      }
+
       starts.add(word.start)
-      expectingCommand = false
+      execWrapper = commandWord(value) === 'exec'
+      expectingCommand = execWrapper
     }
 
     previousEnd = word.end
