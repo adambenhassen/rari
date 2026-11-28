@@ -453,6 +453,15 @@ test('keeps command substitution assignments scoped to their shell', () => {
   )
 })
 
+test('resolves Docker executable assignments in parenthesized subshells', () => {
+  assert.deepEqual(
+    findDockerSafetyViolations(
+      '( D=docker; "$D" run --name "rari-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT-$GITHUB_JOB" -p 5432:5432 image )',
+    ).map(({ message }) => message),
+    ['fixed host-port publishing'],
+  )
+})
+
 test('fails closed on dynamic executable assignments', () => {
   assert.throws(
     () => findDockerSafetyViolations('D="$(printf docker)"; "$D" run -p 5432:5432 image'),

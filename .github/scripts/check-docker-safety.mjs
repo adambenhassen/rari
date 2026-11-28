@@ -403,6 +403,96 @@ function shellSubstitutionRanges(source) {
   return ranges
 }
 
+function parenthesizedCommandEnd(source, start) {
+  let depth = 1
+  let quote
+
+  for (let index = start + 1; index < source.length; index += 1) {
+    const character = source[index]
+    if (character === '\\' && quote !== "'") {
+      index += 1
+      continue
+    }
+    if (quote) {
+      if (character === quote) quote = undefined
+      continue
+    }
+    if (character === "'" || character === '"') {
+      quote = character
+    } else if (character === '`') {
+      const end = backtickSubstitutionEnd(source, index)
+      if (end === -1) return -1
+      index = end
+    } else if (
+      source.startsWith('$(', index) ||
+      source.startsWith('<(', index) ||
+      source.startsWith('>(', index)
+    ) {
+      const end = commandSubstitutionEnd(source, index)
+      if (end === -1) return -1
+      index = end
+    } else if (character === '(') {
+      depth += 1
+    } else if (character === ')' && --depth === 0) {
+      return index
+    }
+  }
+
+  return -1
+}
+
+function shellParenthesizedRanges(source) {
+  const ranges = []
+  let quote
+
+  for (let index = 0; index < source.length; index += 1) {
+    const character = source[index]
+    if (character === '\\' && quote !== "'") {
+      index += 1
+      continue
+    }
+    if (quote) {
+      if (character === quote) quote = undefined
+      continue
+    }
+    if (character === "'" || character === '"') {
+      quote = character
+    } else if (character === '`') {
+      const end = backtickSubstitutionEnd(source, index)
+      if (end !== -1) index = end
+    } else if (
+      source.startsWith('$(', index) ||
+      source.startsWith('<(', index) ||
+      source.startsWith('>(', index)
+    ) {
+      const end = commandSubstitutionEnd(source, index)
+      if (end !== -1) index = end
+    } else if (character === '(' && source[index + 1] !== '(' && source[index - 1] !== '(') {
+      const end = parenthesizedCommandEnd(source, index)
+      if (end !== -1) {
+        ranges.push({ start: index + 1, end })
+        index = end
+      }
+    }
+  }
+
+  return ranges
+}
+
+function shellNestedExecutionRanges(source) {
+  const ranges = [...shellSubstitutionRanges(source), ...shellParenthesizedRanges(source)]
+  return ranges.filter(
+    range =>
+      !ranges.some(
+        parent =>
+          parent !== range &&
+          parent.start <= range.start &&
+          parent.end >= range.end &&
+          (parent.start < range.start || parent.end > range.end),
+      ),
+  )
+}
+
 function shellAssignmentEventsDeep(source, offset = 0) {
   const events = shellAssignmentEvents(source).map(event => ({
     ...event,
@@ -411,7 +501,7 @@ function shellAssignmentEventsDeep(source, offset = 0) {
     scopeEnd: offset + source.length,
   }))
 
-  for (const range of shellSubstitutionRanges(source)) {
+  for (const range of shellNestedExecutionRanges(source)) {
     events.push(
       ...shellAssignmentEventsDeep(source.slice(range.start, range.end), offset + range.start),
     )
