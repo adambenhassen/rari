@@ -470,27 +470,52 @@ const dockerContainerSubcommandAliases = new Map([
 ])
 
 function dockerInvocations(source) {
-  const matchesByContext = new Map()
-  for (const token of shellCommandWords(source)
-    .filter(token => !token.value.includes('$(') && !token.value.includes('`'))
-    .map(token => ({
-      ...token,
-      command: commandWord(token.value),
-    }))
-    .filter(token =>
-      ['docker', 'docker-compose'].some(
-        executable => token.command === executable || token.command.endsWith(`/${executable}`),
-      ),
-    )) {
-    const matches = matchesByContext.get(token.context) ?? []
-    matches.push(token)
-    matchesByContext.set(token.context, matches)
+  const wordsByContext = new Map()
+  for (const token of shellCommandWords(source).filter(
+    token => !token.value.includes('$(') && !token.value.includes('`'),
+  )) {
+    const words = wordsByContext.get(token.context) ?? []
+    words.push(token)
+    wordsByContext.set(token.context, words)
   }
 
   const invocations = []
 
-  for (const [context, matches] of matchesByContext) {
-    matches.sort((left, right) => left.contextStart - right.contextStart)
+  for (const [context, words] of wordsByContext) {
+    words.sort((left, right) => left.contextStart - right.contextStart)
+    const sourceWords = shellWords(context.source)
+    const assignments = new Map()
+    let sourceWordIndex = 0
+    const matches = []
+
+    for (const word of words) {
+      while (sourceWords[sourceWordIndex]?.start < word.contextStart) {
+        const assignment = decodeShellWord(sourceWords[sourceWordIndex].value).value.match(
+          /^([A-Za-z_][A-Za-z0-9_]*)=(.*)$/,
+        )
+        if (assignment) {
+          if (/[$`]/.test(assignment[2])) assignments.delete(assignment[1])
+          else assignments.set(assignment[1], assignment[2])
+        }
+        sourceWordIndex += 1
+      }
+
+      const variable = word.value.match(
+        /^\$(?:\{([A-Za-z_][A-Za-z0-9_]*)\}|([A-Za-z_][A-Za-z0-9_]*))$/,
+      )
+      const value = variable
+        ? (assignments.get(variable[1] ?? variable[2]) ?? word.value)
+        : word.value
+      const command = commandWord(value)
+      if (
+        ['docker', 'docker-compose'].some(
+          executable => command === executable || command.endsWith(`/${executable}`),
+        )
+      ) {
+        matches.push({ ...word, command })
+      }
+    }
+
     for (let matchIndex = 0; matchIndex < matches.length; matchIndex += 1) {
       const match = matches[matchIndex]
       const end = matches[matchIndex + 1]?.contextStart ?? context.source.length

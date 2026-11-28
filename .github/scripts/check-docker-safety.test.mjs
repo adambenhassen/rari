@@ -431,6 +431,16 @@ test('scans Docker commands stored in quoted shell assignments', () => {
   }
 })
 
+test('resolves literal Docker executable assignments', () => {
+  const name = '"rari-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT-$GITHUB_JOB"'
+  assert.deepEqual(
+    findDockerSafetyViolations(`D=docker; $D run --name ${name} -p 5432:5432 image`).map(
+      ({ message }) => message,
+    ),
+    ['fixed host-port publishing'],
+  )
+})
+
 test('requires Docker container names to include the run, attempt, and job identity', () => {
   assert.deepEqual(
     findDockerSafetyViolations('docker create --name rari-smoke-image alpine').map(
