@@ -353,7 +353,14 @@ function shellCommandScriptArgumentStarts(source) {
     for (let argument = index + 1; argument < words.length; argument += 1) {
       const option = rawCommandToken(words[argument].value)
       if (isShellControlOperator(option) || option === '--') break
-      if (option === '-o' || option === '+o' || option === '--rcfile' || option === '--init-file') {
+      if (
+        option === '-o' ||
+        option === '+o' ||
+        option === '-O' ||
+        option === '+O' ||
+        option === '--rcfile' ||
+        option === '--init-file'
+      ) {
         const value = words[argument + 1]
         if (!value || isShellControlOperator(value.value)) break
         argument += 1
