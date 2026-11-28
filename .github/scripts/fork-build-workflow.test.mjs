@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict'
 import { spawnSync } from 'node:child_process'
-import { chmod, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises'
+import { access, chmod, mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import test from 'node:test'
@@ -213,18 +213,11 @@ test('cross-compiles ARM64 on rari and serializes it after x64', () => {
     arm64Sysroot,
     /--download-only --yes install \\\n\s+libfontconfig1-dev:arm64 libgcc-s1:arm64 libstdc\+\+6:arm64/,
   )
-  assert.match(arm64Sysroot, /package_name="\$\(dpkg-deb -f "\$package" Package\)"/)
-  assert.match(arm64Sysroot, /if \[\[ "\$package_name" == libc6-dev \]\]; then\s+continue\s+fi/)
-  assert.match(arm64Sysroot, /for linker_file in libc\.so libm\.so libc\.a libm\.a/)
-  assert.match(arm64Sysroot, /linker_path="\$sysroot\/usr\/lib\/aarch64-linux-gnu\/\$linker_file"/)
-  assert.match(arm64Sysroot, /if \[\[ -e "\$linker_path" \|\| -L "\$linker_path" \]\]; then/)
-  assert.match(arm64Sysroot, /echo "\$linker_file must resolve from the cross compiler sysroot"/)
-  assert.ok(
-    arm64Sysroot.indexOf('if [[ "$package_name" == libc6-dev ]]') <
-      arm64Sysroot.indexOf('dpkg-deb --extract "$package" "$sysroot"'),
-    'ARM64 libc6-dev must not be extracted into the pkg-config sysroot',
+  assert.match(
+    arm64Sysroot,
+    /bash \.github\/scripts\/prepare-arm64-sysroot\.sh "\$sysroot" "\$apt_dir"\/archives\/\*\.deb/,
   )
-  assert.match(arm64Sysroot, /dpkg-deb --extract "\$package" "\$sysroot"/)
+  assert.doesNotMatch(arm64Sysroot, /dpkg-deb --extract|package_name=/)
   assert.match(arm64Sysroot, /PKG_CONFIG_SYSROOT_DIR_aarch64_unknown_linux_gnu/)
   assert.match(arm64Sysroot, /PKG_CONFIG_LIBDIR_aarch64_unknown_linux_gnu/)
   assert.match(arm64Sysroot, /libfontconfig\.so\.1 libgcc_s\.so\.1 libstdc\+\+\.so\.6/)
@@ -235,6 +228,14 @@ test('cross-compiles ARM64 on rari and serializes it after x64', () => {
   assert.match(fontconfigLinkCheck, /PKG_CONFIG_SYSROOT_DIR="\$ARM64_SYSROOT"/)
   assert.match(fontconfigLinkCheck, /pkg-config --cflags fontconfig/)
   assert.match(fontconfigLinkCheck, /pkg-config --libs fontconfig/)
+  assert.match(
+    fontconfigLinkCheck,
+    /fontconfig_cflags_text="\$\(pkg-config --cflags fontconfig\)"\s+read -r -a fontconfig_cflags <<< "\$fontconfig_cflags_text"/,
+  )
+  assert.match(
+    fontconfigLinkCheck,
+    /fontconfig_libs_text="\$\(pkg-config --libs fontconfig\)"\s+read -r -a fontconfig_libs <<< "\$fontconfig_libs_text"/,
+  )
   assert.match(fontconfigLinkCheck, /aarch64-linux-gnu-gcc/)
   assert.match(fontconfigLinkCheck, /FcInit\(\)/)
   assert.match(fontconfigLinkCheck, /-Wl,-rpath-link,\$ARM64_SYSROOT\/usr\/lib\/aarch64-linux-gnu/)
@@ -317,6 +318,75 @@ test('cross-compiles ARM64 on rari and serializes it after x64', () => {
   assert.match(x64Package, /check-glibc-version\.sh "\$release_binary" "\$readelf"/)
   assert.doesNotMatch(buildJob, /getconf GNU_LIBC_VERSION/)
   assert.doesNotMatch(arm64BuildJob, /getconf GNU_LIBC_VERSION/)
+})
+
+test('prepares the ARM64 sysroot without host libc development files', async t => {
+  const tempDirectory = await mkdtemp(join(tmpdir(), 'rari-arm64-sysroot-'))
+  t.after(() => rm(tempDirectory, { recursive: true, force: true }))
+
+  const binDirectory = join(tempDirectory, 'bin')
+  const packageDirectory = join(tempDirectory, 'packages')
+  const sysroot = join(tempDirectory, 'sysroot')
+  const fakeDpkgDeb = join(binDirectory, 'dpkg-deb')
+  const prepareScript = new URL('./prepare-arm64-sysroot.sh', import.meta.url)
+  await mkdir(binDirectory)
+  await mkdir(packageDirectory)
+  await writeFile(
+    fakeDpkgDeb,
+    `#!/usr/bin/env bash
+set -euo pipefail
+case "$1" in
+  -f)
+    package_name="${'${2##*/}'}"
+    printf '%s\\n' "${'${package_name%.deb}'}"
+    ;;
+  --extract)
+    package_name="${'${2##*/}'}"
+    package_name="${'${package_name%.deb}'}"
+    destination="$3"
+    if [[ "$package_name" == bad-libc ]]; then
+      mkdir -p "$destination/usr/lib/aarch64-linux-gnu"
+      touch "$destination/usr/lib/aarch64-linux-gnu/libc.so"
+    else
+      mkdir -p "$destination/usr/share/package-fixtures"
+      touch "$destination/usr/share/package-fixtures/$package_name"
+    fi
+    ;;
+  *)
+    exit 2
+    ;;
+esac
+`,
+  )
+  await chmod(fakeDpkgDeb, 0o755)
+
+  const libc6DevPackage = join(packageDirectory, 'libc6-dev.deb')
+  const gccPackage = join(packageDirectory, 'libgcc-s1.deb')
+  const badLibcPackage = join(packageDirectory, 'bad-libc.deb')
+  await Promise.all([libc6DevPackage, gccPackage, badLibcPackage].map(path => writeFile(path, '')))
+
+  const runPrepare = (...packages) =>
+    spawnSync('bash', [prepareScript.pathname, sysroot, ...packages], {
+      encoding: 'utf8',
+      env: { ...process.env, PATH: `${binDirectory}:${process.env.PATH}` },
+    })
+
+  const successfulPreparation = runPrepare(libc6DevPackage, gccPackage)
+  assert.equal(successfulPreparation.status, 0, successfulPreparation.stderr)
+  await access(join(sysroot, 'usr/share/package-fixtures/libgcc-s1'))
+  await assert.rejects(access(join(sysroot, 'usr/share/package-fixtures/libc6-dev')))
+
+  const invalidSysroot = join(tempDirectory, 'invalid-sysroot')
+  const invalidPreparation = spawnSync(
+    'bash',
+    [prepareScript.pathname, invalidSysroot, badLibcPackage],
+    {
+      encoding: 'utf8',
+      env: { ...process.env, PATH: `${binDirectory}:${process.env.PATH}` },
+    },
+  )
+  assert.equal(invalidPreparation.status, 1)
+  assert.match(invalidPreparation.stderr, /libc\.so must resolve from the cross compiler sysroot/)
 })
 
 test('checks the packaged binary GLIBC ceiling', async t => {

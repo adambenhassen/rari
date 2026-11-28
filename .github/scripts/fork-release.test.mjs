@@ -81,18 +81,11 @@ test('builds both release architectures on rari and publishes combined assets', 
     arm64Sysroot,
     /--download-only --yes install \\\n\s+libfontconfig1-dev:arm64 libgcc-s1:arm64 libstdc\+\+6:arm64/,
   )
-  assert.match(arm64Sysroot, /package_name="\$\(dpkg-deb -f "\$package" Package\)"/)
-  assert.match(arm64Sysroot, /if \[\[ "\$package_name" == libc6-dev \]\]; then\s+continue\s+fi/)
-  assert.match(arm64Sysroot, /for linker_file in libc\.so libm\.so libc\.a libm\.a/)
-  assert.match(arm64Sysroot, /linker_path="\$sysroot\/usr\/lib\/aarch64-linux-gnu\/\$linker_file"/)
-  assert.match(arm64Sysroot, /if \[\[ -e "\$linker_path" \|\| -L "\$linker_path" \]\]; then/)
-  assert.match(arm64Sysroot, /echo "\$linker_file must resolve from the cross compiler sysroot"/)
-  assert.ok(
-    arm64Sysroot.indexOf('if [[ "$package_name" == libc6-dev ]]') <
-      arm64Sysroot.indexOf('dpkg-deb --extract "$package" "$sysroot"'),
-    'ARM64 libc6-dev must not be extracted into the pkg-config sysroot',
+  assert.match(
+    arm64Sysroot,
+    /bash \.github\/scripts\/prepare-arm64-sysroot\.sh "\$sysroot" "\$apt_dir"\/archives\/\*\.deb/,
   )
-  assert.match(arm64Sysroot, /dpkg-deb --extract "\$package" "\$sysroot"/)
+  assert.doesNotMatch(arm64Sysroot, /dpkg-deb --extract|package_name=/)
   assert.match(arm64Sysroot, /PKG_CONFIG_SYSROOT_DIR_aarch64_unknown_linux_gnu/)
   assert.match(arm64Sysroot, /PKG_CONFIG_LIBDIR_aarch64_unknown_linux_gnu/)
   assert.match(arm64Sysroot, /libfontconfig\.so\.1 libgcc_s\.so\.1 libstdc\+\+\.so\.6/)
