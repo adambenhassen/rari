@@ -231,6 +231,7 @@ function shellAssignmentEvents(source) {
   const assignmentBuiltins = new Set(['declare', 'export', 'local', 'readonly', 'typeset'])
   const events = []
   const pendingAssignments = []
+  const nestedRanges = shellNestedExecutionRanges(source)
   let commandName
   let previousEnd = 0
   let persistsAssignments = false
@@ -245,6 +246,11 @@ function shellAssignmentEvents(source) {
   }
 
   for (const word of shellWords(source)) {
+    if (nestedRanges.some(range => word.start >= range.start && word.start < range.end)) {
+      previousEnd = word.end
+      continue
+    }
+
     let lineBreak = -1
     for (let index = previousEnd; index < word.start; index += 1) {
       if (source[index] === '\n' || source[index] === '\r') {
@@ -257,7 +263,7 @@ function shellAssignmentEvents(source) {
     }
     if (lineBreak !== -1) finishCommand(lineBreak)
 
-    if (isShellControlOperator(word.value)) {
+    if (word.value === '(' || word.value === ')' || isShellControlOperator(word.value)) {
       finishCommand(word.end)
       previousEnd = word.end
       continue
@@ -276,6 +282,14 @@ function shellAssignmentEvents(source) {
 
   finishCommand(source.length)
   return events
+}
+
+function shellCommentStart(source, index) {
+  return source[index] === '#' && (index === 0 || /[\s;&|()<>]/.test(source[index - 1]))
+}
+
+function shellCommentEnd(source, start) {
+  return source.indexOf('\n', start)
 }
 
 function shellCommandWordStarts(source) {
@@ -333,6 +347,10 @@ function commandSubstitutionEnd(source, start) {
     }
     if (character === "'" || character === '"') {
       quote = character
+    } else if (shellCommentStart(source, index)) {
+      const end = shellCommentEnd(source, index)
+      if (end === -1) return -1
+      index = end
     } else if (character === '`') {
       const end = source.indexOf('`', index + 1)
       if (end === -1) return -1
@@ -419,6 +437,10 @@ function parenthesizedCommandEnd(source, start) {
     }
     if (character === "'" || character === '"') {
       quote = character
+    } else if (shellCommentStart(source, index)) {
+      const end = shellCommentEnd(source, index)
+      if (end === -1) break
+      index = end
     } else if (character === '`') {
       const end = backtickSubstitutionEnd(source, index)
       if (end === -1) return -1
@@ -457,6 +479,10 @@ function shellParenthesizedRanges(source) {
     }
     if (character === "'" || character === '"') {
       quote = character
+    } else if (shellCommentStart(source, index)) {
+      const end = shellCommentEnd(source, index)
+      if (end === -1) break
+      index = end
     } else if (character === '`') {
       const end = backtickSubstitutionEnd(source, index)
       if (end !== -1) index = end

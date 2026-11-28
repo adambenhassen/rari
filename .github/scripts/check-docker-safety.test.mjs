@@ -462,6 +462,20 @@ test('resolves Docker executable assignments in parenthesized subshells', () => 
   )
 })
 
+test('ignores parentheses in shell comments when scoping assignments', () => {
+  const command = [
+    'D=docker; (',
+    '  # ) is comment text, not the end of the subshell',
+    '  D=echo; printf ok',
+    '); "$D" run --name "rari-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT-$GITHUB_JOB" -p 5432:5432 image',
+  ].join('\n')
+
+  assert.deepEqual(
+    findDockerSafetyViolations(command).map(({ message }) => message),
+    ['fixed host-port publishing'],
+  )
+})
+
 test('fails closed on dynamic executable assignments', () => {
   assert.throws(
     () => findDockerSafetyViolations('D="$(printf docker)"; "$D" run -p 5432:5432 image'),
