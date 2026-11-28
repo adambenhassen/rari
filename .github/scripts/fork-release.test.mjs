@@ -17,7 +17,7 @@ const { deleteTestRelease, publishRelease, waitForGithubMirrorTag } =
 const skipTagCheck = async () => {}
 const skipOperationLock = operation => operation()
 
-test('builds each release architecture on its assigned runner and publishes combined assets', async () => {
+test('builds both release architectures on rari and publishes combined assets', async () => {
   const workflow = await readFile(new URL('../workflows/fork-build.yml', import.meta.url), 'utf8')
   const buildStart = workflow.indexOf('  build:')
   const arm64BuildStart = workflow.indexOf('  build-arm64:')
@@ -26,20 +26,25 @@ test('builds each release architecture on its assigned runner and publishes comb
   const arm64Build = workflow.slice(arm64BuildStart, diagnosticStart)
   assert.match(build, /runs-on: rari/)
   assert.match(build, /- arch: x64/)
-  assert.match(arm64Build, /runs-on: arm64/)
+  assert.match(arm64Build, /runs-on: rari/)
   assert.match(arm64Build, /needs: build/)
   assert.match(arm64Build, /- arch: arm64/)
+  const runnerLabels = [...workflow.matchAll(/^\s*runs-on:\s*(.*)$/gm)].map(match => match[1])
+  assert.ok(runnerLabels.length > 0)
+  assert.ok(runnerLabels.every(label => label === 'rari'))
   assert.match(build, /timeout-minutes: 175/)
   assert.match(arm64Build, /timeout-minutes: 175/)
   assert.match(build, /name: fork-release-assets-\$\{\{ matrix\.arch \}\}/)
   assert.match(arm64Build, /name: fork-release-assets-\$\{\{ matrix\.arch \}\}/)
   assert.match(build, /name: Generate x64 V8 snapshot\s+if: matrix\.arch == 'x64'/)
-  assert.match(arm64Build, /name: Generate ARM64 V8 snapshot\s+if: matrix\.arch == 'arm64'/)
-  assert.match(arm64Build, /name: Build Linux ARM64 binary\s+if: matrix\.arch == 'arm64'/)
-  assert.doesNotMatch(
+  assert.match(arm64Build, /name: Build ARM64 V8 snapshot generator\s+if: matrix\.arch == 'arm64'/)
+  assert.match(
     arm64Build,
-    /qemu-aarch64-static|aarch64-linux-gnu|aarch64-unknown-linux-gnu|PKG_CONFIG_ALLOW_CROSS|CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER/,
+    /name: Generate ARM64 V8 snapshot under QEMU\s+if: matrix\.arch == 'arm64'/,
   )
+  assert.match(arm64Build, /name: Build Linux ARM64 binary\s+if: matrix\.arch == 'arm64'/)
+  assert.doesNotMatch(arm64Build, /update-binfmts|binfmt_misc/)
+  assert.match(arm64Build, /CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER: aarch64-linux-gnu-gcc/)
 
   const buildStep = (job, name) => {
     const marker = `      - name: ${name}\n`
@@ -53,25 +58,89 @@ test('builds each release architecture on its assigned runner and publishes comb
   assert.match(x64BinaryBuild, /if: matrix\.arch == 'x64'/)
   assert.match(x64BinaryBuild, /cargo build --release --target x86_64-unknown-linux-gnu --bin rari/)
 
-  const arm64RunnerCheck = buildStep(arm64Build, 'Verify ARM64 runner architecture')
-  assert.match(arm64RunnerCheck, /if: matrix\.arch == 'arm64'/)
-  assert.match(arm64RunnerCheck, /uname -m/)
-  assert.match(arm64RunnerCheck, /aarch64/)
-
-  const arm64Snapshot = buildStep(arm64Build, 'Generate ARM64 V8 snapshot')
-  assert.match(arm64Snapshot, /if: matrix\.arch == 'arm64'/)
+  const arm64SnapshotBuild = buildStep(arm64Build, 'Build ARM64 V8 snapshot generator')
+  assert.match(
+    arm64SnapshotBuild,
+    /cargo build --release --target aarch64-unknown-linux-gnu --manifest-path tools\/snapshot\/Cargo\.toml/,
+  )
+  assert.match(
+    arm64SnapshotBuild,
+    /RUSTFLAGS="-C link-arg=-Wl,-rpath-link,\$ARM64_SYSROOT\/usr\/lib\/aarch64-linux-gnu -Cforce-frame-pointers=yes"/,
+  )
+  const arm64Snapshot = buildStep(arm64Build, 'Generate ARM64 V8 snapshot under QEMU')
   assert.match(
     arm64Snapshot,
-    /cargo run --release --manifest-path tools\/snapshot\/Cargo\.toml -- crates\/rari\/snapshots/,
+    /qemu-aarch64 -L "\$ARM64_SYSROOT" target\/aarch64-unknown-linux-gnu\/release\/rari-snapshot/,
+  )
+
+  const arm64Sysroot = buildStep(arm64Build, 'Prepare ARM64 sysroot')
+  assert.match(arm64Sysroot, /docker create --platform linux\/arm64 node:24-trixie-slim/)
+  assert.match(arm64Sysroot, /APT::Architecture=arm64/)
+  assert.match(arm64Sysroot, /Dir::State::status=\$sysroot\/var\/lib\/dpkg\/status/)
+  assert.match(
+    arm64Sysroot,
+    /--download-only --yes install \\\n\s+libfontconfig1-dev:arm64 libgcc-s1:arm64 libstdc\+\+6:arm64/,
+  )
+  assert.match(arm64Sysroot, /package_name="\$\(dpkg-deb -f "\$package" Package\)"/)
+  assert.match(arm64Sysroot, /if \[\[ "\$package_name" == libc6-dev \]\]; then\s+continue\s+fi/)
+  assert.match(arm64Sysroot, /for linker_file in libc\.so libm\.so libc\.a libm\.a/)
+  assert.match(arm64Sysroot, /linker_path="\$sysroot\/usr\/lib\/aarch64-linux-gnu\/\$linker_file"/)
+  assert.match(arm64Sysroot, /if \[\[ -e "\$linker_path" \|\| -L "\$linker_path" \]\]; then/)
+  assert.match(arm64Sysroot, /echo "\$linker_file must resolve from the cross compiler sysroot"/)
+  assert.ok(
+    arm64Sysroot.indexOf('if [[ "$package_name" == libc6-dev ]]') <
+      arm64Sysroot.indexOf('dpkg-deb --extract "$package" "$sysroot"'),
+    'ARM64 libc6-dev must not be extracted into the pkg-config sysroot',
+  )
+  assert.match(arm64Sysroot, /dpkg-deb --extract "\$package" "\$sysroot"/)
+  assert.match(arm64Sysroot, /PKG_CONFIG_SYSROOT_DIR_aarch64_unknown_linux_gnu/)
+  assert.match(arm64Sysroot, /PKG_CONFIG_LIBDIR_aarch64_unknown_linux_gnu/)
+  assert.match(arm64Sysroot, /libfontconfig\.so\.1 libgcc_s\.so\.1 libstdc\+\+\.so\.6/)
+  assert.match(arm64Sysroot, /\$sysroot\/lib\/aarch64-linux-gnu\/\$library/)
+  assert.match(arm64Sysroot, /\$sysroot\/usr\/lib\/aarch64-linux-gnu\/\$library/)
+  assert.doesNotMatch(arm64Sysroot, /dpkg --add-architecture|dpkg --install|dpkg -i/)
+  const fontconfigLinkCheck = buildStep(arm64Build, 'Check ARM64 fontconfig cross-link')
+  assert.match(fontconfigLinkCheck, /PKG_CONFIG_SYSROOT_DIR="\$ARM64_SYSROOT"/)
+  assert.match(fontconfigLinkCheck, /pkg-config --cflags fontconfig/)
+  assert.match(fontconfigLinkCheck, /pkg-config --libs fontconfig/)
+  assert.match(fontconfigLinkCheck, /aarch64-linux-gnu-gcc/)
+  assert.match(fontconfigLinkCheck, /FcInit\(\)/)
+  assert.match(fontconfigLinkCheck, /-Wl,-rpath-link,\$ARM64_SYSROOT\/usr\/lib\/aarch64-linux-gnu/)
+  assert.ok(
+    arm64Build.indexOf(arm64Sysroot) < arm64Build.indexOf(fontconfigLinkCheck) &&
+      arm64Build.indexOf(fontconfigLinkCheck) < arm64Build.indexOf(arm64SnapshotBuild),
+    'Fontconfig must cross-link after sysroot setup and before the ARM64 Cargo builds',
+  )
+  assert.ok(
+    arm64Build.indexOf(arm64Sysroot) < arm64Build.indexOf(arm64Snapshot),
+    'ARM64 sysroot must be prepared before the snapshot generator runs under QEMU',
   )
 
   const arm64BinaryBuild = buildStep(arm64Build, 'Build Linux ARM64 binary')
   assert.match(arm64BinaryBuild, /if: matrix\.arch == 'arm64'/)
-  assert.match(arm64BinaryBuild, /cargo build --release --bin rari --features ext-full,jemalloc/)
-  assert.doesNotMatch(arm64BinaryBuild, /--target/)
+  assert.match(
+    arm64BinaryBuild,
+    /cargo build --release --target aarch64-unknown-linux-gnu --bin rari --features ext-full,jemalloc/,
+  )
+  assert.match(
+    arm64BinaryBuild,
+    /RUSTFLAGS="-C link-arg=-Wl,-rpath-link,\$ARM64_SYSROOT\/usr\/lib\/aarch64-linux-gnu -Cforce-frame-pointers=yes"/,
+  )
+
+  const x64PackageAssets = buildStep(build, 'Prepare and package Linux release assets')
+  assert.match(x64PackageAssets, /x64\)\s+binary=target\/x86_64-unknown-linux-gnu\/release\/rari/)
+  assert.match(x64PackageAssets, /readelf=readelf/)
+  assert.match(x64PackageAssets, /check-glibc-version\.sh "\$release_binary" "\$readelf"/)
 
   const packageAssets = buildStep(arm64Build, 'Prepare and package Linux release assets')
-  assert.match(packageAssets, /arm64\)\s+binary=target\/release\/rari\s+objcopy=objcopy/)
+  assert.match(
+    packageAssets,
+    /arm64\)\s+binary=target\/aarch64-unknown-linux-gnu\/release\/rari\s+objcopy=aarch64-linux-gnu-objcopy/,
+  )
+  assert.match(packageAssets, /file_description="\$\(file -b "\$release_binary"\)"/)
+  assert.match(packageAssets, /readelf=aarch64-linux-gnu-readelf/)
+  assert.match(packageAssets, /check-glibc-version\.sh "\$release_binary" "\$readelf"/)
+  assert.match(packageAssets, /check-arm64-elf\.sh "\$file_description"/)
 
   const x64SmokeTest = buildStep(
     build,
@@ -80,16 +149,33 @@ test('builds each release architecture on its assigned runner and publishes comb
   assert.match(x64SmokeTest, /if: matrix\.arch == 'x64'/)
   assert.match(x64SmokeTest, /docker create --platform linux\/amd64/)
   assert.match(x64SmokeTest, /rari-linux-x64-\$\{VERSION\}\.tgz/)
+  assert.match(x64SmokeTest, /cat \/tmp\/rari-x64-smoke\.log/)
   assert.match(x64SmokeTest, /\/tmp\/rari-package\/bin\/rari --mode production/)
   assert.match(x64SmokeTest, /grep -Fq "Test App Home"/)
 
-  const arm64SmokeTest = buildStep(arm64Build, 'Smoke-test native Linux ARM64 binary')
+  const arm64SmokeTest = buildStep(
+    arm64Build,
+    'Smoke-test packaged Linux ARM64 binary in production rootfs under QEMU',
+  )
   assert.match(arm64SmokeTest, /if: matrix\.arch == 'arm64'/)
-  assert.match(arm64SmokeTest, /target\/release\/rari/)
-  assert.match(arm64SmokeTest, /"\$binary" --version/)
+  assert.match(arm64SmokeTest, /rari-linux-arm64-\$\{VERSION\}\.tgz/)
+  assert.match(arm64SmokeTest, /qemu-aarch64 --version/)
+  assert.match(arm64SmokeTest, /tar -xzf "\$tarball"/)
+  assert.match(arm64SmokeTest, /rootfs="\$ARM64_SYSROOT"/)
+  assert.match(arm64SmokeTest, /qemu-aarch64 -L "\$rootfs" "\$binary" --version/)
+  assert.match(arm64SmokeTest, /qemu-aarch64 -L "\$rootfs" "\$binary" \\\n\s+--mode production/)
+  assert.match(arm64SmokeTest, /curl --fail --silent --show-error http:\/\/127\.0\.0\.1:43819/)
   assert.match(arm64SmokeTest, /--mode production --host 127\.0\.0\.1 --port 43819/)
-  assert.match(arm64SmokeTest, /grep -Fq 'Test App Home'/)
-  assert.doesNotMatch(arm64SmokeTest, /qemu-aarch64-static/)
+  assert.match(arm64SmokeTest, /grep -Fq "Test App Home"/)
+  assert.doesNotMatch(
+    arm64SmokeTest,
+    /docker create|docker export|apt-get|qemu-aarch64-static|qemu-aarch64 -L \/|\/bin\/sh/,
+  )
+  assert.doesNotMatch(
+    arm64Build,
+    /qemu-aarch64-static|docker start|docker exec/,
+    'The ARM64 smoke check must not run an emulated shell inside an ARM64 container',
+  )
 
   const publisher = workflow.slice(
     workflow.indexOf('  publish-release:'),
