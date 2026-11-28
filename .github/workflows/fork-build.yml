@@ -426,20 +426,7 @@ jobs:
           apt-get "${apt_options[@]}" --download-only --yes install \
             libfontconfig1-dev:arm64 libgcc-s1:arm64 libstdc++6:arm64
           shopt -s nullglob
-          for package in "$apt_dir"/archives/*.deb; do
-            package_name="$(dpkg-deb -f "$package" Package)"
-            if [[ "$package_name" == libc6-dev ]]; then
-              continue
-            fi
-            dpkg-deb --extract "$package" "$sysroot"
-          done
-          for linker_file in libc.so libm.so libc.a libm.a; do
-            linker_path="$sysroot/usr/lib/aarch64-linux-gnu/$linker_file"
-            if [[ -e "$linker_path" || -L "$linker_path" ]]; then
-              echo "$linker_file must resolve from the cross compiler sysroot" >&2
-              exit 1
-            fi
-          done
+          bash .github/scripts/prepare-arm64-sysroot.sh "$sysroot" "$apt_dir"/archives/*.deb
           for library in libfontconfig.so.1 libgcc_s.so.1 libstdc++.so.6; do
             if [[ ! -e "$sysroot/lib/aarch64-linux-gnu/$library" && \
               ! -e "$sysroot/usr/lib/aarch64-linux-gnu/$library" ]]; then
@@ -470,8 +457,10 @@ jobs:
           }
           EOF
 
-          read -r -a fontconfig_cflags <<< "$(pkg-config --cflags fontconfig)"
-          read -r -a fontconfig_libs <<< "$(pkg-config --libs fontconfig)"
+          fontconfig_cflags_text="$(pkg-config --cflags fontconfig)"
+          read -r -a fontconfig_cflags <<< "$fontconfig_cflags_text"
+          fontconfig_libs_text="$(pkg-config --libs fontconfig)"
+          read -r -a fontconfig_libs <<< "$fontconfig_libs_text"
           aarch64-linux-gnu-gcc \
             "${fontconfig_cflags[@]}" "$fontconfig_source" \
             "${fontconfig_libs[@]}" \
