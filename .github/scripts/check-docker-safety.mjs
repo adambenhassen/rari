@@ -326,6 +326,12 @@ function shellCommandWordStarts(source) {
     }
 
     if (expectingCommand) {
+      if (skipWrapperArgument) {
+        skipWrapperArgument = false
+        previousEnd = word.end
+        continue
+      }
+
       const value = decodeShellWord(word.value).value
       if (/^[A-Za-z_][A-Za-z0-9_]*=/.test(value) || commandKeywords.has(commandWord(value))) {
         previousEnd = word.end
@@ -334,12 +340,6 @@ function shellCommandWordStarts(source) {
 
       if (commandWrapper && !wrapperOptionsEnded) {
         const option = rawCommandToken(word.value)
-        if (skipWrapperArgument) {
-          skipWrapperArgument = false
-          previousEnd = word.end
-          continue
-        }
-
         if (commandWrapper === 'exec') {
           if (option === '-a') {
             skipWrapperArgument = true
